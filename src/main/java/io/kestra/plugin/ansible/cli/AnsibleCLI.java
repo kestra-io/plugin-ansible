@@ -35,7 +35,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
 @Plugin(
     examples = {
         @Example(
-            title = "Execute list of tasks specified in myplaybook.yml file",
+            title = "Execute a list of Ansible CLI commands to orchestrate tasks defined in the Ansible playbook",
             code = """
             id: ansible
             namespace: dev
@@ -64,7 +64,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput> {
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
 
     @Schema(
-        title = "The commands to run before main list of commands"
+        title = "The commands to run before the main list of commands"
     )
     @PluginProperty(dynamic = true)
     protected List<String> beforeCommands;
