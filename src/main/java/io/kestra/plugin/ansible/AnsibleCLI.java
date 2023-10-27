@@ -1,4 +1,4 @@
-package io.kestra.plugin.ansible.cli;
+package io.kestra.plugin.ansible;
 
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
@@ -35,7 +35,8 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
 @Plugin(
     examples = {
         @Example(
-            title = "Execute a list of Ansible CLI commands to orchestrate tasks defined in the Ansible playbook",
+            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook stored in the Editor using Namespace Files",
+            full = true,
             code = """
             id: ansible
             namespace: dev
@@ -51,13 +52,43 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
                       myplaybook.yml: "{{ read('myplaybook.yml') }}"
             
                   - id: ansible_task
-                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    type: io.kestra.plugin.ansible.AnsibleCLI
                     docker:
                       image: cytopia/ansible:latest-tools
                     commands:
-                      - ansible-playbook -i inventory.ini myplaybook.yml
-            """
-        )
+                      - ansible-playbook -i inventory.ini myplaybook.yml"""
+        ),
+        @Example(
+            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook defined inline in the flow definition",
+            full = true,
+            code = """
+            id: ansible
+            namespace: dev
+            
+            tasks:
+              - id: setup
+                type: io.kestra.core.tasks.flows.WorkingDirectory
+                tasks:
+                  - id: local_files
+                    type: io.kestra.core.tasks.storages.LocalFiles
+                    inputs: 
+                      inventory.ini: |
+                        localhost ansible_connection=local
+                      myplaybook.yml: |
+                        ---
+                        - hosts: localhost
+                          tasks:
+                            - name: Print Hello World
+                              debug:
+                                msg: "Hello, World!"
+            
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.AnsibleCLI
+                    docker:
+                      image: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i inventory.ini myplaybook.yml"""
+        )        
     }
 )
 public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput> {
@@ -97,7 +128,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput> {
     @Override
     public ScriptOutput run(RunContext runContext) throws Exception {
         CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
-            .withWarningOnStdErr(true)
+            .withWarningOnStdErr(false)
             .withRunnerType(RunnerType.DOCKER)
             .withDockerOptions(injectDefaults(docker))
             .withCommands(
