@@ -1,4 +1,4 @@
-package io.kestra.plugin.ansible;
+package io.kestra.plugin.ansible.cli;
 
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
@@ -52,7 +52,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
                       myplaybook.yml: "{{ read('myplaybook.yml') }}"
             
                   - id: ansible_task
-                    type: io.kestra.plugin.ansible.AnsibleCLI
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
                     docker:
                       image: cytopia/ansible:latest-tools
                     commands:
@@ -83,7 +83,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
                                 msg: "Hello, World!"
             
                   - id: ansible_task
-                    type: io.kestra.plugin.ansible.AnsibleCLI
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
                     docker:
                       image: cytopia/ansible:latest-tools
                     commands:
