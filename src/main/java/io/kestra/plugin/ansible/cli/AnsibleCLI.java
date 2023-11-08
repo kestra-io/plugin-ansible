@@ -3,6 +3,8 @@ package io.kestra.plugin.ansible.cli;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.tasks.NamespaceFiles;
+import io.kestra.core.models.tasks.NamespaceFilesInterface;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
@@ -91,7 +93,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
         )        
     }
 )
-public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput> {
+public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, NamespaceFilesInterface {
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
 
     @Schema(
@@ -125,6 +127,8 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput> {
     @Builder.Default
     protected DockerOptions docker = DockerOptions.builder().build();
 
+    private NamespaceFiles namespaceFiles;
+
     @Override
     public ScriptOutput run(RunContext runContext) throws Exception {
         CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
@@ -138,7 +142,8 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput> {
                     runContext.render(this.commands)
                                             )
                          )
-            .withEnv(Optional.ofNullable(this.env).orElse(new HashMap<>()));
+            .withEnv(Optional.ofNullable(this.env).orElse(new HashMap<>()))
+            .withNamespaceFiles(namespaceFiles);
 
         return commandsWrapper.run();
     }
