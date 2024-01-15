@@ -29,12 +29,12 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Execute ansible command"
+    title = "Execute Ansible command."
 )
 @Plugin(
     examples = {
         @Example(
-            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook stored in the Editor using Namespace Files",
+            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook stored in the Editor using [Namespace Files](https://kestra.io/docs/developer-guide/namespace-files).",
             full = true,
             code = """
             id: ansible
@@ -58,7 +58,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
                       - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
         @Example(
-            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook defined inline in the flow definition",
+            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook defined inline in the flow definition.",
             full = true,
             code = """
             id: ansible
@@ -94,13 +94,13 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
 
     @Schema(
-        title = "The commands to run before the main list of commands"
+        title = "The commands to run before the main list of commands."
     )
     @PluginProperty(dynamic = true)
     protected List<String> beforeCommands;
 
     @Schema(
-        title = "The commands to run"
+        title = "The commands to run."
     )
     @NotNull
     @NotEmpty
@@ -117,7 +117,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     protected Map<String, String> env;
 
     @Schema(
-        title = "Docker options when for the `DOCKER` runner",
+        title = "Docker options for the `DOCKER` runner.",
         defaultValue = "{image=" + DEFAULT_IMAGE + ", pullPolicy=ALWAYS}"
     )
     @PluginProperty
