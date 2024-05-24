@@ -42,10 +42,10 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             
             tasks:
               - id: setup
-                type: io.kestra.core.tasks.flows.WorkingDirectory
+                type: io.kestra.plugin.core.flow.WorkingDirectory
                 tasks:
                   - id: local_files
-                    type: io.kestra.core.tasks.storages.LocalFiles
+                    type: io.kestra.plugin.core.storage.LocalFiles
                     inputs:
                       inventory.ini: "{{ read('inventory.ini') }}"
                       myplaybook.yml: "{{ read('myplaybook.yml') }}"
@@ -66,10 +66,10 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             
             tasks:
               - id: setup
-                type: io.kestra.core.tasks.flows.WorkingDirectory
+                type: io.kestra.plugin.core.flow.WorkingDirectory
                 tasks:
                   - id: local_files
-                    type: io.kestra.core.tasks.storages.LocalFiles
+                    type: io.kestra.plugin.core.storage.LocalFiles
                     inputs: 
                       inventory.ini: |
                         localhost ansible_connection=local
