@@ -41,21 +41,15 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             namespace: dev
             
             tasks:
-              - id: setup
-                type: io.kestra.plugin.core.flow.WorkingDirectory
-                tasks:
-                  - id: local_files
-                    type: io.kestra.plugin.core.storage.LocalFiles
-                    inputs:
-                      inventory.ini: "{{ read('inventory.ini') }}"
-                      myplaybook.yml: "{{ read('myplaybook.yml') }}"
-            
-                  - id: ansible_task
-                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                    docker:
-                      image: cytopia/ansible:latest-tools
-                    commands:
-                      - ansible-playbook -i inventory.ini myplaybook.yml"""
+              - id: ansible_task
+                type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                inputFiles:
+                  inventory.ini: "{{ read('inventory.ini') }}"
+                  myplaybook.yml: "{{ read('myplaybook.yml') }}"
+                docker:
+                  image: cytopia/ansible:latest-tools
+                commands:
+                  - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
         @Example(
             title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook defined inline in the flow definition.",
@@ -65,28 +59,22 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             namespace: dev
             
             tasks:
-              - id: setup
-                type: io.kestra.plugin.core.flow.WorkingDirectory
-                tasks:
-                  - id: local_files
-                    type: io.kestra.plugin.core.storage.LocalFiles
-                    inputs: 
-                      inventory.ini: |
-                        localhost ansible_connection=local
-                      myplaybook.yml: |
-                        ---
-                        - hosts: localhost
-                          tasks:
-                            - name: Print Hello World
-                              debug:
-                                msg: "Hello, World!"
-            
-                  - id: ansible_task
-                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                    docker:
-                      image: cytopia/ansible:latest-tools
-                    commands:
-                      - ansible-playbook -i inventory.ini myplaybook.yml"""
+              - id: ansible_task
+                type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                inputFiles: 
+                  inventory.ini: |
+                    localhost ansible_connection=local
+                  myplaybook.yml: |
+                    ---
+                    - hosts: localhost
+                      tasks:
+                        - name: Print Hello World
+                          debug:
+                            msg: "Hello, World!"
+                docker:
+                  image: cytopia/ansible:latest-tools
+                commands:
+                  - ansible-playbook -i inventory.ini myplaybook.yml"""
         )        
     }
 )
