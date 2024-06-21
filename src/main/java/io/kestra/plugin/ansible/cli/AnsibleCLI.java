@@ -38,7 +38,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             full = true,
             code = """
             id: ansible
-            namespace: dev
+            namespace: company.team
             
             tasks:
               - id: ansible_task
@@ -56,7 +56,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             full = true,
             code = """
             id: ansible
-            namespace: dev
+            namespace: company.team
             
             tasks:
               - id: ansible_task
