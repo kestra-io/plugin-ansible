@@ -121,7 +121,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @PluginProperty
     @Builder.Default
     @Valid
-    protected TaskRunner taskRunner = Docker.INSTANCE;
+    protected TaskRunner taskRunner = Docker.instance();
 
     @Schema(title = "The task runner container image, only used if the task runner is container-based.")
     @PluginProperty(dynamic = true)
