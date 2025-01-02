@@ -3,6 +3,7 @@ package io.kestra.plugin.ansible.cli;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.ScriptService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
@@ -42,7 +43,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             code = """
             id: ansible
             namespace: company.team
-            
+
             tasks:
               - id: ansible_task
                 type: io.kestra.plugin.ansible.cli.AnsibleCLI
@@ -60,11 +61,11 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
             code = """
             id: ansible
             namespace: company.team
-            
+
             tasks:
               - id: ansible_task
                 type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                inputFiles: 
+                inputFiles:
                   inventory.ini: |
                     localhost ansible_connection=local
                   myplaybook.yml: |
@@ -78,7 +79,7 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
                   image: cytopia/ansible:latest-tools
                 commands:
                   - ansible-playbook -i inventory.ini myplaybook.yml"""
-        )        
+        )
     }
 )
 public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, NamespaceFilesInterface, InputFilesInterface, OutputFilesInterface {
@@ -87,8 +88,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Schema(
         title = "The commands to run before the main list of commands."
     )
-    @PluginProperty(dynamic = true)
-    protected List<String> beforeCommands;
+    protected Property<List<String>> beforeCommands;
 
     @Schema(
         title = "The commands to run."
@@ -132,10 +132,13 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
 
     private Object inputFiles;
 
-    private List<String> outputFiles;
+    private Property<List<String>> outputFiles;
 
     @Override
     public ScriptOutput run(RunContext runContext) throws Exception {
+        var renderedOutputFiles = runContext.render(this.outputFiles).asList(String.class);
+        var renderedBeforeCommands = runContext.render(this.beforeCommands).asList(String.class);
+
         CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
             .withDockerOptions(injectDefaults(docker))
@@ -144,14 +147,14 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             .withCommands(
                 ScriptService.scriptCommands(
                     List.of("/bin/bash", "-c"),
-                    Optional.ofNullable(this.beforeCommands).map(throwFunction(runContext::render)).orElse(null),
+                    renderedBeforeCommands.isEmpty() ? null : renderedBeforeCommands,
                     runContext.render(this.commands)
                                             )
                          )
             .withEnv(Optional.ofNullable(this.env).orElse(new HashMap<>()))
             .withNamespaceFiles(namespaceFiles)
             .withInputFiles(inputFiles)
-            .withOutputFiles(outputFiles);
+            .withOutputFiles(renderedOutputFiles.isEmpty() ? null : renderedOutputFiles);
 
         return commandsWrapper.run();
     }
@@ -160,7 +163,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
         if (original == null) {
             return null;
         }
-        
+
         var builder = original.toBuilder();
         if (original.getImage() == null) {
             builder.image(DEFAULT_IMAGE);
