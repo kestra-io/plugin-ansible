@@ -37,12 +37,14 @@ class AnsibleCLITest {
                 .entryPoint(Collections.emptyList())
                 .build())
             .env(Map.of("{{ inputs.envKey }}", "{{ inputs.envValue }}"))
+            .beforeCommands(List.of("echo {{ workingDir }}"))
             .commands(List.of(
                 "echo \"::{\\\"outputs\\\":{" +
                     "\\\"customEnv\\\":\\\"$" + envKey + "\\\"" +
                     "}}::\"",
                 "ansible --version",
-                "ansible-galaxy collection list | tr -d ' \n' | xargs -0 -I {} echo '::{\"outputs\":{}}::'"
+                "ansible-galaxy collection list | tr -d ' \n' | xargs -0 -I {} echo '::{\"outputs\":{}}::'",
+                "echo {{ workingDir }}"
             ))
             .build();
 
