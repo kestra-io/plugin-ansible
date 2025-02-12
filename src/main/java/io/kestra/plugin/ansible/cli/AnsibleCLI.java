@@ -85,7 +85,8 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Schema(
         title = "The commands to run before the main list of commands."
     )
-    protected Property<List<String>> beforeCommands;
+    @PluginProperty(dynamic = true)
+    protected List<String> beforeCommands;
 
     @Schema(
         title = "The commands to run."
@@ -134,7 +135,6 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Override
     public ScriptOutput run(RunContext runContext) throws Exception {
         var renderedOutputFiles = runContext.render(this.outputFiles).asList(String.class);
-        var renderedBeforeCommands = runContext.render(this.beforeCommands).asList(String.class);
 
         CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
@@ -144,10 +144,9 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             .withCommands(
                 ScriptService.scriptCommands(
                     List.of("/bin/bash", "-c"),
-                    renderedBeforeCommands.isEmpty() ? null : renderedBeforeCommands,
-                    runContext.render(this.commands)
-                                            )
-                         )
+                    this.beforeCommands,
+                    this.commands)
+            )
             .withEnv(Optional.ofNullable(this.env).orElse(new HashMap<>()))
             .withNamespaceFiles(namespaceFiles)
             .withInputFiles(inputFiles)
