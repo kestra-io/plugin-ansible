@@ -85,16 +85,13 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Schema(
         title = "The commands to run before the main list of commands."
     )
-    @PluginProperty(dynamic = true)
-    protected List<String> beforeCommands;
+    protected Property<List<String>> beforeCommands;
 
     @Schema(
         title = "The commands to run."
     )
     @NotNull
-    @NotEmpty
-    @PluginProperty(dynamic = true)
-    protected List<String> commands;
+    protected Property<List<String>> commands;
 
     @Schema(
         title = "Additional environment variables for the current process."
@@ -141,12 +138,9 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
             .withContainerImage(this.containerImage)
-            .withCommands(
-                ScriptService.scriptCommands(
-                    List.of("/bin/bash", "-c"),
-                    this.beforeCommands,
-                    this.commands)
-            )
+            .withInterpreter(Property.of(List.of("/bin/bash", "-c")))
+            .withBeforeCommands(this.beforeCommands)
+            .withCommands(this.commands)
             .withEnv(Optional.ofNullable(this.env).orElse(new HashMap<>()))
             .withNamespaceFiles(namespaceFiles)
             .withInputFiles(inputFiles)
