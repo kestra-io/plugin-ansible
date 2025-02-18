@@ -1,5 +1,6 @@
 package io.kestra.plugin.ansible.cli;
 
+import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.utils.IdUtils;
@@ -37,15 +38,15 @@ class AnsibleCLITest {
                 .entryPoint(Collections.emptyList())
                 .build())
             .env(Map.of("{{ inputs.envKey }}", "{{ inputs.envValue }}"))
-            .beforeCommands(List.of("echo {{ workingDir }}"))
-            .commands(List.of(
+            .beforeCommands(TestsUtils.propertyFromList(List.of("echo {{ workingDir }}")))
+            .commands(TestsUtils.propertyFromList(List.of(
                 "echo \"::{\\\"outputs\\\":{" +
                     "\\\"customEnv\\\":\\\"$" + envKey + "\\\"" +
                     "}}::\"",
                 "ansible --version",
                 "ansible-galaxy collection list | tr -d ' \n' | xargs -0 -I {} echo '::{\"outputs\":{}}::'",
                 "echo {{ workingDir }}"
-            ))
+            )))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of("envKey", envKey, "envValue", envValue));
