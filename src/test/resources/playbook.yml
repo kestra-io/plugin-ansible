@@ -1,0 +1,36 @@
+---
+- hosts: localhost
+  gather_facts: false
+  vars:
+    text1: "a_variable"
+    text2: "another_variable"
+  tasks:
+    - name: Snake To camel
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      with_items:
+        - "{{text1}}"
+        - "{{text2}}"
+
+    - name: Create file
+      shell: echo "Test output" >> greeting.txt
+
+    - name: Register output file to var
+      shell: cat greeting.txt
+      register: myOutput
+
+    - name: Print return information from the previous task
+      ansible.builtin.debug:
+        var: myOutput
+
+    - name: Prints two lines of messages
+      ansible.builtin.debug:
+        msg:
+          - "Multiline message : line 1"
+          - "Multiline message : line 2"
+
+    - name: Prints two other lines of messages
+      ansible.builtin.debug:
+        msg:
+          - "Multiline message : line 3"
+          - "Multiline message : line 4"
