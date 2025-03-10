@@ -1,11 +1,12 @@
 package io.kestra.plugin.ansible.cli;
 
+import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
-import io.kestra.core.models.tasks.runners.ScriptService;
+import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.RunContext;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
@@ -17,12 +18,15 @@ import jakarta.validation.Valid;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
 
-import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.*;
 
 @SuperBuilder
 @ToString
@@ -81,6 +85,8 @@ import java.util.Optional;
 )
 public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, NamespaceFilesInterface, InputFilesInterface, OutputFilesInterface {
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
+    public static final String ANSIBLE_CFG = "ansible.cfg";
+    public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
 
     @Schema(
         title = "The commands to run before the main list of commands."
@@ -96,11 +102,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Schema(
         title = "Additional environment variables for the current process."
     )
-    @PluginProperty(
-            additionalProperties = String.class,
-            dynamic = true
-    )
-    protected Map<String, String> env;
+    protected Property<Map<String, String>> env;
 
     @Schema(
         title = "Deprecated, use 'taskRunner' instead"
@@ -119,9 +121,34 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     protected TaskRunner<?> taskRunner = Docker.instance();
 
     @Schema(title = "The task runner container image, only used if the task runner is container-based.")
-    @PluginProperty(dynamic = true)
     @Builder.Default
-    protected String containerImage = DEFAULT_IMAGE;
+    protected Property<String> containerImage = Property.of(DEFAULT_IMAGE);
+
+    @Schema(
+        title = "Ansible configuration.",
+        description = """
+        If not provided an ansible.cfg file will be created at the working directory base and will enable a custom callback plugin to output your results to Kestra.
+        If you want to provide your own ansible configuration but still want to use the output callback for Kestra add the following lines to your configuration :
+            [defaults]
+            log_path={{ workingDir }}/log
+            callback_plugins = ./callback_plugins
+            stdout_callback = kestra_logger
+    """
+    )
+    @Builder.Default
+    protected Property<String> ansibleConfig = new Property<>("""
+        [defaults]
+        log_path={{ workingDir }}/log
+        callback_plugins = ./callback_plugins
+        stdout_callback = kestra_logger
+    """);
+
+    @Schema(
+        title = "Output log file.",
+        description = "If true, the ansible log file will be available in the outputs."
+    )
+    @Builder.Default
+    private Property<Boolean> outputLogFile = Property.of(false);
 
     private NamespaceFiles namespaceFiles;
 
@@ -131,22 +158,57 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
 
     @Override
     public ScriptOutput run(RunContext runContext) throws Exception {
-        var renderedOutputFiles = runContext.render(this.outputFiles).asList(String.class);
+        List<String> outputFilesList = new ArrayList<>();
+        outputFilesList.addAll(runContext.render(this.outputFiles).asList(String.class));
+
+        if (Boolean.TRUE.equals(runContext.render(this.outputLogFile).as(Boolean.class).orElseThrow())) {
+            outputFilesList.add("log");
+        }
+
+        var renderedEnvMap = runContext.render(this.env).asMap(String.class, String.class);
 
         CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
-            .withContainerImage(this.containerImage)
+            .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
             .withInterpreter(Property.of(List.of("/bin/bash", "-c")))
             .withBeforeCommands(this.beforeCommands)
             .withCommands(this.commands)
-            .withEnv(Optional.ofNullable(this.env).orElse(new HashMap<>()))
+            .withEnv(renderedEnvMap.isEmpty() ? new HashMap<>() : renderedEnvMap)
             .withNamespaceFiles(namespaceFiles)
-            .withInputFiles(inputFiles)
-            .withOutputFiles(renderedOutputFiles.isEmpty() ? null : renderedOutputFiles);
+            .withEnableOutputDirectory(true)
+            .withOutputFiles(outputFilesList);
+
+        Path workingDir = commandsWrapper.getWorkingDirectory();
+
+        PluginUtilsService.createInputFiles(
+            runContext,
+            workingDir,
+            this.finalInputFiles(runContext, workingDir),
+            this.taskRunner.additionalVars(runContext, commandsWrapper)
+        );
 
         return commandsWrapper.run();
+    }
+
+    protected Map<String, String> finalInputFiles(RunContext runContext, Path workingDir) throws IOException, IllegalVariableEvaluationException {
+        Map<String, String> map = this.inputFiles != null ? new HashMap<>(PluginUtilsService.transformInputFiles(runContext, this.inputFiles)) : new HashMap<>();
+
+        //Add config file if not exists
+        if (map.containsKey(ANSIBLE_CFG)) {
+            runContext.logger().warn("Found an existing  ansible.cfg file. Ignoring creation of a new ansible.cfg file.");
+        } else {
+            String config = runContext.render(this.ansibleConfig).as(String.class, Map.of("workingDir", workingDir)).orElseThrow();
+            URI uri = runContext.storage().putFile(new ByteArrayInputStream(config.getBytes(StandardCharsets.UTF_8)), ANSIBLE_CFG);
+            map.put(ANSIBLE_CFG, uri.toString());
+        }
+
+        //Add python plugin
+        InputStream ansibleCustomLogger = getClass().getClassLoader().getResourceAsStream(PLUGINS_KESTRA_LOGGER_PY);
+        URI pluginUri = runContext.storage().putFile(ansibleCustomLogger, PLUGINS_KESTRA_LOGGER_PY);
+        map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
+        return map;
     }
 
     private DockerOptions injectDefaults(DockerOptions original) {
