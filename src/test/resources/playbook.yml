@@ -5,7 +5,7 @@
     text1: "a_variable"
     text2: "another_variable"
   tasks:
-    - name: Snake To camel
+    - name: Print items
       ansible.builtin.debug:
         msg: "{{ item }}"
       with_items:

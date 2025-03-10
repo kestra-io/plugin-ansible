@@ -80,6 +80,44 @@ import java.util.*;
                   image: cytopia/ansible:latest-tools
                 commands:
                   - ansible-playbook -i inventory.ini myplaybook.yml"""
+        ),
+        @Example(
+            title = "Execute an ansible playbook and use ansible.builtin.debug command to extract outputs.",
+            full = true,
+            code = """
+            id: ansible_playbook_outputs
+            namespace: company.team
+
+            tasks:
+              - id: ansible_playbook_outputs
+                type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                outputLogFile: true
+                inputFiles:
+                  playbook.yml: |
+                    ---
+                    - hosts: localhost
+                      tasks:
+                        - name: Create file
+                          shell: echo "Test output" >> greeting.txt
+
+                        - name: Register output file to var
+                          shell: cat greeting.txt
+                          register: myOutput
+
+                        - name: Print return information from the previous task
+                          ansible.builtin.debug:
+                            var: myOutput
+
+                        - name: Prints two lines of messages
+                          ansible.builtin.debug:
+                            msg:
+                              - "Multiline message : line 1"
+                              - "Multiline message : line 2"
+                docker:
+                  image: cytopia/ansible:latest-tools
+                commands:
+                  - ansible-playbook -i localhost -c local playbook.yml
+            """
         )
     }
 )
