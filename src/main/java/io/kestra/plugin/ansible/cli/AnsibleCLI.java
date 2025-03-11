@@ -15,10 +15,9 @@ import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
 import io.kestra.plugin.scripts.runner.docker.Docker;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-
-import jakarta.validation.constraints.NotNull;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -26,7 +25,10 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 @SuperBuilder
 @ToString
@@ -42,82 +44,82 @@ import java.util.*;
             title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook stored in the Editor using [Namespace Files](https://kestra.io/docs/developer-guide/namespace-files).",
             full = true,
             code = """
-            id: ansible
-            namespace: company.team
+                id: ansible
+                namespace: company.team
 
-            tasks:
-              - id: ansible_task
-                type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                inputFiles:
-                  inventory.ini: "{{ read('inventory.ini') }}"
-                  myplaybook.yml: "{{ read('myplaybook.yml') }}"
-                docker:
-                  image: cytopia/ansible:latest-tools
-                commands:
-                  - ansible-playbook -i inventory.ini myplaybook.yml"""
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    inputFiles:
+                      inventory.ini: "{{ read('inventory.ini') }}"
+                      myplaybook.yml: "{{ read('myplaybook.yml') }}"
+                    docker:
+                      image: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
         @Example(
             title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook defined inline in the flow definition.",
             full = true,
             code = """
-            id: ansible
-            namespace: company.team
+                id: ansible
+                namespace: company.team
 
-            tasks:
-              - id: ansible_task
-                type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                inputFiles:
-                  inventory.ini: |
-                    localhost ansible_connection=local
-                  myplaybook.yml: |
-                    ---
-                    - hosts: localhost
-                      tasks:
-                        - name: Print Hello World
-                          debug:
-                            msg: "Hello, World!"
-                docker:
-                  image: cytopia/ansible:latest-tools
-                commands:
-                  - ansible-playbook -i inventory.ini myplaybook.yml"""
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    inputFiles:
+                      inventory.ini: |
+                        localhost ansible_connection=local
+                      myplaybook.yml: |
+                        ---
+                        - hosts: localhost
+                          tasks:
+                            - name: Print Hello World
+                              debug:
+                                msg: "Hello, World!"
+                    docker:
+                      image: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
         @Example(
             title = "Execute an ansible playbook and use ansible.builtin.debug command to extract outputs.",
             full = true,
             code = """
-            id: ansible_playbook_outputs
-            namespace: company.team
+                id: ansible_playbook_outputs
+                namespace: company.team
 
-            tasks:
-              - id: ansible_playbook_outputs
-                type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                outputLogFile: true
-                inputFiles:
-                  playbook.yml: |
-                    ---
-                    - hosts: localhost
-                      tasks:
-                        - name: Create file
-                          shell: echo "Test output" >> greeting.txt
+                tasks:
+                  - id: ansible_playbook_outputs
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    outputLogFile: true
+                    inputFiles:
+                      playbook.yml: |
+                        ---
+                        - hosts: localhost
+                          tasks:
+                            - name: Create file
+                              shell: echo "Test output" >> greeting.txt
 
-                        - name: Register output file to var
-                          shell: cat greeting.txt
-                          register: myOutput
+                            - name: Register output file to var
+                              shell: cat greeting.txt
+                              register: myOutput
 
-                        - name: Print return information from the previous task
-                          ansible.builtin.debug:
-                            var: myOutput
+                            - name: Print return information from the previous task
+                              ansible.builtin.debug:
+                                var: myOutput
 
-                        - name: Prints two lines of messages
-                          ansible.builtin.debug:
-                            msg:
-                              - "Multiline message : line 1"
-                              - "Multiline message : line 2"
-                docker:
-                  image: cytopia/ansible:latest-tools
-                commands:
-                  - ansible-playbook -i localhost -c local playbook.yml
-            """
+                            - name: Prints two lines of messages
+                              ansible.builtin.debug:
+                                msg:
+                                  - "Multiline message : line 1"
+                                  - "Multiline message : line 2"
+                    docker:
+                      image: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i localhost -c local playbook.yml
+                """
         )
     }
 )
@@ -165,21 +167,21 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Schema(
         title = "Ansible configuration.",
         description = """
-        If not provided an ansible.cfg file will be created at the working directory base and will enable a custom callback plugin to output your results to Kestra.
-        If you want to provide your own ansible configuration but still want to use the output callback for Kestra add the following lines to your configuration :
+            If not provided an ansible.cfg file will be created at the working directory base and will enable a custom callback plugin to output your results to Kestra.
+            If you want to provide your own ansible configuration but still want to use the output callback for Kestra add the following lines to your configuration :
+            ```
             [defaults]
             log_path={{ workingDir }}/log
             callback_plugins = ./callback_plugins
             stdout_callback = kestra_logger
-    """
+            ```"""
     )
     @Builder.Default
     protected Property<String> ansibleConfig = new Property<>("""
         [defaults]
         log_path={{ workingDir }}/log
         callback_plugins = ./callback_plugins
-        stdout_callback = kestra_logger
-    """);
+        stdout_callback = kestra_logger""");
 
     @Schema(
         title = "Output log file.",
