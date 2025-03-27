@@ -113,8 +113,7 @@ import java.util.Map;
                                 msg:
                                   - "Multiline message : line 1"
                                   - "Multiline message : line 2"
-                    docker:
-                      image: cytopia/ansible:latest-tools
+                    containerImage: cytopia/ansible:latest-tools
                     commands:
                       - ansible-playbook -i localhost -c local playbook.yml
                 """
