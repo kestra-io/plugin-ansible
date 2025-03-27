@@ -53,8 +53,7 @@ import java.util.Map;
                     inputFiles:
                       inventory.ini: "{{ read('inventory.ini') }}"
                       myplaybook.yml: "{{ read('myplaybook.yml') }}"
-                    docker:
-                      image: cytopia/ansible:latest-tools
+                    containerImage: cytopia/ansible:latest-tools
                     commands:
                       - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
@@ -78,8 +77,7 @@ import java.util.Map;
                             - name: Print Hello World
                               debug:
                                 msg: "Hello, World!"
-                    docker:
-                      image: cytopia/ansible:latest-tools
+                    containerImage: cytopia/ansible:latest-tools
                     commands:
                       - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
