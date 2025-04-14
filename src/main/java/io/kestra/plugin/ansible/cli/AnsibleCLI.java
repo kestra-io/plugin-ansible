@@ -36,7 +36,7 @@ import java.util.Map;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Execute Ansible command."
+    title = "Execute an Ansible command."
 )
 @Plugin(
     examples = {
@@ -82,7 +82,7 @@ import java.util.Map;
                       - ansible-playbook -i inventory.ini myplaybook.yml"""
         ),
         @Example(
-            title = "Execute an ansible playbook and use ansible.builtin.debug command to extract outputs.",
+            title = "Execute an Ansible playbook and use ansible.builtin.debug command to extract outputs.",
             full = true,
             code = """
                 id: ansible_playbook_outputs
@@ -126,18 +126,18 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
 
     @Schema(
-        title = "The commands to run before the main list of commands."
+        title = "The commands to run before the main list of commands"
     )
     protected Property<List<String>> beforeCommands;
 
     @Schema(
-        title = "The commands to run."
+        title = "The commands to run"
     )
     @NotNull
     protected Property<List<String>> commands;
 
     @Schema(
-        title = "Additional environment variables for the current process."
+        title = "Additional environment variables for the current process"
     )
     protected Property<Map<String, String>> env;
 
@@ -149,7 +149,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     private DockerOptions docker;
 
     @Schema(
-        title = "The task runner to use.",
+        title = "The task runner to use",
         description = "Task runners are provided by plugins, each have their own properties."
     )
     @PluginProperty
@@ -181,7 +181,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
         stdout_callback = kestra_logger""");
 
     @Schema(
-        title = "Output log file.",
+        title = "Output log file",
         description = "If true, the ansible log file will be available in the outputs."
     )
     @Builder.Default
@@ -234,7 +234,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
 
         //Add config file if not exists
         if (map.containsKey(ANSIBLE_CFG)) {
-            runContext.logger().warn("Found an existing  ansible.cfg file. Ignoring creation of a new ansible.cfg file.");
+            runContext.logger().warn("Found an existing ansible.cfg file. Ignoring creation of a new ansible.cfg file.");
         } else {
             String config = runContext.render(this.ansibleConfig).as(String.class, Map.of("workingDir", workingDir)).orElseThrow();
             URI uri = runContext.storage().putFile(new ByteArrayInputStream(config.getBytes(StandardCharsets.UTF_8)), ANSIBLE_CFG);
