@@ -5,6 +5,7 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.storages.StorageInterface;
+import io.kestra.core.tenant.TenantService;
 import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
@@ -73,7 +74,7 @@ class AnsibleCLITest {
                 .entryPoint(Collections.emptyList())
                 .build())
             .inputFiles(Map.of(
-                "playbook.yml", storage.put(null, null, URI.create("/" + IdUtils.create() + ".ion"), this.getClass().getClassLoader().getResourceAsStream("playbook.yml")).toString()
+                "playbook.yml", storage.put(TenantService.MAIN_TENANT, null, URI.create("/" + IdUtils.create() + ".ion"), this.getClass().getClassLoader().getResourceAsStream("playbook.yml")).toString()
             ))
             .commands(new Property<>(JacksonMapper.ofJson().writeValueAsString(List.of(
                 //"ansible --version"
