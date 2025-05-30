@@ -80,7 +80,7 @@ class AnsibleCLITest {
                 //"ansible --version"
                 "ansible-playbook -i localhost -c local playbook.yml"
             ))))
-            .outputLogFile(Property.of(true))
+            .outputLogFile(Property.ofValue(true))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
