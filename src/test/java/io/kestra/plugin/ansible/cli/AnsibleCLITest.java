@@ -44,9 +44,9 @@ class AnsibleCLITest {
                 .image("cytopia/ansible:latest-tools")
                 .entryPoint(Collections.emptyList())
                 .build())
-            .env(new Property<>(JacksonMapper.ofJson().writeValueAsString(Map.of("{{ inputs.envKey }}", "{{ inputs.envValue }}"))))
-            .beforeCommands(new Property<>(JacksonMapper.ofJson().writeValueAsString(List.of("echo {{ workingDir }}"))))
-            .commands(new Property<>(JacksonMapper.ofJson().writeValueAsString(List.of(
+            .env(Property.ofExpression(JacksonMapper.ofJson().writeValueAsString(Map.of("{{ inputs.envKey }}", "{{ inputs.envValue }}"))))
+            .beforeCommands(Property.ofExpression(JacksonMapper.ofJson().writeValueAsString(List.of("echo {{ workingDir }}"))))
+            .commands(Property.ofExpression(JacksonMapper.ofJson().writeValueAsString(List.of(
                 "echo \"::{\\\"outputs\\\":{" +
                     "\\\"customEnv\\\":\\\"$" + envKey + "\\\"" +
                     "}}::\"",
@@ -80,7 +80,7 @@ class AnsibleCLITest {
                 //"ansible --version"
                 "ansible-playbook -i localhost -c local playbook.yml"
             ))))
-            .outputLogFile(Property.of(true))
+            .outputLogFile(Property.ofValue(true))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());

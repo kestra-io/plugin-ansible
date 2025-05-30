@@ -159,7 +159,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
 
     @Schema(title = "The task runner container image, only used if the task runner is container-based.")
     @Builder.Default
-    protected Property<String> containerImage = Property.of(DEFAULT_IMAGE);
+    protected Property<String> containerImage = Property.ofValue(DEFAULT_IMAGE);
 
     @Schema(
         title = "Ansible configuration.",
@@ -174,7 +174,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             ```"""
     )
     @Builder.Default
-    protected Property<String> ansibleConfig = new Property<>("""
+    protected Property<String> ansibleConfig = Property.ofExpression("""
         [defaults]
         log_path={{ workingDir }}/log
         callback_plugins = ./callback_plugins
@@ -185,7 +185,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
         description = "If true, the ansible log file will be available in the outputs."
     )
     @Builder.Default
-    private Property<Boolean> outputLogFile = Property.of(false);
+    private Property<Boolean> outputLogFile = Property.ofValue(false);
 
     private NamespaceFiles namespaceFiles;
 
@@ -209,7 +209,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
-            .withInterpreter(Property.of(List.of("/bin/bash", "-c")))
+            .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
             .withBeforeCommands(this.beforeCommands)
             .withCommands(this.commands)
             .withEnv(renderedEnvMap.isEmpty() ? new HashMap<>() : renderedEnvMap)
