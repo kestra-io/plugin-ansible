@@ -40,7 +40,7 @@ class CallbackModule(CallbackBase):
     CALLBACK_NAME = 'kestra_logger'
 
     def __init__(self):
-        #Define Kestra output list
+        # Define Kestra output list
         self._kestra_outputs = []
 
         self._play = None
@@ -56,6 +56,14 @@ class CallbackModule(CallbackBase):
         self._kestra_outputs.append(dict(result._result))
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
+
+        self._emit_event(
+            event_type="runner_on_failed",
+            status="failed",
+            task_name=result.task_name,
+            host=result._host.get_name(),
+            result=result._result
+        )
 
         host_label = self.host_label(result)
         self._clean_results(result._result, result._task.action)
@@ -83,6 +91,14 @@ class CallbackModule(CallbackBase):
         host_label = self.host_label(result)
 
         self._add_results_to_kestra_outputs(result)
+
+        self._emit_event(
+            event_type="runner_on_ok",
+            status="ok",
+            task_name=result.task_name,
+            host=result._host.get_name(),
+            result=result._result
+        )
 
         if isinstance(result._task, TaskInclude):
             if self._last_task_banner != result._task._uuid:
@@ -117,6 +133,14 @@ class CallbackModule(CallbackBase):
 
     def v2_runner_on_skipped(self, result):
 
+        self._emit_event(
+            event_type="runner_on_skipped",
+            status="skipped",
+            task_name=result.task_name,
+            host=result._host.get_name(),
+            result=result._result
+        )
+
         if self.get_option('display_skipped_hosts'):
 
             self._clean_results(result._result, result._task.action)
@@ -133,6 +157,15 @@ class CallbackModule(CallbackBase):
             self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_runner_on_unreachable(self, result):
+
+        self._emit_event(
+            event_type="runner_on_unreachable",
+            status="unreachable",
+            task_name=result.task_name,
+            host=result._host.get_name(),
+            result=result._result
+        )
+
         if self._last_task_banner != result._task._uuid:
             self._print_task_banner(result._task)
 
@@ -420,3 +453,23 @@ class CallbackModule(CallbackBase):
     def v2_playbook_on_notify(self, handler, host):
         if self._display.verbosity > 1:
             self._display.display("NOTIFIED HANDLER %s for %s" % (handler.get_name(), host), color=C.COLOR_VERBOSE, screen_only=True)
+
+    def _emit_event(self, event_type, status, task_name, host=None, result=None):
+        payload = {
+            "event": event_type,
+            "status": status,
+            "task": task_name,
+        }
+        if host:
+            payload["host"] = host
+        if result:
+            payload["rc"] = result.get("rc")
+            payload["msg"] = result.get("msg")
+            payload["stderr"] = result.get("stderr")
+            payload["stdout"] = result.get("stdout")
+            payload["changed"] = result.get("changed", False)
+            payload["duration"] = result.get("delta")
+
+        # special markers "::" ... "::" to help Kestra capture
+        print("::" + json.dumps({"ansible_event": payload}) + "::", flush=True)
+        sys.stdout.flush()

@@ -9,6 +9,7 @@ import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -24,11 +25,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 @SuperBuilder
 @ToString
@@ -122,8 +125,8 @@ import java.util.Map;
 )
 public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, NamespaceFilesInterface, InputFilesInterface, OutputFilesInterface {
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
-    public static final String ANSIBLE_CFG = "ansible.cfg";
-    public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
+    private static final String ANSIBLE_CFG = "ansible.cfg";
+    private static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
 
     @Schema(
         title = "The commands to run before the main list of commands"
@@ -226,13 +229,31 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             this.taskRunner.additionalVars(runContext, commandsWrapper)
         );
 
-        return commandsWrapper.run();
+        ScriptOutput out = commandsWrapper.run();
+
+        Path logFile = workingDir.resolve("log");
+        if (Files.exists(logFile)) {
+            try (Stream<String> lines = Files.lines(logFile)) {
+                lines.filter(line -> line.startsWith("::") && line.endsWith("::"))
+                    .forEach(line -> {
+                        String json = line.substring(2, line.length() - 2);
+                        try {
+                            Map<String, Object> event = JacksonMapper.toMap(json);
+                            runContext.logger().info("Ansible event: {}", event);
+                        } catch (Exception e) {
+                            runContext.logger().warn("Failed to parse ansible event: {}", json, e);
+                        }
+                    });
+            }
+        }
+
+        return out;
     }
 
     protected Map<String, String> finalInputFiles(RunContext runContext, Path workingDir) throws IOException, IllegalVariableEvaluationException {
         Map<String, String> map = this.inputFiles != null ? new HashMap<>(PluginUtilsService.transformInputFiles(runContext, this.inputFiles)) : new HashMap<>();
 
-        //Add config file if not exists
+        // Add config file if not exists
         if (map.containsKey(ANSIBLE_CFG)) {
             runContext.logger().warn("Found an existing ansible.cfg file. Ignoring creation of a new ansible.cfg file.");
         } else {
@@ -241,7 +262,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             map.put(ANSIBLE_CFG, uri.toString());
         }
 
-        //Add python plugin
+        // Add python plugin
         InputStream ansibleCustomLogger = getClass().getClassLoader().getResourceAsStream(PLUGINS_KESTRA_LOGGER_PY);
         URI pluginUri = runContext.storage().putFile(ansibleCustomLogger, PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
