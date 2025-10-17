@@ -1,15 +1,21 @@
 package io.kestra.plugin.ansible.cli;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
+import io.kestra.core.exceptions.ResourceExpiredException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
+import io.kestra.core.models.tasks.runners.ScriptService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
+import io.kestra.core.models.tasks.runners.TaskRunnerResult;
+import io.kestra.core.runners.FilesService;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.storages.kv.KVValue;
+import io.kestra.core.storages.kv.KVValueAndMetadata;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -27,10 +33,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Stream;
 
 @SuperBuilder
@@ -190,6 +193,15 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     @Builder.Default
     private Property<Boolean> outputLogFile = Property.ofValue(false);
 
+    @Schema(
+        title = "Reuse the same Ansible container across tasks",
+        description = "If true, the container will be created once and reused for all AnsibleCLI tasks in the same flow execution."
+    )
+    @Builder.Default
+    protected Property<Boolean> reuseContainer = Property.ofValue(false);
+
+    private static final String KV_CONTAINER_KEY = "ansible_container_id";
+
     private NamespaceFiles namespaceFiles;
 
     private Object inputFiles;
@@ -229,7 +241,48 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             this.taskRunner.additionalVars(runContext, commandsWrapper)
         );
 
-        ScriptOutput out = commandsWrapper.run();
+        Optional<String> reusedContainerId = Optional.empty();
+        Boolean rReuseContainer = runContext.render(this.reuseContainer).as(Boolean.class).orElse(false);
+        if (rReuseContainer) {
+            reusedContainerId = runContext.namespaceKv(runContext.flowInfo().namespace())
+                .getValue(KV_CONTAINER_KEY)
+                .map(KVValue::value)
+                .map(Object::toString);
+        }
+
+        ScriptOutput out;
+        if (reusedContainerId.isPresent() && this.taskRunner instanceof Docker dockerRunner) {
+            String containerId = reusedContainerId.get();
+            runContext.logger().info("Reusing existing Ansible container: {}", containerId);
+
+            TaskRunnerResult<Docker.DockerTaskRunnerDetailResult> result =
+                dockerRunner.execInContainer(runContext, containerId, commandsWrapper);
+
+            Map<String, URI> outputFiles = new HashMap<>();
+            if (commandsWrapper.getEnableOutputDirectory()) {
+                outputFiles.putAll(ScriptService.uploadOutputFiles(runContext, commandsWrapper.getOutputDirectory()));
+            }
+            if (commandsWrapper.getOutputFiles() != null) {
+                outputFiles.putAll(FilesService.outputFiles(runContext, commandsWrapper.getOutputFiles()));
+            }
+
+            out = ScriptOutput.builder()
+                .exitCode(result.getExitCode())
+                .taskRunner(result.getDetails())
+                .vars(result.getLogConsumer().getOutputs())
+                .stdOutLineCount(result.getLogConsumer().getStdOutCount())
+                .stdErrLineCount(result.getLogConsumer().getStdErrCount())
+                .outputFiles(outputFiles)
+                .build();
+        } else {
+            out = commandsWrapper.run();
+
+            if (rReuseContainer && out.getTaskRunner() instanceof Docker.DockerTaskRunnerDetailResult dockerResult) {
+                runContext.namespaceKv(runContext.flowInfo().namespace())
+                    .put(KV_CONTAINER_KEY, new KVValueAndMetadata(null, dockerResult.getContainerId()));
+                runContext.logger().info("Stored Ansible container ID {} for reuse", dockerResult.getContainerId());
+            }
+        }
 
         Path logFile = workingDir.resolve("log");
         if (Files.exists(logFile)) {
@@ -285,4 +338,20 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
         return builder.build();
     }
 
+    private Optional<String> getReusedContainerId(RunContext runContext) throws IOException, ResourceExpiredException {
+        return runContext.namespaceKv(runContext.flowInfo().namespace())
+            .getValue(KV_CONTAINER_KEY)
+            .map(KVValue::value)
+            .map(Object::toString);
+    }
+
+    private void storeContainerId(RunContext runContext, String containerId) throws IOException {
+        runContext.namespaceKv(runContext.flowInfo().namespace())
+            .put(KV_CONTAINER_KEY, new KVValueAndMetadata(null, containerId));
+    }
+
+    private void clearContainerId(RunContext runContext) throws IOException {
+        runContext.namespaceKv(runContext.flowInfo().namespace())
+            .delete(KV_CONTAINER_KEY);
+    }
 }
