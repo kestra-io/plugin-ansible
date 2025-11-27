@@ -1,0 +1,13 @@
+---
+- name: Hello World Playbook
+  hosts: local_servers
+  gather_facts: false # Disable fact gathering for faster execution (else Ansible adds an extra "TASK [Gathering Facts]")
+
+  tasks:
+    - name: Task 1
+      debug:
+        msg: "Hello from task 1"
+
+    - name: Task 2
+      debug:
+        msg: "Hello from task 2"

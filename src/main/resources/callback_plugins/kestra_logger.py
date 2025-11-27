@@ -19,7 +19,6 @@ DOCUMENTATION = """
       - set as stdout in configuration
 """
 
-
 from ansible import constants as C
 from ansible import context
 from ansible.playbook.task_include import TaskInclude
@@ -40,49 +39,202 @@ class CallbackModule(CallbackBase):
     CALLBACK_NAME = 'kestra_logger'
 
     def __init__(self):
-        #Define Kestra output list
+        # Raw Kestra output list (backward compatible)
         self._kestra_outputs = []
+
+        # Structured outputs
+        self._kestra_playbooks = []
+        self._current_playbook = None
+        self._current_play = None
+        self._current_task = None
+        self._unnamed_task_counter = 0
 
         self._play = None
         self._last_task_banner = None
         self._last_task_name = None
         self._task_type_cache = {}
+
         super(CallbackModule, self).__init__()
 
+    # -------------------------------------------------------------------------
+    # Kestra serialization helpers
+    # -------------------------------------------------------------------------
+
     def _log_kestra_outputs(self):
-        print("::" + json.dumps({"outputs": {"outputs": self._kestra_outputs}}) + "::")
+        """
+        Final payload printed to stdout for Kestra parsing.
+        We must put structured outputs under "outputs"
+        because Kestra only reads that key.
+        """
+        payload = {
+            "outputs": {
+                "outputs": self._kestra_outputs,
+                "playbooks": self._kestra_playbooks
+            }
+        }
+        print("::" + json.dumps(payload) + "::")
 
     def _add_results_to_kestra_outputs(self, result):
         self._kestra_outputs.append(dict(result._result))
 
-    def v2_runner_on_failed(self, result, ignore_errors=False):
+    # -------------------------------------------------------------------------
+    # Structured model builders
+    # -------------------------------------------------------------------------
 
-        host_label = self.host_label(result)
-        self._clean_results(result._result, result._task.action)
+    def _start_playbook_if_needed(self):
+        """
+        Ensure a current playbook container exists.
+        No index/command metadata; one container per ansible-playbook run.
+        """
+        if self._current_playbook is not None:
+            return
 
-        if self._last_task_banner != result._task._uuid:
-            self._print_task_banner(result._task)
+        self._current_playbook = {
+            "plays": []
+        }
+        self._kestra_playbooks.append(self._current_playbook)
 
-        self._handle_exception(result._result, use_stderr=self.get_option('display_failed_stderr'))
-        self._handle_warnings(result._result)
+    def _start_play(self, play):
+        self._start_playbook_if_needed()
 
-        if result._task.loop and 'results' in result._result:
-            self._process_items(result)
+        name = play.get_name().strip()
+        if not name:
+            name = "unnamed_play"
 
+        self._current_play = {
+            "name": name,
+            "tasks": []
+        }
+        self._current_playbook["plays"].append(self._current_play)
+
+    def _start_task(self, task):
+        """
+        Create a task entry inside the current play.
+        If task name is empty, fallback to action or unnamed_task_<n>.
+        """
+        if self._current_play is None:
+            # Safety: no play yet (shouldn't happen with playbooks, but avoid crash)
+            self._start_playbook_if_needed()
+            self._current_play = {
+                "name": "implicit_play",
+                "tasks": []
+            }
+            self._current_playbook["plays"].append(self._current_play)
+
+        name = task.get_name().strip()
+        if not name:
+            # fallback to action if possible, else unnamed_task_<n>
+            action = getattr(task, "action", None)
+            if action:
+                name = str(action)
+            else:
+                self._unnamed_task_counter += 1
+                name = f"unnamed_task_{self._unnamed_task_counter}"
+
+        task_entry = {
+            "name": name,
+            "hosts": []
+        }
+
+        self._current_task = task_entry
+        self._current_play["tasks"].append(task_entry)
+
+    def _add_host_result(self, result, status):
+        """
+        Add per-host result under current task (structured),
+        and also append to raw outputs (compat).
+        """
+        # raw compat
+        self._add_results_to_kestra_outputs(result)
+
+        # structured
+        if self._current_task is None:
+            # if for some reason task_start wasn't seen, create implicit task
+            self._start_task(result._task)
+
+        host_name = result._host.get_name() if result._host else "unknown_host"
+        host_result = {
+            "host": host_name,
+            "status": status,
+            "result": dict(result._result)  # loops already come as list in _result
+        }
+        self._current_task["hosts"].append(host_result)
+
+    # -------------------------------------------------------------------------
+    # Ansible callbacks
+    # -------------------------------------------------------------------------
+
+    def v2_playbook_on_start(self, playbook):
+        """
+        Called when ansible-playbook starts.
+        We create a playbook container on first call.
+        """
+        self._start_playbook_if_needed()
+
+        if self._display.verbosity > 1:
+            from os.path import basename
+            self._display.banner("PLAYBOOK: %s" % basename(playbook._file_name))
+
+        # show CLI arguments
+        if self._display.verbosity > 3:
+            if context.CLIARGS.get('args'):
+                self._display.display(
+                    'Positional arguments: %s' % ' '.join(context.CLIARGS['args']),
+                    color=C.COLOR_VERBOSE,
+                    screen_only=True
+                )
+
+            for argument in (a for a in context.CLIARGS if a != 'args'):
+                val = context.CLIARGS[argument]
+                if val:
+                    self._display.display('%s: %s' % (argument, val), color=C.COLOR_VERBOSE, screen_only=True)
+
+        if context.CLIARGS['check'] and self.get_option('check_mode_markers'):
+            self._display.banner("DRY RUN")
+
+    def v2_playbook_on_play_start(self, play):
+        """
+        Start a new play inside current playbook.
+        """
+        self._play = play
+        self._start_play(play)
+
+        name = play.get_name().strip()
+        if play.check_mode and self.get_option('check_mode_markers'):
+            checkmsg = " [CHECK MODE]"
         else:
-            if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
-                self._print_task_path(result._task)
-            msg = "fatal: [%s]: FAILED! => %s" % (host_label, self._dump_results(result._result))
-            self._display.display(msg, color=C.COLOR_ERROR, stderr=self.get_option('display_failed_stderr'))
+            checkmsg = ""
 
-        if ignore_errors:
-            self._display.display("...ignoring", color=C.COLOR_SKIP)
+        if not name:
+            msg = u"PLAY%s" % checkmsg
+        else:
+            msg = u"PLAY [%s]%s" % (name, checkmsg)
+
+        self._display.banner(msg)
+
+    def v2_playbook_on_task_start(self, task, is_conditional):
+        self._task_start(task, prefix='TASK')
+        # create structured task entry
+        self._start_task(task)
+
+    def _task_start(self, task, prefix=None):
+        if prefix is not None:
+            self._task_type_cache[task._uuid] = prefix
+
+        if self._play.strategy in add_internal_fqcns(('free', 'host_pinned')):
+            self._last_task_name = None
+        else:
+            self._last_task_name = task.get_name().strip()
+
+            if self.get_option('display_skipped_hosts') and self.get_option('display_ok_hosts'):
+                self._print_task_banner(task)
 
     def v2_runner_on_ok(self, result):
 
         host_label = self.host_label(result)
 
-        self._add_results_to_kestra_outputs(result)
+        # structured + raw
+        self._add_host_result(result, "ok")
 
         if isinstance(result._task, TaskInclude):
             if self._last_task_banner != result._task._uuid:
@@ -115,10 +267,35 @@ class CallbackModule(CallbackBase):
                 msg += " => %s" % (self._dump_results(result._result),)
             self._display.display(msg, color=color)
 
+    def v2_runner_on_failed(self, result, ignore_errors=False):
+        host_label = self.host_label(result)
+        self._clean_results(result._result, result._task.action)
+
+        # structured + raw
+        self._add_host_result(result, "failed")
+
+        if self._last_task_banner != result._task._uuid:
+            self._print_task_banner(result._task)
+
+        self._handle_exception(result._result, use_stderr=self.get_option('display_failed_stderr'))
+        self._handle_warnings(result._result)
+
+        if result._task.loop and 'results' in result._result:
+            self._process_items(result)
+        else:
+            if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
+                self._print_task_path(result._task)
+            msg = "fatal: [%s]: FAILED! => %s" % (host_label, self._dump_results(result._result))
+            self._display.display(msg, color=C.COLOR_ERROR, stderr=self.get_option('display_failed_stderr'))
+
+        if ignore_errors:
+            self._display.display("...ignoring", color=C.COLOR_SKIP)
+
     def v2_runner_on_skipped(self, result):
+        # structured + raw (even if not displayed)
+        self._add_host_result(result, "skipped")
 
         if self.get_option('display_skipped_hosts'):
-
             self._clean_results(result._result, result._task.action)
 
             if self._last_task_banner != result._task._uuid:
@@ -133,6 +310,9 @@ class CallbackModule(CallbackBase):
             self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_runner_on_unreachable(self, result):
+        # structured + raw
+        self._add_host_result(result, "unreachable")
+
         if self._last_task_banner != result._task._uuid:
             self._print_task_banner(result._task)
 
@@ -143,34 +323,67 @@ class CallbackModule(CallbackBase):
         if result._task.ignore_unreachable:
             self._display.display("...ignoring", color=C.COLOR_SKIP)
 
+    def v2_playbook_on_stats(self, stats):
+        self._display.banner("PLAY RECAP")
+
+        # Log outputs to Kestra (raw + structured)
+        self._log_kestra_outputs()
+
+        hosts = sorted(stats.processed.keys())
+        for h in hosts:
+            t = stats.summarize(h)
+
+            self._display.display(
+                u"%s : %s %s %s %s %s %s %s" % (
+                    hostcolor(h, t),
+                    colorize(u'ok', t['ok'], C.COLOR_OK),
+                    colorize(u'changed', t['changed'], C.COLOR_CHANGED),
+                    colorize(u'unreachable', t['unreachable'], C.COLOR_UNREACHABLE),
+                    colorize(u'failed', t['failures'], C.COLOR_ERROR),
+                    colorize(u'skipped', t['skipped'], C.COLOR_SKIP),
+                    colorize(u'rescued', t['rescued'], C.COLOR_OK),
+                    colorize(u'ignored', t['ignored'], C.COLOR_WARN),
+                ),
+                screen_only=True
+            )
+
+            self._display.display(
+                u"%s : %s %s %s %s %s %s %s" % (
+                    hostcolor(h, t, False),
+                    colorize(u'ok', t['ok'], None),
+                    colorize(u'changed', t['changed'], None),
+                    colorize(u'unreachable', t['unreachable'], None),
+                    colorize(u'failed', t['failures'], None),
+                    colorize(u'skipped', t['skipped'], None),
+                    colorize(u'rescued', t['rescued'], None),
+                    colorize(u'ignored', t['ignored'], None),
+                ),
+                log_only=True
+            )
+
+        self._display.display("", screen_only=True)
+
+        if stats.custom and self.get_option('show_custom_stats'):
+            self._display.banner("CUSTOM STATS: ")
+            for k in sorted(stats.custom.keys()):
+                if k == '_run':
+                    continue
+                self._display.display('\t%s: %s' % (k, self._dump_results(stats.custom[k], indent=1).replace('\n', '')))
+
+            if '_run' in stats.custom:
+                self._display.display("", screen_only=True)
+                self._display.display('\tRUN: %s' % self._dump_results(stats.custom['_run'], indent=1).replace('\n', ''))
+            self._display.display("", screen_only=True)
+
+        if context.CLIARGS['check'] and self.get_option('check_mode_markers'):
+            self._display.banner("DRY RUN")
+
+    # --- le reste du fichier est inchangé ---
     def v2_playbook_on_no_hosts_matched(self):
         self._display.display("skipping: no hosts matched", color=C.COLOR_SKIP)
 
     def v2_playbook_on_no_hosts_remaining(self):
         self._display.banner("NO MORE HOSTS LEFT")
-
-    def v2_playbook_on_task_start(self, task, is_conditional):
-        self._task_start(task, prefix='TASK')
-
-    def _task_start(self, task, prefix=None):
-        # Cache output prefix for task if provided
-        # This is needed to properly display 'RUNNING HANDLER' and similar
-        # when hiding skipped/ok task results
-        if prefix is not None:
-            self._task_type_cache[task._uuid] = prefix
-
-        # Preserve task name, as all vars may not be available for templating
-        # when we need it later
-        if self._play.strategy in add_internal_fqcns(('free', 'host_pinned')):
-            # Explicitly set to None for strategy free/host_pinned to account for any cached
-            # task title from a previous non-free play
-            self._last_task_name = None
-        else:
-            self._last_task_name = task.get_name().strip()
-
-            # Display the task banner immediately if we're not doing any filtering based on task result
-            if self.get_option('display_skipped_hosts') and self.get_option('display_ok_hosts'):
-                self._print_task_banner(task)
 
     def _print_task_banner(self, task):
         # args can be specified as no_log in several places: in the task or in
@@ -214,21 +427,6 @@ class CallbackModule(CallbackBase):
         if self.get_option('show_per_host_start'):
             self._display.display(" [started %s on %s]" % (task, host), color=C.COLOR_OK)
 
-    def v2_playbook_on_play_start(self, play):
-        name = play.get_name().strip()
-        if play.check_mode and self.get_option('check_mode_markers'):
-            checkmsg = " [CHECK MODE]"
-        else:
-            checkmsg = ""
-        if not name:
-            msg = u"PLAY%s" % checkmsg
-        else:
-            msg = u"PLAY [%s]%s" % (name, checkmsg)
-
-        self._play = play
-
-        self._display.banner(msg)
-
     def v2_on_file_diff(self, result):
         if result._task.loop and 'results' in result._result:
             for res in result._result['results']:
@@ -246,7 +444,6 @@ class CallbackModule(CallbackBase):
                 self._display.display(diff)
 
     def v2_runner_item_on_ok(self, result):
-
         host_label = self.host_label(result)
         if isinstance(result._task, TaskInclude):
             return
@@ -306,88 +503,13 @@ class CallbackModule(CallbackBase):
             msg += " => (item=%s)" % label
         self._display.display(msg, color=C.COLOR_INCLUDED)
 
-    def v2_playbook_on_stats(self, stats):
-        self._display.banner("PLAY RECAP")
-
-        #Log outputs to Kestra
-        self._log_kestra_outputs()
-
-        hosts = sorted(stats.processed.keys())
-        for h in hosts:
-            t = stats.summarize(h)
-
-            self._display.display(
-                u"%s : %s %s %s %s %s %s %s" % (
-                    hostcolor(h, t),
-                    colorize(u'ok', t['ok'], C.COLOR_OK),
-                    colorize(u'changed', t['changed'], C.COLOR_CHANGED),
-                    colorize(u'unreachable', t['unreachable'], C.COLOR_UNREACHABLE),
-                    colorize(u'failed', t['failures'], C.COLOR_ERROR),
-                    colorize(u'skipped', t['skipped'], C.COLOR_SKIP),
-                    colorize(u'rescued', t['rescued'], C.COLOR_OK),
-                    colorize(u'ignored', t['ignored'], C.COLOR_WARN),
-                ),
-                screen_only=True
-            )
-
-            self._display.display(
-                u"%s : %s %s %s %s %s %s %s" % (
-                    hostcolor(h, t, False),
-                    colorize(u'ok', t['ok'], None),
-                    colorize(u'changed', t['changed'], None),
-                    colorize(u'unreachable', t['unreachable'], None),
-                    colorize(u'failed', t['failures'], None),
-                    colorize(u'skipped', t['skipped'], None),
-                    colorize(u'rescued', t['rescued'], None),
-                    colorize(u'ignored', t['ignored'], None),
-                ),
-                log_only=True
-            )
-
-        self._display.display("", screen_only=True)
-
-        # print custom stats if required
-        if stats.custom and self.get_option('show_custom_stats'):
-            self._display.banner("CUSTOM STATS: ")
-            # per host
-            # TODO: come up with 'pretty format'
-            for k in sorted(stats.custom.keys()):
-                if k == '_run':
-                    continue
-                self._display.display('\t%s: %s' % (k, self._dump_results(stats.custom[k], indent=1).replace('\n', '')))
-
-            # print per run custom stats
-            if '_run' in stats.custom:
-                self._display.display("", screen_only=True)
-                self._display.display('\tRUN: %s' % self._dump_results(stats.custom['_run'], indent=1).replace('\n', ''))
-            self._display.display("", screen_only=True)
-
-        if context.CLIARGS['check'] and self.get_option('check_mode_markers'):
-            self._display.banner("DRY RUN")
-
-    def v2_playbook_on_start(self, playbook):
-        if self._display.verbosity > 1:
-            from os.path import basename
-            self._display.banner("PLAYBOOK: %s" % basename(playbook._file_name))
-
-        # show CLI arguments
-        if self._display.verbosity > 3:
-            if context.CLIARGS.get('args'):
-                self._display.display('Positional arguments: %s' % ' '.join(context.CLIARGS['args']),
-                                      color=C.COLOR_VERBOSE, screen_only=True)
-
-            for argument in (a for a in context.CLIARGS if a != 'args'):
-                val = context.CLIARGS[argument]
-                if val:
-                    self._display.display('%s: %s' % (argument, val), color=C.COLOR_VERBOSE, screen_only=True)
-
-        if context.CLIARGS['check'] and self.get_option('check_mode_markers'):
-            self._display.banner("DRY RUN")
-
     def v2_runner_retry(self, result):
         task_name = result.task_name or result._task
         host_label = self.host_label(result)
-        msg = "FAILED - RETRYING: [%s]: %s (%d retries left)." % (host_label, task_name, result._result['retries'] - result._result['attempts'])
+        msg = "FAILED - RETRYING: [%s]: %s (%d retries left)." % (
+            host_label, task_name,
+            result._result['retries'] - result._result['attempts']
+        )
         if self._run_is_verbose(result, verbosity=2):
             msg += "Result was: %s" % self._dump_results(result._result)
         self._display.display(msg, color=C.COLOR_DEBUG)
@@ -419,4 +541,8 @@ class CallbackModule(CallbackBase):
 
     def v2_playbook_on_notify(self, handler, host):
         if self._display.verbosity > 1:
-            self._display.display("NOTIFIED HANDLER %s for %s" % (handler.get_name(), host), color=C.COLOR_VERBOSE, screen_only=True)
+            self._display.display(
+                "NOTIFIED HANDLER %s for %s" % (handler.get_name(), host),
+                color=C.COLOR_VERBOSE,
+                screen_only=True
+            )
