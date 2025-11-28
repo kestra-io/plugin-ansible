@@ -9,6 +9,7 @@ import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -36,7 +37,7 @@ import java.util.Map;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Execute an Ansible command."
+    title = "Execute Ansible commands."
 )
 @Plugin(
     examples = {
@@ -55,7 +56,8 @@ import java.util.Map;
                       myplaybook.yml: "{{ read('myplaybook.yml') }}"
                     containerImage: cytopia/ansible:latest-tools
                     commands:
-                      - ansible-playbook -i inventory.ini myplaybook.yml"""
+                      - ansible-playbook -i inventory.ini myplaybook.yml
+                """
         ),
         @Example(
             title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook defined inline in the flow definition.",
@@ -79,7 +81,8 @@ import java.util.Map;
                                 msg: "Hello, World!"
                     containerImage: cytopia/ansible:latest-tools
                     commands:
-                      - ansible-playbook -i inventory.ini myplaybook.yml"""
+                      - ansible-playbook -i inventory.ini myplaybook.yml
+                """
         ),
         @Example(
             title = "Execute an Ansible playbook and use ansible.builtin.debug command to extract outputs.",
@@ -120,7 +123,7 @@ import java.util.Map;
         )
     }
 )
-public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, NamespaceFilesInterface, InputFilesInterface, OutputFilesInterface {
+public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleOutput>, NamespaceFilesInterface, InputFilesInterface, OutputFilesInterface {
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
     public static final String ANSIBLE_CFG = "ansible.cfg";
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
@@ -194,7 +197,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
     private Property<List<String>> outputFiles;
 
     @Override
-    public ScriptOutput run(RunContext runContext) throws Exception {
+    public AnsibleOutput run(RunContext runContext) throws Exception {
         List<String> outputFilesList = new ArrayList<>();
         outputFilesList.addAll(runContext.render(this.outputFiles).asList(String.class));
 
@@ -226,13 +229,25 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             this.taskRunner.additionalVars(runContext, commandsWrapper)
         );
 
-        return commandsWrapper.run();
+        ScriptOutput base = commandsWrapper.run();
+
+        List<AnsibleOutput.PlaybookOutput> playbooks = extractPlaybooks(base.getVars());
+
+        return AnsibleOutput.builder()
+            .vars(base.getVars())
+            .exitCode(base.getExitCode())
+            .outputFiles(base.getOutputFiles())
+            .stdOutLineCount(base.getStdOutLineCount())
+            .stdErrLineCount(base.getStdErrLineCount())
+            .taskRunner(base.getTaskRunner())
+            .playbooks(playbooks)
+            .build();
     }
 
     protected Map<String, String> finalInputFiles(RunContext runContext, Path workingDir) throws IOException, IllegalVariableEvaluationException {
         Map<String, String> map = this.inputFiles != null ? new HashMap<>(PluginUtilsService.transformInputFiles(runContext, this.inputFiles)) : new HashMap<>();
 
-        //Add config file if not exists
+        // Add config file if not exists
         if (map.containsKey(ANSIBLE_CFG)) {
             runContext.logger().warn("Found an existing ansible.cfg file. Ignoring creation of a new ansible.cfg file.");
         } else {
@@ -241,7 +256,7 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
             map.put(ANSIBLE_CFG, uri.toString());
         }
 
-        //Add python plugin
+        // Add python plugin
         InputStream ansibleCustomLogger = getClass().getClassLoader().getResourceAsStream(PLUGINS_KESTRA_LOGGER_PY);
         URI pluginUri = runContext.storage().putFile(ansibleCustomLogger, PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
@@ -264,4 +279,110 @@ public class AnsibleCLI extends Task implements RunnableTask<ScriptOutput>, Name
         return builder.build();
     }
 
+    @SuppressWarnings("unchecked")
+    private List<AnsibleOutput.PlaybookOutput> extractPlaybooks(Map<String, Object> vars) {
+        if (vars == null) {
+            return List.of();
+        }
+
+        Object maybePlaybooks = vars.get("playbooks");
+        if (!(maybePlaybooks instanceof List<?> list)) {
+            return List.of();
+        }
+
+        return JacksonMapper.ofJson().convertValue(
+            list,
+            JacksonMapper.ofJson().getTypeFactory()
+                .constructCollectionType(List.class, AnsibleOutput.PlaybookOutput.class)
+        );
+    }
+
+    @SuperBuilder
+    @Getter
+    public static class AnsibleOutput extends ScriptOutput {
+
+        @Schema(
+            title = "Structured outputs by playbook command, play, task, and host.",
+            description = "Each item corresponds to one ansible-playbook command execution."
+        )
+        @NotNull
+        private List<PlaybookOutput> playbooks;
+
+        @Builder
+        @Getter
+        @NoArgsConstructor
+        @AllArgsConstructor
+        public static class PlaybookOutput {
+            @Schema(
+                title = "Plays executed in this playbook."
+            )
+            private List<PlayOutput> plays;
+        }
+
+        @Builder
+        @Getter
+        @NoArgsConstructor
+        @AllArgsConstructor
+        public static class PlayOutput {
+            @Schema(
+                title = "Play name.",
+                description = "If missing in Ansible (not mandatory, so possible), a fallback name can be used.",
+                example = "Hello World Playbook"
+            )
+            private String name;
+
+            @Schema(
+                title = "Tasks executed in this play. Index based not name based as not mandatory in Ansible.",
+                description = "A play can have multiple tasks; each task yields one result set by host."
+            )
+            private List<TaskOutput> tasks;
+        }
+
+        @Builder
+        @Getter
+        @NoArgsConstructor
+        @AllArgsConstructor
+        public static class TaskOutput {
+            @Schema(
+                title = "Task name.",
+                description = "If missing in Ansible (not mandatory, so possible), fallback to action or 'unnamed_task_<n>'.",
+                example = "Task 1"
+            )
+            private String name;
+
+            @Schema(
+                title = "Per-host results for this task.",
+                description = "A task can target multiple hosts; each host yields one result event."
+            )
+            private List<HostResult> hosts;
+        }
+
+        @Builder
+        @Getter
+        @NoArgsConstructor
+        @AllArgsConstructor
+        public static class HostResult {
+            @Schema(
+                title = "Host name from inventory.",
+                example = "localhost1"
+            )
+            private String host;
+
+            @Schema(
+                title = "Execution status.",
+                description = "Typical values: ok, failed, skipped, unreachable.",
+                example = "ok"
+            )
+            private String status;
+
+            @Schema(
+                title = "Raw Ansible result payload for this host.",
+                description = """
+                    Arbitrary structure directly from Ansible.
+                    If the task uses loops, Ansible already returns a list in this object.
+                    """
+            )
+            private Object result;
+        }
+    }
 }
