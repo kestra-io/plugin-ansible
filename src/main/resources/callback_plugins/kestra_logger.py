@@ -204,24 +204,24 @@ class CallbackModule(CallbackBase):
             }
             self._current_playbook["plays"].append(self._current_play)
 
-        name = task.get_name().strip()
-        if not name:
+        task_name = task.get_name().strip()
+        if not task_name:
             action = getattr(task, "action", None)
             if action:
-                name = str(action)
+                task_name = str(action)
             else:
                 self._unnamed_task_counter += 1
-                name = f"unnamed_task_{self._unnamed_task_counter}"
+                task_name = f"unnamed_task_{self._unnamed_task_counter}"
 
         started_at_dt = datetime.now(timezone.utc)
         self._current_task_started_at = started_at_dt
 
         play_name = self._current_play.get("name", "implicit_play")
-        uid = f"play:{play_name}|task:{name}"
+        uid = f"{play_name} | {task_name}"
 
         task_entry = {
             "uid": uid,
-            "name": name,
+            "name": task_name,
             "startedAt": started_at_dt.isoformat().replace("+00:00", "Z"),
             "endedAt": None,
             "hosts": []

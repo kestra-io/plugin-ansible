@@ -11,6 +11,7 @@ import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
+import io.kestra.core.models.tasks.runners.TaskRunnerDetailResult;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
@@ -30,7 +31,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -218,49 +221,165 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public AnsibleOutput run(RunContext runContext) throws Exception {
         List<String> outputFilesList = new ArrayList<>(runContext.render(this.outputFiles).asList(String.class));
 
-        if (runContext.render(this.outputLogFile).as(Boolean.class).orElse(false)) {
+        boolean wantLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
+        if (wantLogFile) {
             outputFilesList.add("log");
         }
 
         var rEnv = runContext.render(this.env).asMap(String.class, String.class);
 
-        CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
+        // We want to create input files once and reuse the same working dir for all commands
+        CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
             .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
-            .withBeforeCommands(this.beforeCommands)
-            .withCommands(this.commands)
             .withEnv(rEnv.isEmpty() ? new HashMap<>() : rEnv)
             .withNamespaceFiles(namespaceFiles)
             .withEnableOutputDirectory(true)
             .withOutputFiles(outputFilesList);
 
-        Path workingDir = commandsWrapper.getWorkingDirectory();
+        Path workingDir = baseWrapper.getWorkingDirectory();
+
+        Map<String, Object> extraVars = new HashMap<>();
+        extraVars.put("workingDir", workingDir);
+        Map<String, Object> additionalVars = this.taskRunner.additionalVars(runContext, baseWrapper);
+        extraVars.putAll(additionalVars);
 
         PluginUtilsService.createInputFiles(
             runContext,
             workingDir,
             this.finalInputFiles(runContext, workingDir),
-            this.taskRunner.additionalVars(runContext, commandsWrapper)
+            additionalVars
         );
 
-        ScriptOutput base = commandsWrapper.run();
+        List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
 
-        List<AnsibleOutput.PlaybookOutput> playbooks = extractPlaybooks(base.getVars());
+        // run each ansible-playbook separately and merge outputs
+        Map<String, Object> mergedVars = new HashMap<>();
+        List<AnsibleOutput.PlaybookOutput> mergedPlaybooks = new ArrayList<>();
+        List<Map<String, Object>> mergedRawOutputs = new ArrayList<>();
 
-        // >>> minimal UI timeline support: emit dynamic worker results
-        emitDynamicTaskRuns(runContext, playbooks);
+        int mergedExitCode = 0;
+        int mergedStdOutCount = 0;
+        int mergedStdErrCount = 0;
+
+        Map<String, URI> lastOutputFiles = Map.of();
+        TaskRunnerDetailResult lastTaskRunner = null;
+
+        boolean beforeDone = false;
+
+        // Collect per-command log paths (because Ansible truncates log_path each run)
+        boolean multiCmd = rCommands.size() > 1;
+        List<Path> perCommandLogs = new ArrayList<>();
+
+        int idx = 0;
+        for (String cmd : rCommands) {
+            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
+
+            // If multiple commands and outputLogFile enabled,
+            // override ANSIBLE_LOG_PATH so each run writes a different file.
+            if (wantLogFile && multiCmd) {
+                Path logPath = workingDir.resolve("log-" + idx);
+                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
+                perCommandLogs.add(logPath);
+            }
+
+            CommandsWrapper commandWrapper = baseWrapper
+                .withEnv(envForRun)
+                // run beforeCommands only once, before the first command (rendered with extra vars)
+                .withBeforeCommands(beforeDone ? null : Property.ofValue(
+                    runContext.render(this.beforeCommands).asList(String.class, extraVars)
+                ))
+                // single command per run so Kestra doesn't overwrite outputs
+                .withCommands(Property.ofValue(List.of(cmd)));
+
+            ScriptOutput out = commandWrapper.run();
+
+            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
+            mergedStdOutCount += out.getStdOutLineCount();
+            mergedStdErrCount += out.getStdErrLineCount();
+
+            lastOutputFiles = out.getOutputFiles();
+            lastTaskRunner = out.getTaskRunner();
+
+            Map<String, Object> vars = out.getVars();
+            if (vars != null) {
+                // merge raw outputs (backward compatible)
+                Object maybeOutputs = vars.get("outputs");
+                if (maybeOutputs instanceof List<?> list) {
+                    for (Object o : list) {
+                        if (o instanceof Map<?, ?> m) {
+                            // noinspection unchecked
+                            mergedRawOutputs.add((Map<String, Object>) m);
+                        }
+                    }
+                }
+
+                // merge structured playbooks
+                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
+                if (pbs != null && !pbs.isEmpty()) {
+                    mergedPlaybooks.addAll(pbs);
+                }
+
+                // merge remaining vars (last-wins except lists above)
+                for (Map.Entry<String, Object> e : vars.entrySet()) {
+                    String key = e.getKey();
+                    if ("outputs".equals(key) || "playbooks".equals(key)) {
+                        continue;
+                    }
+                    mergedVars.put(key, e.getValue());
+                }
+            }
+
+            beforeDone = true;
+            idx++;
+        }
+
+        // If we produced per-command logs, concatenate into final "log"
+        if (wantLogFile && multiCmd && !perCommandLogs.isEmpty()) {
+            Path finalLog = workingDir.resolve("log");
+            // truncate/create
+            Files.writeString(finalLog, "", StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+            for (Path p : perCommandLogs) {
+                if (Files.exists(p)) {
+                    String content = Files.readString(p, StandardCharsets.UTF_8);
+                    if (!content.isEmpty()) {
+                        Files.writeString(finalLog, content, StandardCharsets.UTF_8,
+                            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                        if (!content.endsWith("\n")) {
+                            Files.writeString(finalLog, "\n", StandardCharsets.UTF_8,
+                                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                        }
+                    }
+                }
+            }
+
+            // upload final log so outputs contains "log"
+            URI logUri = runContext.storage().putFile(finalLog.toFile());
+            Map<String, URI> patched = new HashMap<>(lastOutputFiles);
+            patched.put("log", logUri);
+            lastOutputFiles = patched;
+        }
+
+        // ensure merged vars expose the expected root keys
+        mergedVars.put("outputs", mergedRawOutputs);
+        mergedVars.put("playbooks", mergedPlaybooks);
+
+        // minimal UI timeline support: emit dynamic worker results
+        emitDynamicTaskRuns(runContext, mergedPlaybooks);
 
         return AnsibleOutput.builder()
-            .vars(base.getVars())
-            .exitCode(base.getExitCode())
-            .outputFiles(base.getOutputFiles())
-            .stdOutLineCount(base.getStdOutLineCount())
-            .stdErrLineCount(base.getStdErrLineCount())
-            .taskRunner(base.getTaskRunner())
-            .playbooks(playbooks)
+            .vars(mergedVars)
+            .exitCode(mergedExitCode)
+            .outputFiles(lastOutputFiles)
+            .stdOutLineCount(mergedStdOutCount)
+            .stdErrLineCount(mergedStdErrCount)
+            .taskRunner(lastTaskRunner)
+            .playbooks(mergedPlaybooks)
             .build();
     }
 
@@ -318,8 +437,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     /**
-     * Minimal equivalent of DbtCLI ResultParser.parseRunResult:
-     * create dynamic TaskRuns per Ansible task so Kestra UI can render bars.
+     * Create dynamic TaskRuns per Ansible task so UI can render bars.
      */
     private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks) throws IllegalVariableEvaluationException {
         if (playbooks == null || playbooks.isEmpty()) {
