@@ -134,7 +134,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected Property<List<String>> beforeCommands;
 
     @Schema(
-        title = "The commands to run"
+        title = "The commands to run",
+        description = "These commands will be run in order. You should group commands in a single task rather than multiple tasks with one command each to optimize performance."
     )
     @NotNull
     protected Property<List<String>> commands;
@@ -160,7 +161,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Valid
     protected TaskRunner<?> taskRunner = Docker.instance();
 
-    @Schema(title = "The task runner container image, only used if the task runner is container-based.")
+    @Schema(
+        title = "The task runner container image, only used if the task runner is container-based.",
+        description = "You can build your own lightweight image (for instance based on `python:3.11-slim`) with only the modules you need to optimize performance."
+    )
     @Builder.Default
     protected Property<String> containerImage = Property.ofValue(DEFAULT_IMAGE);
 
