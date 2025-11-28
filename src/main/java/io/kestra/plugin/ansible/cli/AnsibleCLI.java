@@ -4,12 +4,17 @@ import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.executions.TaskRun;
+import io.kestra.core.models.executions.TaskRunAttempt;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.utils.IdUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -26,6 +31,7 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -175,17 +181,25 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             If you want to provide your own ansible configuration but still want to use the output callback for Kestra add the following lines to your configuration :
             ```
             [defaults]
-            log_path={{ workingDir }}/log
-            callback_plugins = ./callback_plugins
-            stdout_callback = kestra_logger
-            ```"""
+            log_path          = {{ workingDir }}/log
+            callback_plugins  = ./callback_plugins
+            callbacks_enabled = kestra_logger
+            stdout_callback   = ansible.builtin.null
+            result_format     = json
+            pretty_results    = true
+            ```
+            """
     )
     @Builder.Default
     protected Property<String> ansibleConfig = Property.ofExpression("""
         [defaults]
-        log_path={{ workingDir }}/log
-        callback_plugins = ./callback_plugins
-        stdout_callback = kestra_logger""");
+        log_path          = {{ workingDir }}/log
+        callback_plugins  = ./callback_plugins
+        callbacks_enabled = kestra_logger
+        stdout_callback   = ansible.builtin.null
+        result_format     = json
+        pretty_results    = true
+        """);
 
     @Schema(
         title = "Output log file",
@@ -202,14 +216,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     @Override
     public AnsibleOutput run(RunContext runContext) throws Exception {
-        List<String> outputFilesList = new ArrayList<>();
-        outputFilesList.addAll(runContext.render(this.outputFiles).asList(String.class));
+        List<String> outputFilesList = new ArrayList<>(runContext.render(this.outputFiles).asList(String.class));
 
-        if (Boolean.TRUE.equals(runContext.render(this.outputLogFile).as(Boolean.class).orElseThrow())) {
+        if (runContext.render(this.outputLogFile).as(Boolean.class).orElse(false)) {
             outputFilesList.add("log");
         }
 
-        var renderedEnvMap = runContext.render(this.env).asMap(String.class, String.class);
+        var rEnv = runContext.render(this.env).asMap(String.class, String.class);
 
         CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
@@ -219,7 +232,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
             .withBeforeCommands(this.beforeCommands)
             .withCommands(this.commands)
-            .withEnv(renderedEnvMap.isEmpty() ? new HashMap<>() : renderedEnvMap)
+            .withEnv(rEnv.isEmpty() ? new HashMap<>() : rEnv)
             .withNamespaceFiles(namespaceFiles)
             .withEnableOutputDirectory(true)
             .withOutputFiles(outputFilesList);
@@ -236,6 +249,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         ScriptOutput base = commandsWrapper.run();
 
         List<AnsibleOutput.PlaybookOutput> playbooks = extractPlaybooks(base.getVars());
+
+        // >>> minimal UI timeline support: emit dynamic worker results
+        emitDynamicTaskRuns(runContext, playbooks);
 
         return AnsibleOutput.builder()
             .vars(base.getVars())
@@ -301,6 +317,90 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         );
     }
 
+    /**
+     * Minimal equivalent of DbtCLI ResultParser.parseRunResult:
+     * create dynamic TaskRuns per Ansible task so Kestra UI can render bars.
+     */
+    private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks) throws IllegalVariableEvaluationException {
+        if (playbooks == null || playbooks.isEmpty()) {
+            return;
+        }
+
+        List<WorkerTaskResult> results = new ArrayList<>();
+
+        for (AnsibleOutput.PlaybookOutput pb : playbooks) {
+            if (pb == null || pb.getPlays() == null) continue;
+
+            for (AnsibleOutput.PlayOutput play : pb.getPlays()) {
+                if (play == null || play.getTasks() == null) continue;
+
+                for (AnsibleOutput.TaskOutput task : play.getTasks()) {
+                    if (task == null) continue;
+
+                    String uid = task.getUid();
+                    String startedAtStr = task.getStartedAt();
+                    String endedAtStr = task.getEndedAt();
+                    if (uid == null || startedAtStr == null || endedAtStr == null) {
+                        continue; // no timeline info => skip
+                    }
+
+                    Instant started;
+                    Instant ended;
+                    try {
+                        started = Instant.parse(startedAtStr);
+                        ended = Instant.parse(endedAtStr);
+                    } catch (Exception e) {
+                        continue; // bad format => skip
+                    }
+
+                    ArrayList<State.History> histories = new ArrayList<>();
+                    histories.add(new State.History(State.Type.CREATED, started));
+                    histories.add(new State.History(State.Type.RUNNING, started));
+
+                    // Compute final state: failed if any host failed/unreachable, else success.
+                    State.Type finalType = State.Type.SUCCESS;
+                    if (task.getHosts() != null) {
+                        for (AnsibleOutput.HostResult hr : task.getHosts()) {
+                            if (hr == null) continue;
+                            String status = hr.getStatus();
+                            if ("failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status)) {
+                                finalType = State.Type.FAILED;
+                                break;
+                            }
+                        }
+                    }
+
+                    histories.add(new State.History(finalType, ended));
+                    State state = State.of(finalType, histories);
+
+                    WorkerTaskResult wtr = WorkerTaskResult.builder()
+                        .taskRun(TaskRun.builder()
+                            .id(IdUtils.create())
+                            .namespace(runContext.render("{{ flow.namespace }}"))
+                            .flowId(runContext.render("{{ flow.id }}"))
+                            .taskId(uid) // stable identity for UI grouping
+                            .value(runContext.render("{{ taskrun.id }}"))
+                            .executionId(runContext.render("{{ execution.id }}"))
+                            .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
+                            .state(state)
+                            .attempts(List.of(TaskRunAttempt.builder()
+                                .state(state)
+                                .build()
+                            ))
+                            .build()
+                        )
+                        .build();
+
+                    results.add(wtr);
+                }
+            }
+        }
+
+        if (!results.isEmpty()) {
+            runContext.dynamicWorkerResult(results);
+        }
+    }
+
     @SuperBuilder
     @Getter
     public static class AnsibleOutput extends ScriptOutput {
@@ -309,7 +409,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             title = "Structured outputs by playbook command, play, task, and host.",
             description = "Each item corresponds to one ansible-playbook command execution."
         )
-        @NotNull
         private List<PlaybookOutput> playbooks;
 
         @Builder
@@ -348,11 +447,29 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         @AllArgsConstructor
         public static class TaskOutput {
             @Schema(
+                title = "Stable uid for the task (play+task identity).",
+                example = "play:Hello World Playbook|task:Task 1"
+            )
+            private String uid;
+
+            @Schema(
                 title = "Task name.",
                 description = "If missing in Ansible (not mandatory, so possible), fallback to action or 'unnamed_task_<n>'.",
                 example = "Task 1"
             )
             private String name;
+
+            @Schema(
+                title = "Task start time (UTC ISO-8601).",
+                example = "2025-11-28T14:58:23.569Z"
+            )
+            private String startedAt;
+
+            @Schema(
+                title = "Task end time (UTC ISO-8601).",
+                example = "2025-11-28T14:58:23.589Z"
+            )
+            private String endedAt;
 
             @Schema(
                 title = "Per-host results for this task.",
