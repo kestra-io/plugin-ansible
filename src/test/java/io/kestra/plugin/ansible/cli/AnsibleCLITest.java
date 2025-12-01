@@ -306,4 +306,123 @@ class AnsibleCLITest {
         assertThat(List.of(t2h0.get("msg"), t2h1.get("msg")),
             everyItem(is("Hello from task 2")));
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_withStructuredOutputs_multipleCommands_mergesPlaybooksAndLogs() throws Exception {
+        // inventory for the multi-host playbook
+        String inventory = """
+            [local_servers]
+            localhost1 ansible_connection=local
+            localhost2 ansible_connection=local
+            """;
+
+        URI inventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(inventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+
+        // reuse existing playbooks already used by other tests
+        URI pb1Uri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+        );
+
+        URI pb2Uri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook_with_multiple_hosts.yml")
+        );
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .inputFiles(Map.of(
+                // first playbook (single host)
+                "playbooks/playbook.yml", pb1Uri.toString(),
+                // second playbook (multi-host)
+                "playbooks/playbook_with_multiple_hosts.yml", pb2Uri.toString(),
+                // inventory for second playbook
+                "inventory.ini", inventoryUri.toString()
+            ))
+            // Two distinct ansible-playbook commands => triggers multi-command behavior
+            .commands(new Property<>(
+                JacksonMapper.ofJson().writeValueAsString(List.of(
+                    "ansible-playbook -i localhost -c local playbooks/playbook.yml",
+                    "ansible-playbook -i inventory.ini -c local playbooks/playbook_with_multiple_hosts.yml"
+                ))
+            ))
+            .outputLogFile(Property.ofValue(true))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        // ---------------------------
+        // Verify merged "playbooks" in vars
+        // ---------------------------
+        Object maybePlaybooksVar = runOutput.getVars().get("playbooks");
+        assertThat(maybePlaybooksVar, is(instanceOf(List.class)));
+
+        List<Object> playbooksVar = (List<Object>) maybePlaybooksVar;
+        assertThat(playbooksVar.size(), is(2));
+
+        // ---------------------------
+        // Verify merged raw outputs (backward compatible)
+        // ---------------------------
+        // playbook.yml => 6 tasks * 1 host = 6 outputs
+        // playbook_with_multiple_hosts.yml => 2 tasks * 2 hosts = 4 outputs
+        // total = 10
+        List<Map<String, Object>> outputs =
+            (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        assertThat(outputs, is(notNullValue()));
+        assertThat(outputs.size(), is(10));
+
+        // ---------------------------
+        // Verify merged structured playbooks
+        // ---------------------------
+        List<AnsibleCLI.AnsibleOutput.PlaybookOutput> playbooks = runOutput.getPlaybooks();
+        assertThat(playbooks, is(notNullValue()));
+        assertThat(playbooks.size(), is(2));
+
+        // Playbook 1 (playbooks/playbook.yml)
+        AnsibleCLI.AnsibleOutput.PlaybookOutput pb0 = playbooks.get(0);
+        assertThat(pb0.getPlays(), is(notNullValue()));
+        assertThat(pb0.getPlays().size(), is(1));
+        assertThat(pb0.getPlays().getFirst().getTasks().size(), is(6));
+
+        // Playbook 2 (playbooks/playbook_with_multiple_hosts.yml)
+        AnsibleCLI.AnsibleOutput.PlaybookOutput pb1 = playbooks.get(1);
+        assertThat(pb1.getPlays(), is(notNullValue()));
+        assertThat(pb1.getPlays().size(), is(1));
+        assertThat(pb1.getPlays().getFirst().getName(), is("Hello World Playbook"));
+        assertThat(pb1.getPlays().getFirst().getTasks().size(), is(2));
+
+        // Verify log file content contains traces of BOTH playbooks
+        URI logUri = runOutput.getOutputFiles().get("log");
+        assertThat(logUri, is(notNullValue()));
+
+        String logContent;
+        try (java.io.InputStream is = storage.get(TenantService.MAIN_TENANT, null, logUri)) {
+            logContent = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+
+        // From playbook.yml we expect to see task "Print items"
+        assertThat(logContent, containsString("\"task\":\"Print items\""));
+
+        // From playbook_with_multiple_hosts.yml we expect to see play "Hello World Playbook"
+        assertThat(logContent, containsString("\"play\":\"Hello World Playbook\""));
+    }
 }
