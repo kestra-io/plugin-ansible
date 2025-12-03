@@ -1,8 +1,8 @@
 group: io.kestra.plugin.ansible
 name: "ansible"
 title: "Ansible"
-description: "Plugin to orchestrate Ansible playbooks with kestra"
-body: ""
+description: "Tasks that orchestrate Ansible playbooks from Kestra flows."
+body: "Use this plugin set when you need to run Ansible automation inside Kestra with containerized runners; it supports Namespace Files or inline playbooks, injects a default ansible.cfg with the Kestra callback for structured outputs, and can expose execution logs on demand."
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"

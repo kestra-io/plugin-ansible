@@ -1,8 +1,8 @@
 group: io.kestra.plugin.ansible
 name: "cli"
 title: "Cli"
-description: "This sub-group of plugins contains tasks for using Ansible CLI."
-body: ""
+description: "Tasks that run Ansible CLI commands to execute playbooks and capture results."
+body: "Provide commands (required) and any playbooks or inventories via inputFiles or Namespace Files; tasks run in a container image (default cytopia/ansible:latest-tools) with optional beforeCommands and env to prepare the environment. A default ansible.cfg and callback plugin are injected so playbook outputs, per-task details, and logs (when outputLogFile is true) are returned to Kestra."
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"
