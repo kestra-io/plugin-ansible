@@ -219,6 +219,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     @Override
     public AnsibleOutput run(RunContext runContext) throws Exception {
+        runContext.logger().info("Hello mala");
         List<String> outputFilesList = new ArrayList<>(runContext.render(this.outputFiles).asList(String.class));
 
         boolean wantLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
@@ -247,11 +248,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, Object> additionalVars = this.taskRunner.additionalVars(runContext, baseWrapper);
         extraVars.putAll(additionalVars);
 
-        PluginUtilsService.createInputFiles(
+        PluginUtilsService.createInputFilesRaw(
             runContext,
             workingDir,
-            this.finalInputFiles(runContext, workingDir),
-            additionalVars
+            this.finalInputFiles(runContext, workingDir)
         );
 
         List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
