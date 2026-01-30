@@ -176,7 +176,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     @Schema(
         title = "Task runner container image",
-        description = "Used only by container-based runners; defaults to cytopia/ansible:latest-tools. Supply a lean image with required modules to speed execution."
+        description = "Used only by container-based runners; defaults to cytopia/ansible:latest-tools. Supply a lean image with required modules to speed execution. Non-container runners won't include Ansible dependencies, so rely on this image (or provide your own) when you need them."
     )
     @Builder.Default
     protected Property<String> containerImage = Property.ofValue(DEFAULT_IMAGE);
