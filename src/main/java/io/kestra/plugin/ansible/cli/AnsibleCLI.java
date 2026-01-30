@@ -219,7 +219,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     @Override
     public AnsibleOutput run(RunContext runContext) throws Exception {
-        runContext.logger().info("Hello mala");
         List<String> outputFilesList = new ArrayList<>(runContext.render(this.outputFiles).asList(String.class));
 
         boolean wantLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
