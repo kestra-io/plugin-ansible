@@ -46,7 +46,8 @@ import java.util.Map;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Execute Ansible commands."
+    title = "Run Ansible CLI commands",
+    description = "Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one. Uses the cytopia/ansible:latest-tools image by default and merges outputs across multiple commands."
 )
 @Plugin(
     examples = {
@@ -138,32 +139,35 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
 
     @Schema(
-        title = "The commands to run before the main list of commands"
+        title = "Run once before commands",
+        description = "Optional shell commands executed only before the first main command, rendered with the same variables."
     )
     protected Property<List<String>> beforeCommands;
 
     @Schema(
-        title = "The commands to run",
-        description = "These commands will be run in order. You should group commands in a single task rather than multiple tasks with one command each to optimize performance."
+        title = "Commands to run sequentially",
+        description = "Commands are executed one by one in the same working directory and their outputs are merged. Group related steps in a single task to optimize performance."
     )
     @NotNull
     protected Property<List<String>> commands;
 
     @Schema(
-        title = "Additional environment variables for the current process"
+        title = "Additional environment variables",
+        description = "Variables injected into the task runner environment for every command."
     )
     protected Property<Map<String, String>> env;
 
     @Schema(
-        title = "Deprecated, use 'taskRunner' instead"
+        title = "Deprecated Docker options",
+        description = "Use taskRunner instead; kept for backward compatibility."
     )
     @PluginProperty
     @Deprecated
     private DockerOptions docker;
 
     @Schema(
-        title = "The task runner to use",
-        description = "Task runners are provided by plugins, each have their own properties."
+        title = "Task runner",
+        description = "Runner implementation to execute the commands; defaults to Docker. Provide runner-specific properties as needed."
     )
     @PluginProperty
     @Builder.Default
@@ -171,26 +175,17 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected TaskRunner<?> taskRunner = Docker.instance();
 
     @Schema(
-        title = "The task runner container image, only used if the task runner is container-based.",
-        description = "You can build your own lightweight image (for instance based on `python:3.11-slim`) with only the modules you need to optimize performance."
+        title = "Task runner container image",
+        description = "Used only by container-based runners; defaults to cytopia/ansible:latest-tools. Supply a lean image with required modules to speed execution."
     )
     @Builder.Default
     protected Property<String> containerImage = Property.ofValue(DEFAULT_IMAGE);
 
     @Schema(
-        title = "Ansible configuration.",
+        title = "Ansible configuration",
         description = """
-            If not provided an ansible.cfg file will be created at the working directory base and will enable a custom callback plugin to output your results to Kestra.
-            If you want to provide your own ansible configuration but still want to use the output callback for Kestra add the following lines to your configuration :
-            ```
-            [defaults]
-            log_path          = {{ workingDir }}/log
-            callback_plugins  = ./callback_plugins
-            callbacks_enabled = kestra_logger
-            stdout_callback   = ansible.builtin.null
-            result_format     = json
-            pretty_results    = true
-            ```
+            If omitted, a generated ansible.cfg in the working directory enables the Kestra callback plugin and logs to `log`.
+            Provide custom content to override defaults; include the callback settings above if you still want structured outputs.
             """
     )
     @Builder.Default
@@ -205,8 +200,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         """);
 
     @Schema(
-        title = "Output log file",
-        description = "If true, the ansible log file will be available in the outputs."
+        title = "Publish Ansible log file",
+        description = "If true, uploads the ansible log as output file `log`; multi-command runs concatenate per-command logs. Default is false."
     )
     @Builder.Default
     private Property<Boolean> outputLogFile = Property.ofValue(false);
@@ -524,8 +519,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static class AnsibleOutput extends ScriptOutput {
 
         @Schema(
-            title = "Structured outputs by playbook command, play, task, and host.",
-            description = "Each item corresponds to one ansible-playbook command execution."
+            title = "Structured playbook outputs",
+            description = "Each item corresponds to one ansible-playbook command execution with its plays, tasks, and host results."
         )
         private List<PlaybookOutput> playbooks;
 
@@ -535,7 +530,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         @AllArgsConstructor
         public static class PlaybookOutput {
             @Schema(
-                title = "Plays executed in this playbook."
+                title = "Plays executed in this playbook"
             )
             private List<PlayOutput> plays;
         }
@@ -546,15 +541,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         @AllArgsConstructor
         public static class PlayOutput {
             @Schema(
-                title = "Play name.",
+                title = "Play name",
                 description = "If missing in Ansible (not mandatory, so possible), a fallback name can be used.",
                 example = "Hello World Playbook"
             )
             private String name;
 
             @Schema(
-                title = "Tasks executed in this play. Index based not name based as not mandatory in Ansible.",
-                description = "A play can have multiple tasks; each task yields one result set by host."
+                title = "Tasks executed in this play",
+                description = "Indexed in execution order even when names are absent; each task yields one result set by host."
             )
             private List<TaskOutput> tasks;
         }
@@ -565,32 +560,32 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         @AllArgsConstructor
         public static class TaskOutput {
             @Schema(
-                title = "Stable uid for the task (play+task identity).",
+                title = "Stable task uid",
                 example = "play:Hello World Playbook|task:Task 1"
             )
             private String uid;
 
             @Schema(
-                title = "Task name.",
+                title = "Task name",
                 description = "If missing in Ansible (not mandatory, so possible), fallback to action or 'unnamed_task_<n>'.",
                 example = "Task 1"
             )
             private String name;
 
             @Schema(
-                title = "Task start time (UTC ISO-8601).",
+                title = "Task start time (UTC ISO-8601)",
                 example = "2025-11-28T14:58:23.569Z"
             )
             private String startedAt;
 
             @Schema(
-                title = "Task end time (UTC ISO-8601).",
+                title = "Task end time (UTC ISO-8601)",
                 example = "2025-11-28T14:58:23.589Z"
             )
             private String endedAt;
 
             @Schema(
-                title = "Per-host results for this task.",
+                title = "Per-host results for this task",
                 description = "A task can target multiple hosts; each host yields one result event."
             )
             private List<HostResult> hosts;
@@ -602,20 +597,20 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         @AllArgsConstructor
         public static class HostResult {
             @Schema(
-                title = "Host name from inventory.",
+                title = "Host name from inventory",
                 example = "localhost1"
             )
             private String host;
 
             @Schema(
-                title = "Execution status.",
+                title = "Execution status",
                 description = "Typical values: ok, failed, skipped, unreachable.",
                 example = "ok"
             )
             private String status;
 
             @Schema(
-                title = "Raw Ansible result payload for this host.",
+                title = "Raw Ansible result payload for this host",
                 description = """
                     Arbitrary structure directly from Ansible.
                     If the task uses loops, Ansible already returns a list in this object.
