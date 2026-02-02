@@ -4,6 +4,7 @@ import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.executions.TaskRun;
 import io.kestra.core.models.executions.TaskRunAttempt;
 import io.kestra.core.models.flows.State;
@@ -12,6 +13,8 @@ import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.models.tasks.runners.TaskRunnerDetailResult;
+import io.kestra.core.queues.QueueException;
+import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
@@ -37,8 +40,11 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @SuperBuilder
 @ToString
@@ -137,6 +143,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
     public static final String ANSIBLE_CFG = "ansible.cfg";
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
+    private static final String INVENTORY_FILE = "inventory.ini";
+    private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
+    private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
 
     @Schema(
         title = "Run once before commands",
@@ -247,6 +256,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             workingDir,
             this.finalInputFiles(runContext, workingDir)
         );
+        emitInventoryAssets(runContext, workingDir);
 
         List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
 
@@ -410,6 +420,77 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         return builder.build();
+    }
+
+    private void emitInventoryAssets(RunContext runContext, Path workingDir) throws Exception {
+        var inventoryPath = workingDir.resolve(INVENTORY_FILE);
+        if (!Files.isRegularFile(inventoryPath)) {
+            return;
+        }
+
+        var inventoryContent = Files.readString(inventoryPath, StandardCharsets.UTF_8);
+        var inputs = extractInventoryAssetInputs(inventoryContent);
+        if (inputs.isEmpty()) {
+            return;
+        }
+
+        try {
+            runContext.assets().emit(new AssetEmit(inputs, List.of()));
+            runContext.logger().info("Emitted {} host asset input(s) from '{}'.", inputs.size(), INVENTORY_FILE);
+        } catch (UnsupportedOperationException | QueueException e) {
+            // UnsupportedOperationException for OSS or tests where EE assets are not enabled.
+            runContext.logger().warn("Unable to emit host asset input(s) from '{}'.", INVENTORY_FILE, e);
+        }
+    }
+
+    static List<AssetIdentifier> extractInventoryAssetInputs(String inventoryContent) {
+        if (inventoryContent == null || inventoryContent.isBlank()) {
+            return List.of();
+        }
+
+        var uniqueHosts = new LinkedHashSet<String>();
+        var hostSection = true;
+
+        for (var rawLine : inventoryContent.split("\\R")) {
+            var line = stripInlineComment(rawLine).trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+
+            if (line.startsWith("[") && line.endsWith("]") && line.length() > 2) {
+                var section = line.substring(1, line.length() - 1).trim().toLowerCase(Locale.ROOT);
+                hostSection = !section.endsWith(":vars") && !section.endsWith(":children");
+                continue;
+            }
+
+            if (!hostSection) {
+                continue;
+            }
+
+            var host = line.split("\\s+")[0].trim();
+            if (host.isEmpty() || host.contains("=") || !ASSET_ID_PATTERN.matcher(host).matches()) {
+                continue;
+            }
+
+            uniqueHosts.add(host);
+        }
+
+        return uniqueHosts.stream()
+            .map(host -> new AssetIdentifier(null, null, host, VM_ASSET_TYPE))
+            .toList();
+    }
+
+    private static String stripInlineComment(String rawLine) {
+        if (rawLine == null) {
+            return "";
+        }
+
+        var trimmed = rawLine.trim();
+        if (trimmed.startsWith("#") || trimmed.startsWith(";")) {
+            return "";
+        }
+
+        return trimmed.replaceFirst("\\s[;#].*$", "");
     }
 
     @SuppressWarnings("unchecked")
