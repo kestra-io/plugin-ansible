@@ -1,7 +1,10 @@
 package io.kestra.plugin.ansible.cli;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.assets.Asset;
+import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.runners.DefaultRunContext;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
@@ -18,6 +21,7 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -30,6 +34,9 @@ class AnsibleCLITest {
 
     @Inject
     private StorageInterface storage;
+
+    @Inject
+    private TestAssetManagerFactory assetManagerFactory;
 
     @Test
     @SuppressWarnings("unchecked")
@@ -55,7 +62,7 @@ class AnsibleCLITest {
                 "echo {{ workingDir }}"))))
             .build();
 
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of("envKey", envKey, "envValue", envValue));
+        RunContext runContext = initRunContext(execute, Map.of("envKey", envKey, "envValue", envValue));
 
         ScriptOutput runOutput = execute.run(runContext);
 
@@ -83,7 +90,7 @@ class AnsibleCLITest {
             .outputLogFile(Property.ofValue(true))
             .build();
 
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        RunContext runContext = initRunContext(execute, Map.of());
 
         ScriptOutput runOutput = execute.run(runContext);
 
@@ -143,7 +150,7 @@ class AnsibleCLITest {
             ))
             .build();
 
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        RunContext runContext = initRunContext(execute, Map.of());
 
         AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
@@ -254,7 +261,7 @@ class AnsibleCLITest {
             ))
             .build();
 
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        RunContext runContext = initRunContext(execute, Map.of());
 
         AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
@@ -364,7 +371,7 @@ class AnsibleCLITest {
             .outputLogFile(Property.ofValue(true))
             .build();
 
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        RunContext runContext = initRunContext(execute, Map.of());
 
         AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
@@ -424,5 +431,70 @@ class AnsibleCLITest {
 
         // From playbook_with_multiple_hosts.yml we expect to see play "Hello World Playbook"
         assertThat(logContent, containsString("\"play\":\"Hello World Playbook\""));
+    }
+
+    @Test
+    void run_withAutoAssets_inventory() throws Exception {
+        assetManagerFactory.reset();
+
+        var inventory = """
+            [webservers]
+            web1.example.com
+            web2.example.com
+
+            [databases]
+            db1.example.com
+            """;
+
+        var inventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(inventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+
+        var execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .assets(Property.ofValue(new AssetsDeclaration(true, null, null)))
+            .inputFiles(Map.of(
+                "inventory.ini", inventoryUri.toString()
+            ))
+            .commands(Property.ofValue(List.of("echo noop")))
+            .build();
+
+        var runContext = initRunContext(execute, Map.of());
+
+        execute.run(runContext);
+
+        var assets = assetManagerFactory.emitter().upserts();
+        assertThat(assets.size(), is(3));
+
+        var metadataById = assets.stream()
+            .collect(Collectors.toMap(Asset::getId, Asset::getMetadata));
+        assertThat(metadataById.keySet(), containsInAnyOrder(
+            "web1.example.com",
+            "web2.example.com",
+            "db1.example.com"
+        ));
+        assertThat(metadataById.get("web1.example.com").get("group"), is("webservers"));
+        assertThat(metadataById.get("web2.example.com").get("group"), is("webservers"));
+        assertThat(metadataById.get("db1.example.com").get("group"), is("databases"));
+
+        for (var asset : assets) {
+            assertThat(asset.getType(), is("io.kestra.plugin.ee.assets.VM"));
+            assertThat(asset.getMetadata().get("provider"), is("ansible_inventory"));
+            assertThat(asset.getMetadata().get("region"), is("unknown"));
+            assertThat(asset.getMetadata().get("state"), is("targeted"));
+        }
+    }
+
+    private RunContext initRunContext(AnsibleCLI task, Map<String, Object> inputs) {
+        var runContext = (DefaultRunContext) TestsUtils.mockRunContext(runContextFactory, task, inputs);
+        return runContextFactory.initializer().forExecutor(runContext);
     }
 }
