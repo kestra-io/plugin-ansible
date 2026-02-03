@@ -4,6 +4,8 @@ import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.assets.AssetsDeclaration;
+import io.kestra.core.models.assets.Custom;
 import io.kestra.core.models.executions.TaskRun;
 import io.kestra.core.models.executions.TaskRunAttempt;
 import io.kestra.core.models.flows.State;
@@ -37,6 +39,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -137,6 +140,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
     public static final String ANSIBLE_CFG = "ansible.cfg";
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
+    private static final String INVENTORY_FILE = "inventory.ini";
+    private static final String DEFAULT_INVENTORY_GROUP = "ungrouped";
+    private static final String ASSET_PROVIDER = "ansible_inventory";
+    private static final String ASSET_REGION = "unknown";
+    private static final String ASSET_STATE = "targeted";
+    private static final String TABLE_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
 
     @Schema(
         title = "Run once before commands",
@@ -248,6 +257,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             this.finalInputFiles(runContext, workingDir),
             additionalVars
         );
+        emitInventoryAssets(runContext, workingDir);
 
         List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
 
@@ -411,6 +421,103 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         return builder.build();
+    }
+
+    private void emitInventoryAssets(RunContext runContext, Path workingDir) throws Exception {
+        if (!isAutoAssetsEnabled(runContext)) {
+            return;
+        }
+
+        var inventoryPath = workingDir.resolve(INVENTORY_FILE);
+        if (!Files.exists(inventoryPath)) {
+            return;
+        }
+
+        var assets = parseInventoryAssets(inventoryPath);
+        if (assets.isEmpty()) {
+            return;
+        }
+
+        var flowInfo = runContext.flowInfo();
+        var assetEmitter = runContext.assets();
+        for (var asset : assets) {
+            assetEmitter.upsert(Custom.builder()
+                .tenantId(flowInfo.tenantId())
+                .namespace(flowInfo.namespace())
+                .id(asset.assetId())
+                .type(TABLE_ASSET_TYPE)
+                .metadata(asset.metadata())
+                .build()
+            );
+            // .inputs(...)
+            // .outputs(...)
+        }
+    }
+
+    private boolean isAutoAssetsEnabled(RunContext runContext) throws IllegalVariableEvaluationException {
+        var assetsProperty = this.getAssets();
+        if (assetsProperty == null) {
+            return false;
+        }
+
+        var rAssets = runContext.render(assetsProperty).as(AssetsDeclaration.class).orElse(null);
+        return rAssets != null && rAssets.isEnableAuto();
+    }
+
+    private List<InventoryAsset> parseInventoryAssets(Path inventoryPath) throws IOException {
+        var lines = Files.readAllLines(inventoryPath, StandardCharsets.UTF_8);
+        var assetsByHost = new LinkedHashMap<String, String>();
+        var currentGroup = DEFAULT_INVENTORY_GROUP;
+        var inHostGroup = true;
+
+        for (var rawLine : lines) {
+            var line = rawLine.trim();
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+                continue;
+            }
+
+            if (line.startsWith("[") && line.endsWith("]")) {
+                var groupName = line.substring(1, line.length() - 1).trim();
+                if (groupName.isEmpty()) {
+                    currentGroup = DEFAULT_INVENTORY_GROUP;
+                    inHostGroup = true;
+                    continue;
+                }
+
+                if (groupName.contains(":")) {
+                    currentGroup = null;
+                    inHostGroup = false;
+                    continue;
+                }
+
+                currentGroup = groupName;
+                inHostGroup = true;
+                continue;
+            }
+
+            if (!inHostGroup || currentGroup == null) {
+                continue;
+            }
+
+            var host = line.split("\\s+")[0].trim();
+            if (host.isEmpty()) {
+                continue;
+            }
+
+            assetsByHost.putIfAbsent(host, currentGroup);
+        }
+
+        return assetsByHost.entrySet().stream()
+            .map(entry -> new InventoryAsset(entry.getKey(), Map.<String, Object>of(
+                "provider", ASSET_PROVIDER,
+                "region", ASSET_REGION,
+                "state", ASSET_STATE,
+                "group", entry.getValue()
+            )))
+            .toList();
+    }
+
+    private record InventoryAsset(String assetId, Map<String, Object> metadata) {
     }
 
     @SuppressWarnings("unchecked")
