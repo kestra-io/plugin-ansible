@@ -242,11 +242,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, Object> additionalVars = this.taskRunner.additionalVars(runContext, baseWrapper);
         extraVars.putAll(additionalVars);
 
-        PluginUtilsService.createInputFiles(
+        PluginUtilsService.createInputFilesRaw(
             runContext,
             workingDir,
-            this.finalInputFiles(runContext, workingDir),
-            additionalVars
+            this.finalInputFiles(runContext, workingDir)
         );
 
         List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
