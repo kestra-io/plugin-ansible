@@ -4,7 +4,6 @@ import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.property.Property;
-import io.kestra.core.runners.DefaultRunContext;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
@@ -105,7 +104,7 @@ class AnsibleCLITest {
                 "echo {{ workingDir }}"))))
             .build();
 
-        RunContext runContext = initRunContext(execute, Map.of("envKey", envKey, "envValue", envValue));
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of("envKey", envKey, "envValue", envValue));
 
         ScriptOutput runOutput = execute.run(runContext);
 
@@ -133,7 +132,7 @@ class AnsibleCLITest {
             .outputLogFile(Property.ofValue(true))
             .build();
 
-        RunContext runContext = initRunContext(execute, Map.of());
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
         ScriptOutput runOutput = execute.run(runContext);
 
@@ -193,7 +192,7 @@ class AnsibleCLITest {
             ))
             .build();
 
-        RunContext runContext = initRunContext(execute, Map.of());
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
         AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
@@ -304,7 +303,7 @@ class AnsibleCLITest {
             ))
             .build();
 
-        RunContext runContext = initRunContext(execute, Map.of());
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
         AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
@@ -414,7 +413,7 @@ class AnsibleCLITest {
             .outputLogFile(Property.ofValue(true))
             .build();
 
-        RunContext runContext = initRunContext(execute, Map.of());
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
         AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
@@ -510,7 +509,7 @@ class AnsibleCLITest {
             .commands(Property.ofValue(List.of("echo noop")))
             .build();
 
-        var runContext = initRunContext(execute, Map.of());
+        var runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
         execute.run(runContext);
 
@@ -535,8 +534,79 @@ class AnsibleCLITest {
         }
     }
 
-    private RunContext initRunContext(AnsibleCLI task, Map<String, Object> inputs) {
-        var runContext = (DefaultRunContext) TestsUtils.mockRunContext(runContextFactory, task, inputs);
-        return runContextFactory.initializer().forExecutor(runContext);
+    @Test
+    void run_withAutoAssets_inventory_shouldNotReEmitExistingHosts() throws Exception {
+        assetManagerFactory.reset();
+
+        var firstInventory = """
+            [webservers]
+            web1.example.com ansible_user=ubuntu
+            web2.example.com
+
+            [webservers:vars]
+            ansible_port=22
+
+            [ungrouped]
+            standalone-host
+            web1.example.com # duplicate should be deduped
+            invalid:host
+            """;
+
+        var secondInventory = """
+            [webservers]
+            web1.example.com
+            web2.example.com
+
+            [ungrouped]
+            standalone-host
+            """;
+
+        var firstInventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(firstInventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+        var secondInventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(secondInventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+
+        var firstTask = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .assets(new AssetsDeclaration(true, null, null))
+            .inputFiles(Map.of(
+                "inventory.ini", firstInventoryUri.toString()
+            ))
+            .commands(Property.ofValue(List.of("echo first run")))
+            .build();
+
+        var secondTask = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .assets(new AssetsDeclaration(true, null, null))
+            .inputFiles(Map.of(
+                "inventory.ini", secondInventoryUri.toString()
+            ))
+            .commands(Property.ofValue(List.of("echo second run")))
+            .build();
+
+        firstTask.run(TestsUtils.mockRunContext(runContextFactory, firstTask, Map.of()));
+        secondTask.run(TestsUtils.mockRunContext(runContextFactory, secondTask, Map.of()));
+
+        var emitted = assetManagerFactory.emitter().emitted();
+        assertThat(emitted.size(), is(1));
+        assertThat(emitted.getFirst().inputs().size(), is(3));
     }
 }
