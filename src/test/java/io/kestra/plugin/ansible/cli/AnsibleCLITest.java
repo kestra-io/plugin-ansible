@@ -1,6 +1,8 @@
 package io.kestra.plugin.ansible.cli;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.assets.AssetIdentifier;
+import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
@@ -30,6 +32,53 @@ class AnsibleCLITest {
 
     @Inject
     private StorageInterface storage;
+
+    @Inject
+    private TestAssetManagerFactory assetManagerFactory;
+
+    @Test
+    void extractInventoryAssetInputs_shouldParseHostsAsInputsOnly() {
+        var inventory = """
+            [webservers]
+            web1.example.com ansible_user=ubuntu
+            web2.example.com
+
+            [webservers:vars]
+            ansible_port=22
+
+            [parents:children]
+            webservers
+
+            [ungrouped]
+            standalone-host # inline comment
+            ; full line comment
+            invalid:host
+            """;
+
+        var inputs = AnsibleCLI.extractInventoryAssetInputs(inventory);
+
+        assertThat(inputs.size(), is(3));
+        assertThat(inputs.stream().map(AssetIdentifier::id).toList(), contains(
+            "web1.example.com",
+            "web2.example.com",
+            "standalone-host"
+        ));
+        assertThat(inputs.stream().map(AssetIdentifier::type).distinct().toList(), contains(
+            "io.kestra.plugin.ee.assets.VM"
+        ));
+    }
+
+    @Test
+    void extractInventoryAssetInputs_shouldIgnoreEmptyOrVarsOnlyInventory() {
+        var inventory = """
+            [all:vars]
+            ansible_user=ubuntu
+            """;
+
+        var inputs = AnsibleCLI.extractInventoryAssetInputs(inventory);
+
+        assertThat(inputs, is(empty()));
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -424,5 +473,140 @@ class AnsibleCLITest {
 
         // From playbook_with_multiple_hosts.yml we expect to see play "Hello World Playbook"
         assertThat(logContent, containsString("\"play\":\"Hello World Playbook\""));
+    }
+
+    @Test
+    void run_withAutoAssets_inventory() throws Exception {
+        assetManagerFactory.reset();
+
+        var inventory = """
+            [webservers]
+            web1.example.com
+            web2.example.com
+
+            [databases]
+            db1.example.com
+            """;
+
+        var inventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(inventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+
+        var execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .assets(new AssetsDeclaration(true, null, null))
+            .inputFiles(Map.of(
+                "inventory.ini", inventoryUri.toString()
+            ))
+            .commands(Property.ofValue(List.of("echo noop")))
+            .build();
+
+        var runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        execute.run(runContext);
+
+        var emitted = assetManagerFactory.emitter().emitted();
+        assertThat(emitted.size(), is(1));
+
+        var firstEmit = emitted.getFirst();
+        assertThat(firstEmit.outputs(), empty());
+        assertThat(firstEmit.inputs().size(), is(3));
+
+        var inputIds = firstEmit.inputs().stream()
+            .map(AssetIdentifier::id)
+            .toList();
+        assertThat(inputIds, containsInAnyOrder(
+            "web1.example.com",
+            "web2.example.com",
+            "db1.example.com"
+        ));
+
+        for (var input : firstEmit.inputs()) {
+            assertThat(input.type(), is("io.kestra.plugin.ee.assets.VM"));
+        }
+    }
+
+    @Test
+    void run_withAutoAssets_inventory_shouldNotReEmitExistingHosts() throws Exception {
+        assetManagerFactory.reset();
+
+        var firstInventory = """
+            [webservers]
+            web1.example.com ansible_user=ubuntu
+            web2.example.com
+
+            [webservers:vars]
+            ansible_port=22
+
+            [ungrouped]
+            standalone-host
+            web1.example.com # duplicate should be deduped
+            invalid:host
+            """;
+
+        var secondInventory = """
+            [webservers]
+            web1.example.com
+            web2.example.com
+
+            [ungrouped]
+            standalone-host
+            """;
+
+        var firstInventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(firstInventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+        var secondInventoryUri = storage.put(
+            TenantService.MAIN_TENANT,
+            null,
+            URI.create("/" + IdUtils.create() + ".ion"),
+            new java.io.ByteArrayInputStream(secondInventory.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+
+        var firstTask = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .assets(new AssetsDeclaration(true, null, null))
+            .inputFiles(Map.of(
+                "inventory.ini", firstInventoryUri.toString()
+            ))
+            .commands(Property.ofValue(List.of("echo first run")))
+            .build();
+
+        var secondTask = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder()
+                .image("cytopia/ansible:latest-tools")
+                .entryPoint(Collections.emptyList())
+                .build())
+            .assets(new AssetsDeclaration(true, null, null))
+            .inputFiles(Map.of(
+                "inventory.ini", secondInventoryUri.toString()
+            ))
+            .commands(Property.ofValue(List.of("echo second run")))
+            .build();
+
+        firstTask.run(TestsUtils.mockRunContext(runContextFactory, firstTask, Map.of()));
+        secondTask.run(TestsUtils.mockRunContext(runContextFactory, secondTask, Map.of()));
+
+        var emitted = assetManagerFactory.emitter().emitted();
+        assertThat(emitted.size(), is(1));
+        assertThat(emitted.getFirst().inputs().size(), is(3));
     }
 }
