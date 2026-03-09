@@ -450,8 +450,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             assetEmitter.emit(new AssetEmit(newInputs, List.of()));
             runContext.logger().info("Emitted {} host asset input(s) from '{}'.", newInputs.size(), INVENTORY_FILE);
-        } catch (UnsupportedOperationException | QueueException e) {
-            // UnsupportedOperationException for OSS or tests where EE assets are not enabled.
+        } catch (UnsupportedOperationException e) {
+            // OSS edition or tests where EE assets are not available — silently skip.
+            runContext.logger().debug("Asset emission is not supported in this edition, skipping.");
+        } catch (QueueException e) {
             runContext.logger().warn("Unable to emit host asset input(s) from '{}'.", INVENTORY_FILE, e);
         }
     }
