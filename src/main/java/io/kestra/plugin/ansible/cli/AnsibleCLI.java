@@ -1,5 +1,22 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Pattern;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
@@ -23,28 +40,12 @@ import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
 import io.kestra.plugin.scripts.runner.docker.Docker;
+
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.regex.Pattern;
 
 @SuperBuilder
 @ToString
@@ -293,9 +294,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             CommandsWrapper commandWrapper = baseWrapper
                 .withEnv(envForRun)
                 // run beforeCommands only once, before the first command (rendered with extra vars)
-                .withBeforeCommands(beforeDone ? null : Property.ofValue(
-                    runContext.render(this.beforeCommands).asList(String.class, extraVars)
-                ))
+                .withBeforeCommands(
+                    beforeDone ? null
+                        : Property.ofValue(
+                            runContext.render(this.beforeCommands).asList(String.class, extraVars)
+                        )
+                )
                 // single command per run so Kestra doesn't overwrite outputs
                 .withCommands(Property.ofValue(List.of(cmd)));
 
@@ -345,18 +349,24 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         if (wantLogFile && multiCmd && !perCommandLogs.isEmpty()) {
             Path finalLog = workingDir.resolve("log");
             // truncate/create
-            Files.writeString(finalLog, "", StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            Files.writeString(
+                finalLog, "", StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
+            );
 
             for (Path p : perCommandLogs) {
                 if (Files.exists(p)) {
                     String content = Files.readString(p, StandardCharsets.UTF_8);
                     if (!content.isEmpty()) {
-                        Files.writeString(finalLog, content, StandardCharsets.UTF_8,
-                            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                        Files.writeString(
+                            finalLog, content, StandardCharsets.UTF_8,
+                            StandardOpenOption.CREATE, StandardOpenOption.APPEND
+                        );
                         if (!content.endsWith("\n")) {
-                            Files.writeString(finalLog, "\n", StandardCharsets.UTF_8,
-                                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                            Files.writeString(
+                                finalLog, "\n", StandardCharsets.UTF_8,
+                                StandardOpenOption.CREATE, StandardOpenOption.APPEND
+                            );
                         }
                     }
                 }
@@ -436,9 +446,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         try {
             var assetEmitter = runContext.assets();
-            var alreadyEmittedInputs = new LinkedHashSet<>(assetEmitter.emitted().stream()
-                .flatMap(assetEmit -> assetEmit.inputs().stream())
-                .toList());
+            var alreadyEmittedInputs = new LinkedHashSet<>(
+                assetEmitter.emitted().stream()
+                    .flatMap(assetEmit -> assetEmit.inputs().stream())
+                    .toList()
+            );
             var newInputs = inputs.stream()
                 .filter(input -> !alreadyEmittedInputs.contains(input))
                 .toList();
@@ -537,13 +549,16 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         List<WorkerTaskResult> results = new ArrayList<>();
 
         for (AnsibleOutput.PlaybookOutput pb : playbooks) {
-            if (pb == null || pb.getPlays() == null) continue;
+            if (pb == null || pb.getPlays() == null)
+                continue;
 
             for (AnsibleOutput.PlayOutput play : pb.getPlays()) {
-                if (play == null || play.getTasks() == null) continue;
+                if (play == null || play.getTasks() == null)
+                    continue;
 
                 for (AnsibleOutput.TaskOutput task : play.getTasks()) {
-                    if (task == null) continue;
+                    if (task == null)
+                        continue;
 
                     String uid = task.getUid();
                     String startedAtStr = task.getStartedAt();
@@ -569,7 +584,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     State.Type finalType = State.Type.SUCCESS;
                     if (task.getHosts() != null) {
                         for (AnsibleOutput.HostResult hr : task.getHosts()) {
-                            if (hr == null) continue;
+                            if (hr == null)
+                                continue;
                             String status = hr.getStatus();
                             if ("failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status)) {
                                 finalType = State.Type.FAILED;
@@ -582,20 +598,24 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     State state = State.of(finalType, histories);
 
                     WorkerTaskResult wtr = WorkerTaskResult.builder()
-                        .taskRun(TaskRun.builder()
-                            .id(IdUtils.create())
-                            .namespace(runContext.render("{{ flow.namespace }}"))
-                            .flowId(runContext.render("{{ flow.id }}"))
-                            .taskId(uid) // stable identity for UI grouping
-                            .value(runContext.render("{{ taskrun.id }}"))
-                            .executionId(runContext.render("{{ execution.id }}"))
-                            .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
-                            .state(state)
-                            .attempts(List.of(TaskRunAttempt.builder()
+                        .taskRun(
+                            TaskRun.builder()
+                                .id(IdUtils.create())
+                                .namespace(runContext.render("{{ flow.namespace }}"))
+                                .flowId(runContext.render("{{ flow.id }}"))
+                                .taskId(uid) // stable identity for UI grouping
+                                .value(runContext.render("{{ taskrun.id }}"))
+                                .executionId(runContext.render("{{ execution.id }}"))
+                                .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
                                 .state(state)
+                                .attempts(
+                                    List.of(
+                                        TaskRunAttempt.builder()
+                                            .state(state)
+                                            .build()
+                                    )
+                                )
                                 .build()
-                            ))
-                            .build()
                         )
                         .build();
 

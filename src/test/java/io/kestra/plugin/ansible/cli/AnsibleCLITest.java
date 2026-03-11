@@ -1,5 +1,12 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.net.URI;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.jupiter.api.Test;
+
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
@@ -13,13 +20,8 @@ import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
-import jakarta.inject.Inject;
-import org.junit.jupiter.api.Test;
 
-import java.net.URI;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import jakarta.inject.Inject;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -58,14 +60,18 @@ class AnsibleCLITest {
         var inputs = AnsibleCLI.extractInventoryAssetInputs(inventory);
 
         assertThat(inputs.size(), is(3));
-        assertThat(inputs.stream().map(AssetIdentifier::id).toList(), contains(
-            "web1.example.com",
-            "web2.example.com",
-            "standalone-host"
-        ));
-        assertThat(inputs.stream().map(AssetIdentifier::type).distinct().toList(), contains(
-            "io.kestra.plugin.ee.assets.VM"
-        ));
+        assertThat(
+            inputs.stream().map(AssetIdentifier::id).toList(), contains(
+                "web1.example.com",
+                "web2.example.com",
+                "standalone-host"
+            )
+        );
+        assertThat(
+            inputs.stream().map(AssetIdentifier::type).distinct().toList(), contains(
+                "io.kestra.plugin.ee.assets.VM"
+            )
+        );
     }
 
     @Test
@@ -89,19 +95,28 @@ class AnsibleCLITest {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
             .env(Property.ofExpression(JacksonMapper.ofJson().writeValueAsString(Map.of("{{ inputs.envKey }}", "{{ inputs.envValue }}"))))
             .beforeCommands(Property.ofExpression(JacksonMapper.ofJson().writeValueAsString(List.of("echo {{ workingDir }}"))))
-            .commands(Property.ofExpression(JacksonMapper.ofJson().writeValueAsString(List.of(
-                "echo \"::{\\\"outputs\\\":{" +
-                    "\\\"customEnv\\\":\\\"$" + envKey + "\\\"" +
-                    "}}::\"",
-                "ansible --version",
-                "ansible-galaxy collection list | tr -d ' \n' | xargs -0 -I {} echo '::{\"outputs\":{}}::'",
-                "echo {{ workingDir }}"))))
+            .commands(
+                Property.ofExpression(
+                    JacksonMapper.ofJson().writeValueAsString(
+                        List.of(
+                            "echo \"::{\\\"outputs\\\":{" +
+                                "\\\"customEnv\\\":\\\"$" + envKey + "\\\"" +
+                                "}}::\"",
+                            "ansible --version",
+                            "ansible-galaxy collection list | tr -d ' \n' | xargs -0 -I {} echo '::{\"outputs\":{}}::'",
+                            "echo {{ workingDir }}"
+                        )
+                    )
+                )
+            )
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of("envKey", envKey, "envValue", envValue));
@@ -118,17 +133,29 @@ class AnsibleCLITest {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
-            .inputFiles(Map.of(
-                "playbooks/playbook.yml", storage.put(TenantService.MAIN_TENANT, null, URI.create("/" + IdUtils.create() + ".ion"), this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")).toString()
-            ))
-            .commands(new Property<>(JacksonMapper.ofJson().writeValueAsString(List.of(
-                "ansible --version",
-                "ansible-playbook -i localhost -c local playbooks/playbook.yml"
-            ))))
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml",
+                    storage.put(TenantService.MAIN_TENANT, null, URI.create("/" + IdUtils.create() + ".ion"), this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml"))
+                        .toString()
+                )
+            )
+            .commands(
+                new Property<>(
+                    JacksonMapper.ofJson().writeValueAsString(
+                        List.of(
+                            "ansible --version",
+                            "ansible-playbook -i localhost -c local playbooks/playbook.yml"
+                        )
+                    )
+                )
+            )
             .outputLogFile(Property.ofValue(true))
             .build();
 
@@ -173,23 +200,31 @@ class AnsibleCLITest {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
-            .inputFiles(Map.of(
-                "playbooks/playbook.yml", storage.put(
-                    TenantService.MAIN_TENANT,
-                    null,
-                    URI.create("/" + IdUtils.create() + ".ion"),
-                    this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
-                ).toString()
-            ))
-            .commands(new Property<>(
-                JacksonMapper.ofJson().writeValueAsString(List.of(
-                    "ansible-playbook -i localhost -c local playbooks/playbook.yml"
-                ))
-            ))
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                new Property<>(
+                    JacksonMapper.ofJson().writeValueAsString(
+                        List.of(
+                            "ansible-playbook -i localhost -c local playbooks/playbook.yml"
+                        )
+                    )
+                )
+            )
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -208,11 +243,13 @@ class AnsibleCLITest {
 
         AnsibleCLI.AnsibleOutput.PlayOutput play0 = pb0.getPlays().getFirst();
         // no explicit name in playbook.yml => ansible uses hosts pattern as play name
-        assertThat(play0.getName(), anyOf(
-            is("localhost"),
-            is("unnamed_play"),
-            is("implicit_play")
-        ));
+        assertThat(
+            play0.getName(), anyOf(
+                is("localhost"),
+                is("unnamed_play"),
+                is("implicit_play")
+            )
+        );
 
         assertThat(play0.getTasks(), is(notNullValue()));
         assertThat(play0.getTasks().size(), is(6));
@@ -288,19 +325,27 @@ class AnsibleCLITest {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
-            .inputFiles(Map.of(
-                "inventory.ini", inventoryUri.toString(),
-                "playbook.yml", playbookUri.toString()
-            ))
-            .commands(new Property<>(
-                JacksonMapper.ofJson().writeValueAsString(List.of(
-                    "ansible-playbook -i inventory.ini -c local playbook.yml"
-                ))
-            ))
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "inventory.ini", inventoryUri.toString(),
+                    "playbook.yml", playbookUri.toString()
+                )
+            )
+            .commands(
+                new Property<>(
+                    JacksonMapper.ofJson().writeValueAsString(
+                        List.of(
+                            "ansible-playbook -i inventory.ini -c local playbook.yml"
+                        )
+                    )
+                )
+            )
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -346,14 +391,18 @@ class AnsibleCLITest {
         // Task 1 message per host
         Map<String, Object> t1h0 = (Map<String, Object>) tasks.get(0).getHosts().get(0).getResult();
         Map<String, Object> t1h1 = (Map<String, Object>) tasks.get(0).getHosts().get(1).getResult();
-        assertThat(List.of(t1h0.get("msg"), t1h1.get("msg")),
-            everyItem(is("Hello from task 1")));
+        assertThat(
+            List.of(t1h0.get("msg"), t1h1.get("msg")),
+            everyItem(is("Hello from task 1"))
+        );
 
         // Task 2 message per host
         Map<String, Object> t2h0 = (Map<String, Object>) tasks.get(1).getHosts().get(0).getResult();
         Map<String, Object> t2h1 = (Map<String, Object>) tasks.get(1).getHosts().get(1).getResult();
-        assertThat(List.of(t2h0.get("msg"), t2h1.get("msg")),
-            everyItem(is("Hello from task 2")));
+        assertThat(
+            List.of(t2h0.get("msg"), t2h1.get("msg")),
+            everyItem(is("Hello from task 2"))
+        );
     }
 
     @Test
@@ -391,25 +440,33 @@ class AnsibleCLITest {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
-            .inputFiles(Map.of(
-                // first playbook (single host)
-                "playbooks/playbook.yml", pb1Uri.toString(),
-                // second playbook (multi-host)
-                "playbooks/playbook_with_multiple_hosts.yml", pb2Uri.toString(),
-                // inventory for second playbook
-                "inventory.ini", inventoryUri.toString()
-            ))
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    // first playbook (single host)
+                    "playbooks/playbook.yml", pb1Uri.toString(),
+                    // second playbook (multi-host)
+                    "playbooks/playbook_with_multiple_hosts.yml", pb2Uri.toString(),
+                    // inventory for second playbook
+                    "inventory.ini", inventoryUri.toString()
+                )
+            )
             // Two distinct ansible-playbook commands => triggers multi-command behavior
-            .commands(new Property<>(
-                JacksonMapper.ofJson().writeValueAsString(List.of(
-                    "ansible-playbook -i localhost -c local playbooks/playbook.yml",
-                    "ansible-playbook -i inventory.ini -c local playbooks/playbook_with_multiple_hosts.yml"
-                ))
-            ))
+            .commands(
+                new Property<>(
+                    JacksonMapper.ofJson().writeValueAsString(
+                        List.of(
+                            "ansible-playbook -i localhost -c local playbooks/playbook.yml",
+                            "ansible-playbook -i inventory.ini -c local playbooks/playbook_with_multiple_hosts.yml"
+                        )
+                    )
+                )
+            )
             .outputLogFile(Property.ofValue(true))
             .build();
 
@@ -434,8 +491,7 @@ class AnsibleCLITest {
         // playbook.yml => 6 tasks * 1 host = 6 outputs
         // playbook_with_multiple_hosts.yml => 2 tasks * 2 hosts = 4 outputs
         // total = 10
-        List<Map<String, Object>> outputs =
-            (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
         assertThat(outputs, is(notNullValue()));
         assertThat(outputs.size(), is(10));
 
@@ -498,14 +554,18 @@ class AnsibleCLITest {
         var execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
             .assets(new AssetsDeclaration(true, null, null))
-            .inputFiles(Map.of(
-                "inventory.ini", inventoryUri.toString()
-            ))
+            .inputFiles(
+                Map.of(
+                    "inventory.ini", inventoryUri.toString()
+                )
+            )
             .commands(Property.ofValue(List.of("echo noop")))
             .build();
 
@@ -523,11 +583,13 @@ class AnsibleCLITest {
         var inputIds = firstEmit.inputs().stream()
             .map(AssetIdentifier::id)
             .toList();
-        assertThat(inputIds, containsInAnyOrder(
-            "web1.example.com",
-            "web2.example.com",
-            "db1.example.com"
-        ));
+        assertThat(
+            inputIds, containsInAnyOrder(
+                "web1.example.com",
+                "web2.example.com",
+                "db1.example.com"
+            )
+        );
 
         for (var input : firstEmit.inputs()) {
             assertThat(input.type(), is("io.kestra.plugin.ee.assets.VM"));
@@ -577,28 +639,36 @@ class AnsibleCLITest {
         var firstTask = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
             .assets(new AssetsDeclaration(true, null, null))
-            .inputFiles(Map.of(
-                "inventory.ini", firstInventoryUri.toString()
-            ))
+            .inputFiles(
+                Map.of(
+                    "inventory.ini", firstInventoryUri.toString()
+                )
+            )
             .commands(Property.ofValue(List.of("echo first run")))
             .build();
 
         var secondTask = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .docker(DockerOptions.builder()
-                .image("cytopia/ansible:latest-tools")
-                .entryPoint(Collections.emptyList())
-                .build())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
             .assets(new AssetsDeclaration(true, null, null))
-            .inputFiles(Map.of(
-                "inventory.ini", secondInventoryUri.toString()
-            ))
+            .inputFiles(
+                Map.of(
+                    "inventory.ini", secondInventoryUri.toString()
+                )
+            )
             .commands(Property.ofValue(List.of("echo second run")))
             .build();
 

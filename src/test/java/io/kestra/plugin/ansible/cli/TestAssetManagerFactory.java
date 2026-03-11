@@ -1,13 +1,14 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
 import io.kestra.core.assets.AssetManagerFactory;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.AssetEmitter;
+
 import io.micronaut.context.annotation.Replaces;
 import jakarta.inject.Singleton;
-
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 @Singleton
 @Replaces(AssetManagerFactory.class)
