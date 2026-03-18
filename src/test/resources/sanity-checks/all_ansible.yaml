@@ -1,0 +1,28 @@
+id: all_ansible
+namespace: sanitychecks.plugin-ansible
+
+tasks:
+  - id: ansible
+    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+    outputLogFile: true
+    inputFiles:
+      playbook.yml: |
+        ---
+        - hosts: localhost
+          tasks:
+            - name: Print sanity message
+              ansible.builtin.debug:
+                msg: "Hello from Ansible sanity check"
+    commands:
+      - ansible-playbook -i localhost -c local playbook.yml
+
+  - id: assert
+    type: io.kestra.plugin.core.execution.Assert
+    conditions:
+      - "{{ outputs.ansible.exitCode == 0 }}"
+      - "{{ outputs.ansible.outputFiles['log'] is not null }}"
+      - "{{ read(outputs.ansible.outputFiles['log']) contains 'Hello from Ansible sanity check' }}"
+
+finally:
+  - id: purge
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
