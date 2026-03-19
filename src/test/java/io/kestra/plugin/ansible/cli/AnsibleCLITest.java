@@ -148,11 +148,9 @@ class AnsibleCLITest {
             )
             .commands(
                 Property.ofValue(
-                    JacksonMapper.ofJson().writeValueAsString(
-                        List.of(
-                            "ansible --version",
-                            "ansible-playbook -i localhost -c local playbooks/playbook.yml"
-                        )
+                    List.of(
+                        "ansible --version",
+                        "ansible-playbook -i localhost -c local playbooks/playbook.yml"
                     )
                 )
             )
@@ -218,10 +216,8 @@ class AnsibleCLITest {
             )
             .commands(
                 Property.ofValue(
-                    JacksonMapper.ofJson().writeValueAsString(
-                        List.of(
-                            "ansible-playbook -i localhost -c local playbooks/playbook.yml"
-                        )
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook.yml"
                     )
                 )
             )
@@ -339,10 +335,8 @@ class AnsibleCLITest {
             )
             .commands(
                 Property.ofValue(
-                    JacksonMapper.ofJson().writeValueAsString(
-                        List.of(
-                            "ansible-playbook -i inventory.ini -c local playbook.yml"
-                        )
+                    List.of(
+                        "ansible-playbook -i inventory.ini -c local playbook.yml"
                     )
                 )
             )
@@ -459,11 +453,9 @@ class AnsibleCLITest {
             // Two distinct ansible-playbook commands => triggers multi-command behavior
             .commands(
                 Property.ofValue(
-                    JacksonMapper.ofJson().writeValueAsString(
-                        List.of(
-                            "ansible-playbook -i localhost -c local playbooks/playbook.yml",
-                            "ansible-playbook -i inventory.ini -c local playbooks/playbook_with_multiple_hosts.yml"
-                        )
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook.yml",
+                        "ansible-playbook -i inventory.ini -c local playbooks/playbook_with_multiple_hosts.yml"
                     )
                 )
             )
