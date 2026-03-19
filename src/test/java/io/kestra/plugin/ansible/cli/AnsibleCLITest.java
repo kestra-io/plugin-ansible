@@ -147,7 +147,7 @@ class AnsibleCLITest {
                 )
             )
             .commands(
-                new Property<>(
+                Property.ofValue(
                     JacksonMapper.ofJson().writeValueAsString(
                         List.of(
                             "ansible --version",
@@ -217,7 +217,7 @@ class AnsibleCLITest {
                 )
             )
             .commands(
-                new Property<>(
+                Property.ofValue(
                     JacksonMapper.ofJson().writeValueAsString(
                         List.of(
                             "ansible-playbook -i localhost -c local playbooks/playbook.yml"
@@ -338,7 +338,7 @@ class AnsibleCLITest {
                 )
             )
             .commands(
-                new Property<>(
+                Property.ofValue(
                     JacksonMapper.ofJson().writeValueAsString(
                         List.of(
                             "ansible-playbook -i inventory.ini -c local playbook.yml"
@@ -458,7 +458,7 @@ class AnsibleCLITest {
             )
             // Two distinct ansible-playbook commands => triggers multi-command behavior
             .commands(
-                new Property<>(
+                Property.ofValue(
                     JacksonMapper.ofJson().writeValueAsString(
                         List.of(
                             "ansible-playbook -i localhost -c local playbooks/playbook.yml",
