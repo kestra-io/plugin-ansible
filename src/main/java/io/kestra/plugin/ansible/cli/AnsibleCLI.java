@@ -152,6 +152,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         title = "Run once before commands",
         description = "Optional shell commands executed only before the first main command, rendered with the same variables."
     )
+    @PluginProperty(group = "execution")
     protected Property<List<String>> beforeCommands;
 
     @Schema(
@@ -159,19 +160,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = "Commands are executed one by one in the same working directory and their outputs are merged. Group related steps in a single task to optimize performance."
     )
     @NotNull
+    @PluginProperty(group = "main")
     protected Property<List<String>> commands;
 
     @Schema(
         title = "Additional environment variables",
         description = "Variables injected into the task runner environment for every command."
     )
+    @PluginProperty(group = "execution")
     protected Property<Map<String, String>> env;
 
     @Schema(
         title = "Deprecated Docker options",
         description = "Use taskRunner instead; kept for backward compatibility."
     )
-    @PluginProperty
+    @PluginProperty(group = "deprecated")
     @Deprecated
     private DockerOptions docker;
 
@@ -179,7 +182,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         title = "Task runner",
         description = "Runner implementation to execute the commands; defaults to Docker. Provide runner-specific properties as needed."
     )
-    @PluginProperty
+    @PluginProperty(group = "execution")
     @Builder.Default
     @Valid
     protected TaskRunner<?> taskRunner = Docker.instance();
@@ -189,6 +192,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = "Used only by container-based runners; defaults to cytopia/ansible:latest-tools. Supply a lean image with required modules to speed execution. Non-container runners won't include Ansible dependencies, so rely on this image (or provide your own) when you need them."
     )
     @Builder.Default
+    @PluginProperty(group = "execution")
     protected Property<String> containerImage = Property.ofValue(DEFAULT_IMAGE);
 
     @Schema(
@@ -199,6 +203,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             """
     )
     @Builder.Default
+    @PluginProperty(group = "advanced")
     protected Property<String> ansibleConfig = Property.ofExpression("""
         [defaults]
         log_path          = {{ workingDir }}/log
@@ -214,12 +219,16 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = "If true, uploads the ansible log as output file `log`; multi-command runs concatenate per-command logs. Default is false."
     )
     @Builder.Default
+    @PluginProperty(group = "source")
     private Property<Boolean> outputLogFile = Property.ofValue(false);
 
+    @PluginProperty(group = "source")
     private NamespaceFiles namespaceFiles;
 
+    @PluginProperty(group = "source")
     private Object inputFiles;
 
+    @PluginProperty(group = "destination")
     private Property<List<String>> outputFiles;
 
     @Override
