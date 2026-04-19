@@ -7,8 +7,9 @@
 
 ## Why
 
-- This plugin integrates Kestra with Ansible CLI.
-- It provides tasks that run Ansible CLI commands to execute playbooks and capture results.
+- What user problem does this solve? Teams need to orchestrate Ansible playbooks from Kestra flows from orchestrated workflows instead of relying on manual console work, ad hoc scripts, or disconnected schedulers.
+- Why would a team adopt this plugin in a workflow? It keeps Ansible steps in the same Kestra flow as upstream preparation, approvals, retries, notifications, and downstream systems.
+- What operational/business outcome does it enable? It reduces manual handoffs and fragmented tooling while improving reliability, traceability, and delivery speed for processes that depend on Ansible.
 
 ## How
 
