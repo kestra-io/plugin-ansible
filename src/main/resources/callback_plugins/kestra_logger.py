@@ -96,7 +96,7 @@ class CallbackModule(CallbackBase):
                 "playbooks": self._kestra_playbooks
             }
         }
-        print("::" + json.dumps(payload) + "::")
+        print("::" + json.dumps(payload, default=str) + "::")
 
     def _add_results_to_kestra_outputs(self, result):
         self._kestra_outputs.append(dict(result._result))
@@ -150,7 +150,7 @@ class CallbackModule(CallbackBase):
             "hosts": self._current_task.get("hosts", [])
         }
 
-        json_line = json.dumps(task_payload, separators=(",", ":"))
+        json_line = json.dumps(task_payload, default=str, separators=(",", ":"))
 
         # stdout for Kestra live parsing
         print(json_line)
