@@ -8,10 +8,7 @@ import java.util.Queue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import io.kestra.core.models.executions.LogEntry;
-import io.kestra.core.queues.QueueFactoryInterface;
-import io.kestra.core.queues.QueueInterface;
 import io.kestra.plugin.scripts.runner.docker.PullPolicy;
-import jakarta.inject.Named;
 import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
@@ -29,7 +26,6 @@ import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 
 import jakarta.inject.Inject;
-import reactor.core.publisher.Flux;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
