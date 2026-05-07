@@ -288,37 +288,24 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         // Run all commands in a SINGLE container to avoid pulling the image once per command
         // (which can lead to "killed during image pull" failures on slow CI runners).
-        // Each command's stdout+stderr is redirected to a per-command file so we can parse
-        // its `::{...}::` output markers in isolation. This preserves the per-command output
-        // accumulation behavior (e.g., merging `playbooks` lists across commands) that
-        // Kestra's default putAll() merger would otherwise overwrite.
-        List<Path> cmdStdoutFiles = new ArrayList<>();
-        List<Path> cmdRcFiles = new ArrayList<>();
+        //
+        // To preserve per-command output isolation (Kestra merges marker outputs with
+        // putAll, so the second command's `playbooks` would overwrite the first), we set
+        // KESTRA_RUN_IDX inline per command — the kestra_logger.py callback then emits
+        // markers under unique keys (`outputs_0`, `playbooks_0`, `outputs_1`, ...). After
+        // the run, we reassemble the indexed entries into the merged outputs/playbooks lists.
         List<String> shellLines = new ArrayList<>();
-
-        int idx = 0;
-        for (String cmd : rCommands) {
-            Path stdoutFile = workingDir.resolve("cmd-stdout-" + idx);
-            Path rcFile = workingDir.resolve("cmd-rc-" + idx);
-            cmdStdoutFiles.add(stdoutFile);
-            cmdRcFiles.add(rcFile);
-
-            String prefix = "";
-            // Per-command ANSIBLE_LOG_PATH override (inline env so it only applies to this cmd).
+        for (int i = 0; i < rCommands.size(); i++) {
+            String cmd = rCommands.get(i);
+            StringBuilder line = new StringBuilder("KESTRA_RUN_IDX=").append(i).append(' ');
             if (wantLogFile && multiCmd) {
-                Path logPath = workingDir.resolve("log-" + idx);
+                Path logPath = workingDir.resolve("log-" + i);
                 perCommandLogs.add(logPath);
-                prefix = "ANSIBLE_LOG_PATH=" + logPath + " ";
+                line.append("ANSIBLE_LOG_PATH=").append(logPath).append(' ');
             }
-            // Run cmd, capture stdout+stderr to file, write RC to rc file. Don't fail-fast:
-            // mirror old behaviour which always ran every command and tracked max RC.
-            shellLines.add(
-                "( " + prefix + cmd + " ) > " + stdoutFile + " 2>&1; echo $? > " + rcFile
-            );
-            idx++;
+            line.append(cmd);
+            shellLines.add(line.toString());
         }
-        // Always exit 0 from the shell — Java will determine final RC from the per-cmd rc files.
-        shellLines.add("exit 0");
 
         CommandsWrapper commandWrapper = baseWrapper
             .withEnv(rEnv)
@@ -328,44 +315,38 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .withCommands(Property.ofValue(shellLines));
 
         ScriptOutput out = commandWrapper.run();
-        lastOutputFiles = out.getOutputFiles();
-        lastTaskRunner = out.getTaskRunner();
+        mergedExitCode = out.getExitCode();
         mergedStdOutCount = out.getStdOutLineCount();
         mergedStdErrCount = out.getStdErrLineCount();
+        lastOutputFiles = out.getOutputFiles();
+        lastTaskRunner = out.getTaskRunner();
 
-        // Now parse each per-command stdout file for markers and merge per-command.
-        for (int i = 0; i < cmdStdoutFiles.size(); i++) {
-            Path stdoutFile = cmdStdoutFiles.get(i);
-            Path rcFile = cmdRcFiles.get(i);
-
-            // Per-command exit code
-            if (Files.exists(rcFile)) {
-                try {
-                    int rc = Integer.parseInt(Files.readString(rcFile, StandardCharsets.UTF_8).trim());
-                    mergedExitCode = Math.max(mergedExitCode, rc);
-                } catch (NumberFormatException ignored) {
-                    mergedExitCode = Math.max(mergedExitCode, 1);
+        // Reassemble per-run keys (`outputs_N`, `playbooks_N`) into merged lists, in run order.
+        Map<String, Object> vars = out.getVars();
+        if (vars != null) {
+            for (int i = 0; i < rCommands.size(); i++) {
+                Object outputsAtI = vars.get("outputs_" + i);
+                if (outputsAtI instanceof List<?> list) {
+                    for (Object o : list) {
+                        if (o instanceof Map<?, ?> m) {
+                            // noinspection unchecked
+                            mergedRawOutputs.add((Map<String, Object>) m);
+                        }
+                    }
                 }
-            } else {
-                mergedExitCode = Math.max(mergedExitCode, 1);
-            }
-
-            // Parse markers from the per-command stdout to keep playbook/output isolation
-            if (!Files.exists(stdoutFile)) {
-                continue;
-            }
-            String content = Files.readString(stdoutFile, StandardCharsets.UTF_8);
-            // Echo the captured stdout so it appears in the runner log (matches the per-call behaviour
-            // where each command's output streamed through Kestra's logger).
-            for (String line : content.split("\n", -1)) {
-                if (!line.isEmpty()) {
-                    runContext.logger().info(line);
+                Object playbooksAtI = vars.get("playbooks_" + i);
+                if (playbooksAtI instanceof List<?> list) {
+                    Map<String, Object> wrapper = new HashMap<>();
+                    wrapper.put("playbooks", list);
+                    List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(wrapper);
+                    if (pbs != null && !pbs.isEmpty()) {
+                        mergedPlaybooks.addAll(pbs);
+                    }
                 }
             }
-
-            Map<String, Object> cmdVars = parseMarkers(content);
-            Object maybeOutputs = cmdVars.get("outputs");
-            if (maybeOutputs instanceof List<?> list) {
+            // Single-command path: keys are still `outputs` / `playbooks` (no idx suffix).
+            Object outputsPlain = vars.get("outputs");
+            if (outputsPlain instanceof List<?> list) {
                 for (Object o : list) {
                     if (o instanceof Map<?, ?> m) {
                         // noinspection unchecked
@@ -373,13 +354,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     }
                 }
             }
-            List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(cmdVars);
+            List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
             if (pbs != null && !pbs.isEmpty()) {
                 mergedPlaybooks.addAll(pbs);
             }
-            for (Map.Entry<String, Object> e : cmdVars.entrySet()) {
+            // Other vars from the marker (rare; non-list) — preserve last-wins copy semantics.
+            for (Map.Entry<String, Object> e : vars.entrySet()) {
                 String key = e.getKey();
-                if ("outputs".equals(key) || "playbooks".equals(key)) {
+                if (key.equals("outputs") || key.equals("playbooks")
+                    || key.startsWith("outputs_") || key.startsWith("playbooks_")) {
                     continue;
                 }
                 mergedVars.put(key, e.getValue());
@@ -436,35 +419,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .taskRunner(lastTaskRunner)
             .playbooks(mergedPlaybooks)
             .build();
-    }
-
-    private static final java.util.regex.Pattern OUTPUT_MARKER = java.util.regex.Pattern.compile("::\\{(.*?)\\}::");
-
-    /**
-     * Parse Kestra output markers (`::{...}::`) from a raw text blob and merge their `outputs` maps.
-     * Mirrors the parsing done by {@code TaskLogLineMatcher}/{@code PluginUtilsService}, but per-call
-     * so the caller can keep per-command output groups isolated before merging.
-     */
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> parseMarkers(String content) {
-        Map<String, Object> merged = new HashMap<>();
-        if (content == null || content.isEmpty()) {
-            return merged;
-        }
-        java.util.regex.Matcher m = OUTPUT_MARKER.matcher(content);
-        while (m.find()) {
-            String json = "{" + m.group(1) + "}";
-            try {
-                Map<String, Object> parsed = JacksonMapper.ofJson().readValue(json, Map.class);
-                Object outputs = parsed.get("outputs");
-                if (outputs instanceof Map) {
-                    merged.putAll((Map<String, Object>) outputs);
-                }
-            } catch (Exception ignored) {
-                // skip malformed marker
-            }
-        }
-        return merged;
     }
 
     protected Map<String, String> finalInputFiles(RunContext runContext, Path workingDir) throws IOException, IllegalVariableEvaluationException {
