@@ -282,76 +282,64 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, URI> lastOutputFiles = Map.of();
         TaskRunnerDetailResult lastTaskRunner = null;
 
-        boolean beforeDone = false;
-
         // Collect per-command log paths (because Ansible truncates log_path each run)
         boolean multiCmd = rCommands.size() > 1;
         List<Path> perCommandLogs = new ArrayList<>();
 
+        // Build the full shell sequence (all commands in ONE container) to avoid pulling
+        // the image once per command which can lead to "killed during image pull" failures
+        // on slow CI runners.
+        List<String> shellLines = new ArrayList<>();
         int idx = 0;
         for (String cmd : rCommands) {
-            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
-
-            // If multiple commands and outputLogFile enabled,
-            // override ANSIBLE_LOG_PATH so each run writes a different file.
+            String prefix = "";
+            // Per-command ANSIBLE_LOG_PATH override (inline env so it only applies to this cmd)
             if (wantLogFile && multiCmd) {
                 Path logPath = workingDir.resolve("log-" + idx);
-                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
                 perCommandLogs.add(logPath);
+                prefix = "ANSIBLE_LOG_PATH=" + logPath + " ";
             }
-
-            CommandsWrapper commandWrapper = baseWrapper
-                .withEnv(envForRun)
-                // run beforeCommands only once, before the first command (rendered with extra vars)
-                .withBeforeCommands(
-                    beforeDone ? null
-                        : Property.ofValue(
-                            runContext.render(this.beforeCommands).asList(String.class, extraVars)
-                        )
-                )
-                // single command per run so Kestra doesn't overwrite outputs
-                .withCommands(Property.ofValue(List.of(cmd)));
-
-            ScriptOutput out = commandWrapper.run();
-
-            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
-            mergedStdOutCount += out.getStdOutLineCount();
-            mergedStdErrCount += out.getStdErrLineCount();
-
-            lastOutputFiles = out.getOutputFiles();
-            lastTaskRunner = out.getTaskRunner();
-
-            Map<String, Object> vars = out.getVars();
-            if (vars != null) {
-                // merge raw outputs (backward compatible)
-                Object maybeOutputs = vars.get("outputs");
-                if (maybeOutputs instanceof List<?> list) {
-                    for (Object o : list) {
-                        if (o instanceof Map<?, ?> m) {
-                            // noinspection unchecked
-                            mergedRawOutputs.add((Map<String, Object>) m);
-                        }
-                    }
-                }
-
-                // merge structured playbooks
-                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
-                if (pbs != null && !pbs.isEmpty()) {
-                    mergedPlaybooks.addAll(pbs);
-                }
-
-                // merge remaining vars (last-wins except lists above)
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    String key = e.getKey();
-                    if ("outputs".equals(key) || "playbooks".equals(key)) {
-                        continue;
-                    }
-                    mergedVars.put(key, e.getValue());
-                }
-            }
-
-            beforeDone = true;
+            shellLines.add(prefix + cmd);
             idx++;
+        }
+
+        CommandsWrapper commandWrapper = baseWrapper
+            .withEnv(rEnv)
+            .withBeforeCommands(
+                Property.ofValue(runContext.render(this.beforeCommands).asList(String.class, extraVars))
+            )
+            .withCommands(Property.ofValue(shellLines));
+
+        ScriptOutput out = commandWrapper.run();
+
+        mergedExitCode = out.getExitCode();
+        mergedStdOutCount = out.getStdOutLineCount();
+        mergedStdErrCount = out.getStdErrLineCount();
+        lastOutputFiles = out.getOutputFiles();
+        lastTaskRunner = out.getTaskRunner();
+
+        Map<String, Object> vars = out.getVars();
+        if (vars != null) {
+            Object maybeOutputs = vars.get("outputs");
+            if (maybeOutputs instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> m) {
+                        // noinspection unchecked
+                        mergedRawOutputs.add((Map<String, Object>) m);
+                    }
+                }
+            }
+            List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
+            if (pbs != null && !pbs.isEmpty()) {
+                mergedPlaybooks.addAll(pbs);
+            }
+            for (Map.Entry<String, Object> e : vars.entrySet()) {
+                String key = e.getKey();
+                if ("outputs".equals(key) || "playbooks".equals(key)) {
+                    continue;
+                }
+                mergedVars.put(key, e.getValue());
+            }
         }
 
         // If we produced per-command logs, concatenate into final "log"
