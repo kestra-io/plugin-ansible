@@ -282,76 +282,108 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, URI> lastOutputFiles = Map.of();
         TaskRunnerDetailResult lastTaskRunner = null;
 
-        boolean beforeDone = false;
-
         // Collect per-command log paths (because Ansible truncates log_path each run)
         boolean multiCmd = rCommands.size() > 1;
         List<Path> perCommandLogs = new ArrayList<>();
 
+        // Run all commands in a SINGLE container to avoid pulling the image once per command
+        // (which can lead to "killed during image pull" failures on slow CI runners).
+        // Each command's stdout+stderr is redirected to a per-command file so we can parse
+        // its `::{...}::` output markers in isolation. This preserves the per-command output
+        // accumulation behavior (e.g., merging `playbooks` lists across commands) that
+        // Kestra's default putAll() merger would otherwise overwrite.
+        List<Path> cmdStdoutFiles = new ArrayList<>();
+        List<Path> cmdRcFiles = new ArrayList<>();
+        List<String> shellLines = new ArrayList<>();
+
         int idx = 0;
         for (String cmd : rCommands) {
-            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
+            Path stdoutFile = workingDir.resolve("cmd-stdout-" + idx);
+            Path rcFile = workingDir.resolve("cmd-rc-" + idx);
+            cmdStdoutFiles.add(stdoutFile);
+            cmdRcFiles.add(rcFile);
 
-            // If multiple commands and outputLogFile enabled,
-            // override ANSIBLE_LOG_PATH so each run writes a different file.
+            String prefix = "";
+            // Per-command ANSIBLE_LOG_PATH override (inline env so it only applies to this cmd).
             if (wantLogFile && multiCmd) {
                 Path logPath = workingDir.resolve("log-" + idx);
-                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
                 perCommandLogs.add(logPath);
+                prefix = "ANSIBLE_LOG_PATH=" + logPath + " ";
             }
-
-            CommandsWrapper commandWrapper = baseWrapper
-                .withEnv(envForRun)
-                // run beforeCommands only once, before the first command (rendered with extra vars)
-                .withBeforeCommands(
-                    beforeDone ? null
-                        : Property.ofValue(
-                            runContext.render(this.beforeCommands).asList(String.class, extraVars)
-                        )
-                )
-                // single command per run so Kestra doesn't overwrite outputs
-                .withCommands(Property.ofValue(List.of(cmd)));
-
-            ScriptOutput out = commandWrapper.run();
-
-            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
-            mergedStdOutCount += out.getStdOutLineCount();
-            mergedStdErrCount += out.getStdErrLineCount();
-
-            lastOutputFiles = out.getOutputFiles();
-            lastTaskRunner = out.getTaskRunner();
-
-            Map<String, Object> vars = out.getVars();
-            if (vars != null) {
-                // merge raw outputs (backward compatible)
-                Object maybeOutputs = vars.get("outputs");
-                if (maybeOutputs instanceof List<?> list) {
-                    for (Object o : list) {
-                        if (o instanceof Map<?, ?> m) {
-                            // noinspection unchecked
-                            mergedRawOutputs.add((Map<String, Object>) m);
-                        }
-                    }
-                }
-
-                // merge structured playbooks
-                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
-                if (pbs != null && !pbs.isEmpty()) {
-                    mergedPlaybooks.addAll(pbs);
-                }
-
-                // merge remaining vars (last-wins except lists above)
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    String key = e.getKey();
-                    if ("outputs".equals(key) || "playbooks".equals(key)) {
-                        continue;
-                    }
-                    mergedVars.put(key, e.getValue());
-                }
-            }
-
-            beforeDone = true;
+            // Run cmd, capture stdout+stderr to file, write RC to rc file. Don't fail-fast:
+            // mirror old behaviour which always ran every command and tracked max RC.
+            shellLines.add(
+                "( " + prefix + cmd + " ) > " + stdoutFile + " 2>&1; echo $? > " + rcFile
+            );
             idx++;
+        }
+        // Always exit 0 from the shell — Java will determine final RC from the per-cmd rc files.
+        shellLines.add("exit 0");
+
+        CommandsWrapper commandWrapper = baseWrapper
+            .withEnv(rEnv)
+            .withBeforeCommands(
+                Property.ofValue(runContext.render(this.beforeCommands).asList(String.class, extraVars))
+            )
+            .withCommands(Property.ofValue(shellLines));
+
+        ScriptOutput out = commandWrapper.run();
+        lastOutputFiles = out.getOutputFiles();
+        lastTaskRunner = out.getTaskRunner();
+        mergedStdOutCount = out.getStdOutLineCount();
+        mergedStdErrCount = out.getStdErrLineCount();
+
+        // Now parse each per-command stdout file for markers and merge per-command.
+        for (int i = 0; i < cmdStdoutFiles.size(); i++) {
+            Path stdoutFile = cmdStdoutFiles.get(i);
+            Path rcFile = cmdRcFiles.get(i);
+
+            // Per-command exit code
+            if (Files.exists(rcFile)) {
+                try {
+                    int rc = Integer.parseInt(Files.readString(rcFile, StandardCharsets.UTF_8).trim());
+                    mergedExitCode = Math.max(mergedExitCode, rc);
+                } catch (NumberFormatException ignored) {
+                    mergedExitCode = Math.max(mergedExitCode, 1);
+                }
+            } else {
+                mergedExitCode = Math.max(mergedExitCode, 1);
+            }
+
+            // Parse markers from the per-command stdout to keep playbook/output isolation
+            if (!Files.exists(stdoutFile)) {
+                continue;
+            }
+            String content = Files.readString(stdoutFile, StandardCharsets.UTF_8);
+            // Echo the captured stdout so it appears in the runner log (matches the per-call behaviour
+            // where each command's output streamed through Kestra's logger).
+            for (String line : content.split("\n", -1)) {
+                if (!line.isEmpty()) {
+                    runContext.logger().info(line);
+                }
+            }
+
+            Map<String, Object> cmdVars = parseMarkers(content);
+            Object maybeOutputs = cmdVars.get("outputs");
+            if (maybeOutputs instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> m) {
+                        // noinspection unchecked
+                        mergedRawOutputs.add((Map<String, Object>) m);
+                    }
+                }
+            }
+            List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(cmdVars);
+            if (pbs != null && !pbs.isEmpty()) {
+                mergedPlaybooks.addAll(pbs);
+            }
+            for (Map.Entry<String, Object> e : cmdVars.entrySet()) {
+                String key = e.getKey();
+                if ("outputs".equals(key) || "playbooks".equals(key)) {
+                    continue;
+                }
+                mergedVars.put(key, e.getValue());
+            }
         }
 
         // If we produced per-command logs, concatenate into final "log"
@@ -404,6 +436,35 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .taskRunner(lastTaskRunner)
             .playbooks(mergedPlaybooks)
             .build();
+    }
+
+    private static final java.util.regex.Pattern OUTPUT_MARKER = java.util.regex.Pattern.compile("::\\{(.*?)\\}::");
+
+    /**
+     * Parse Kestra output markers (`::{...}::`) from a raw text blob and merge their `outputs` maps.
+     * Mirrors the parsing done by {@code TaskLogLineMatcher}/{@code PluginUtilsService}, but per-call
+     * so the caller can keep per-command output groups isolated before merging.
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> parseMarkers(String content) {
+        Map<String, Object> merged = new HashMap<>();
+        if (content == null || content.isEmpty()) {
+            return merged;
+        }
+        java.util.regex.Matcher m = OUTPUT_MARKER.matcher(content);
+        while (m.find()) {
+            String json = "{" + m.group(1) + "}";
+            try {
+                Map<String, Object> parsed = JacksonMapper.ofJson().readValue(json, Map.class);
+                Object outputs = parsed.get("outputs");
+                if (outputs instanceof Map) {
+                    merged.putAll((Map<String, Object>) outputs);
+                }
+            } catch (Exception ignored) {
+                // skip malformed marker
+            }
+        }
+        return merged;
     }
 
     protected Map<String, String> finalInputFiles(RunContext runContext, Path workingDir) throws IOException, IllegalVariableEvaluationException {
