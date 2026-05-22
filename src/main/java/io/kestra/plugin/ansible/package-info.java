@@ -1,4 +1,5 @@
 @PluginSubGroup(
+    title = "Ansible CLI",
     description = "Tasks that orchestrate Ansible playbooks from Kestra flows.\n",
     categories = {
         PluginSubGroup.PluginCategory.INFRASTRUCTURE
