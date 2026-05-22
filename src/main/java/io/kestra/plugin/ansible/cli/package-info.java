@@ -1,4 +1,5 @@
 @PluginSubGroup(
+    title = "Ansible CLI",
     description = "Tasks that run Ansible CLI commands to execute playbooks and capture results.\n",
     categories = {
         PluginSubGroup.PluginCategory.INFRASTRUCTURE
