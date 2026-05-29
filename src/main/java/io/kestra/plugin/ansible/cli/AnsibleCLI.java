@@ -54,7 +54,10 @@ import lombok.experimental.SuperBuilder;
 @NoArgsConstructor
 @Schema(
     title = "Run Ansible CLI commands",
-    description = "Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one. Uses the cytopia/ansible:latest-tools image by default and merges outputs across multiple commands."
+    description = """
+        Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one. Uses the cytopia/ansible:latest-tools image by default and merges outputs across multiple commands.
+        When a `requirements.txt` file is present in the working directory, the task automatically installs the listed Python packages with `pip` before running commands. When a `requirements.yml` file is present, it installs the listed Ansible Galaxy collections and roles with `ansible-galaxy install`. Both behaviors are enabled by default and can be disabled via `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
+        """
 )
 @Plugin(
     examples = {
@@ -222,6 +225,28 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @PluginProperty(group = "source")
     private Property<Boolean> outputLogFile = Property.ofValue(false);
 
+    @Schema(
+        title = "Auto-install Python dependencies",
+        description = """
+            If true (default), runs `pip install --no-cache-dir -r requirements.txt` before commands when a `requirements.txt` file is present in the working directory.
+            The check is performed at runtime in the runner shell, so the file may come from `inputFiles`, `namespaceFiles`, or any other source materialized into the working directory.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Boolean> autoInstallPythonRequirements = Property.ofValue(true);
+
+    @Schema(
+        title = "Auto-install Ansible Galaxy collections and roles",
+        description = """
+            If true (default), runs `ansible-galaxy install -r requirements.yml` before commands when a `requirements.yml` file is present in the working directory.
+            Since Ansible 2.10, `ansible-galaxy install` handles both the `collections:` and `roles:` keys defined in `requirements.yml`.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Boolean> autoInstallGalaxyRequirements = Property.ofValue(true);
+
     @PluginProperty(group = "source")
     private NamespaceFiles namespaceFiles;
 
@@ -268,6 +293,17 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         );
         emitInventoryAssets(runContext, workingDir);
 
+        // Auto-install requirement files when present in the working directory.
+        // Shell-level conditionals so detection happens after working dir is materialized by the task runner.
+        // `[ ! -f X ] || cmd` — file absent: exits 0; file present: runs cmd and propagates its exit code.
+        List<String> autoInstallCommands = new ArrayList<>();
+        if (runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElseThrow()) {
+            autoInstallCommands.add("[ ! -f requirements.txt ] || pip install --no-cache-dir -r requirements.txt");
+        }
+        if (runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElseThrow()) {
+            autoInstallCommands.add("[ ! -f requirements.yml ] || ansible-galaxy install -r requirements.yml");
+        }
+
         List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
 
         // run each ansible-playbook separately and merge outputs
@@ -300,15 +336,20 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 perCommandLogs.add(logPath);
             }
 
+            Property<List<String>> mergedBeforeCommands = null;
+            if (!beforeDone) {
+                List<String> renderedBefore = runContext.render(this.beforeCommands).asList(String.class, extraVars);
+                // User beforeCommands run first so they can configure the environment
+                // (e.g. private pip index, proxy, auth) before auto-install fires.
+                List<String> merged = new ArrayList<>(renderedBefore);
+                merged.addAll(autoInstallCommands);
+                mergedBeforeCommands = Property.ofValue(merged);
+            }
+
             CommandsWrapper commandWrapper = baseWrapper
                 .withEnv(envForRun)
                 // run beforeCommands only once, before the first command (rendered with extra vars)
-                .withBeforeCommands(
-                    beforeDone ? null
-                        : Property.ofValue(
-                            runContext.render(this.beforeCommands).asList(String.class, extraVars)
-                        )
-                )
+                .withBeforeCommands(mergedBeforeCommands)
                 // single command per run so Kestra doesn't overwrite outputs
                 .withCommands(Property.ofValue(List.of(cmd)));
 

@@ -6,6 +6,8 @@ tasks:
     type: io.kestra.plugin.ansible.cli.AnsibleCLI
     outputLogFile: true
     inputFiles:
+      requirements.txt: |
+        proxmoxer==2.0.1
       playbook.yml: |
         ---
         - hosts: localhost
@@ -13,6 +15,10 @@ tasks:
             - name: Print sanity message
               ansible.builtin.debug:
                 msg: "Hello from Ansible sanity check"
+
+            - name: Ensure auto-installed Python dep is importable
+              ansible.builtin.command: python -c "import proxmoxer"
+              changed_when: false
     commands:
       - ansible-playbook -i localhost -c local playbook.yml
 
