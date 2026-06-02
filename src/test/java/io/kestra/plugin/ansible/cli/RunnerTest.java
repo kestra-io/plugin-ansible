@@ -15,7 +15,7 @@ class RunnerTest {
     @Test
     @ExecuteFlow("sanity-checks/all_ansible.yaml")
     void all_ansible(Execution execution) {
-        assertThat(execution.getTaskRunList(), hasSize(5));
+        assertThat(execution.getTaskRunList(), hasSize(6));
         assertThat(execution.getState().getCurrent(), is(State.Type.SUCCESS));
     }
 }

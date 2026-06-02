@@ -677,6 +677,160 @@ class AnsibleCLITest {
     }
 
     @Test
+    void run_withRequirementsTxt_autoInstalls() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "requirements.txt", "proxmoxer==2.0.1\n"
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        // Will fail if proxmoxer was not pip-installed beforehand.
+                        "python -c \"import proxmoxer; print('proxmoxer imported')\""
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        ScriptOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+    }
+
+    @Test
+    void run_withRequirementsYml_autoInstalls() throws Exception {
+        // Use a Galaxy role rather than a collection: roles are never bundled with Ansible,
+        // so a successful `ansible-galaxy role list` for it proves the auto-install ran.
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "requirements.yml", """
+                        ---
+                        roles:
+                          - name: geerlingguy.docker
+                        """
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        // Will fail (non-zero exit) if the role was not installed.
+                        "ansible-galaxy role list geerlingguy.docker"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        ScriptOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+    }
+
+    @Test
+    void run_autoInstallGalaxyDisabled_skipsRoleInstall() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .autoInstallGalaxyRequirements(Property.ofValue(false))
+            .inputFiles(
+                Map.of(
+                    "requirements.yml", """
+                        ---
+                        roles:
+                          - name: geerlingguy.docker
+                        """
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        // With auto-install disabled, the role must not be present.
+                        "ansible-galaxy role list geerlingguy.docker"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        try {
+            ScriptOutput runOutput = execute.run(runContext);
+            // Some task runners surface failures via non-zero exitCode rather than throwing.
+            // AssertionError is an Error (not Exception), so a passing 0 still fails the test.
+            assertThat(runOutput.getExitCode(), is(not(0)));
+        } catch (Exception e) {
+            // Expected: command failed because the role is missing.
+        }
+    }
+
+    @Test
+    void run_autoInstallDisabled_skipsPipInstall() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .autoInstallPythonRequirements(Property.ofValue(false))
+            .inputFiles(
+                Map.of(
+                    "requirements.txt", "proxmoxer==2.0.1\n"
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        // With auto-install disabled, proxmoxer is not installed and import must fail.
+                        "python -c \"import proxmoxer\""
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        try {
+            ScriptOutput runOutput = execute.run(runContext);
+            // Some task runners surface failures via non-zero exitCode rather than throwing.
+            // AssertionError is an Error (not Exception), so a passing 0 still fails the test.
+            assertThat(runOutput.getExitCode(), is(not(0)));
+        } catch (Exception e) {
+            // Expected: command failed because proxmoxer is missing.
+        }
+    }
+
+    @Test
     void shouldReproduceVaultSerializationBug() throws Exception {
 
         AnsibleCLI task = AnsibleCLI.builder()
