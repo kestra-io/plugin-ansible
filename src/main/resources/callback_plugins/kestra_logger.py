@@ -89,11 +89,21 @@ class CallbackModule(CallbackBase):
         Final payload printed to stdout for Kestra parsing.
         We must put structured outputs under "outputs"
         because Kestra only reads that key.
+
+        When AnsibleCLI runs multiple commands in a single container, it sets
+        KESTRA_RUN_IDX per command so each run emits markers with unique keys
+        (e.g. outputs_0, playbooks_0, outputs_1, ...) — Kestra's putAll merge
+        then keeps each run's output, and the Java side reassembles them.
         """
+        run_idx = os.environ.get('KESTRA_RUN_IDX')
+        if run_idx is None or run_idx == '':
+            outputs_key, playbooks_key = "outputs", "playbooks"
+        else:
+            outputs_key, playbooks_key = f"outputs_{run_idx}", f"playbooks_{run_idx}"
         payload = {
             "outputs": {
-                "outputs": self._kestra_outputs,
-                "playbooks": self._kestra_playbooks
+                outputs_key: self._kestra_outputs,
+                playbooks_key: self._kestra_playbooks
             }
         }
         print("::" + json.dumps(payload, default=str) + "::")

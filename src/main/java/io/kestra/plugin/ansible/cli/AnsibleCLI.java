@@ -318,55 +318,51 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, URI> lastOutputFiles = Map.of();
         TaskRunnerDetailResult lastTaskRunner = null;
 
-        boolean beforeDone = false;
-
         // Collect per-command log paths (because Ansible truncates log_path each run)
         boolean multiCmd = rCommands.size() > 1;
         List<Path> perCommandLogs = new ArrayList<>();
 
-        int idx = 0;
-        for (String cmd : rCommands) {
-            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
-
-            // If multiple commands and outputLogFile enabled,
-            // override ANSIBLE_LOG_PATH so each run writes a different file.
+        // Run all commands in a SINGLE container to avoid pulling the image once per command
+        // (which can lead to "killed during image pull" failures on slow CI runners).
+        //
+        // To preserve per-command output isolation (Kestra merges marker outputs with
+        // putAll, so the second command's `playbooks` would overwrite the first), we set
+        // KESTRA_RUN_IDX inline per command — the kestra_logger.py callback then emits
+        // markers under unique keys (`outputs_0`, `playbooks_0`, `outputs_1`, ...). After
+        // the run, we reassemble the indexed entries into the merged outputs/playbooks lists.
+        List<String> shellLines = new ArrayList<>();
+        for (int i = 0; i < rCommands.size(); i++) {
+            String cmd = rCommands.get(i);
+            StringBuilder line = new StringBuilder("KESTRA_RUN_IDX=").append(i).append(' ');
             if (wantLogFile && multiCmd) {
-                Path logPath = workingDir.resolve("log-" + idx);
-                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
+                Path logPath = workingDir.resolve("log-" + i);
                 perCommandLogs.add(logPath);
+                line.append("ANSIBLE_LOG_PATH=").append(logPath).append(' ');
             }
+            line.append(cmd);
+            shellLines.add(line.toString());
+        }
 
-            Property<List<String>> mergedBeforeCommands = null;
-            if (!beforeDone) {
-                List<String> renderedBefore = runContext.render(this.beforeCommands).asList(String.class, extraVars);
-                // User beforeCommands run first so they can configure the environment
-                // (e.g. private pip index, proxy, auth) before auto-install fires.
-                List<String> merged = new ArrayList<>(renderedBefore);
-                merged.addAll(autoInstallCommands);
-                mergedBeforeCommands = Property.ofValue(merged);
-            }
+        CommandsWrapper commandWrapper = baseWrapper
+            .withEnv(rEnv)
+            .withBeforeCommands(
+                Property.ofValue(runContext.render(this.beforeCommands).asList(String.class, extraVars))
+            )
+            .withCommands(Property.ofValue(shellLines));
 
-            CommandsWrapper commandWrapper = baseWrapper
-                .withEnv(envForRun)
-                // run beforeCommands only once, before the first command (rendered with extra vars)
-                .withBeforeCommands(mergedBeforeCommands)
-                // single command per run so Kestra doesn't overwrite outputs
-                .withCommands(Property.ofValue(List.of(cmd)));
+        ScriptOutput out = commandWrapper.run();
+        mergedExitCode = out.getExitCode();
+        mergedStdOutCount = out.getStdOutLineCount();
+        mergedStdErrCount = out.getStdErrLineCount();
+        lastOutputFiles = out.getOutputFiles();
+        lastTaskRunner = out.getTaskRunner();
 
-            ScriptOutput out = commandWrapper.run();
-
-            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
-            mergedStdOutCount += out.getStdOutLineCount();
-            mergedStdErrCount += out.getStdErrLineCount();
-
-            lastOutputFiles = out.getOutputFiles();
-            lastTaskRunner = out.getTaskRunner();
-
-            Map<String, Object> vars = out.getVars();
-            if (vars != null) {
-                // merge raw outputs (backward compatible)
-                Object maybeOutputs = vars.get("outputs");
-                if (maybeOutputs instanceof List<?> list) {
+        // Reassemble per-run keys (`outputs_N`, `playbooks_N`) into merged lists, in run order.
+        Map<String, Object> vars = out.getVars();
+        if (vars != null) {
+            for (int i = 0; i < rCommands.size(); i++) {
+                Object outputsAtI = vars.get("outputs_" + i);
+                if (outputsAtI instanceof List<?> list) {
                     for (Object o : list) {
                         if (o instanceof Map<?, ?> m) {
                             // noinspection unchecked
@@ -374,25 +370,39 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                         }
                     }
                 }
-
-                // merge structured playbooks
-                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
-                if (pbs != null && !pbs.isEmpty()) {
-                    mergedPlaybooks.addAll(pbs);
-                }
-
-                // merge remaining vars (last-wins except lists above)
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    String key = e.getKey();
-                    if ("outputs".equals(key) || "playbooks".equals(key)) {
-                        continue;
+                Object playbooksAtI = vars.get("playbooks_" + i);
+                if (playbooksAtI instanceof List<?> list) {
+                    Map<String, Object> wrapper = new HashMap<>();
+                    wrapper.put("playbooks", list);
+                    List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(wrapper);
+                    if (pbs != null && !pbs.isEmpty()) {
+                        mergedPlaybooks.addAll(pbs);
                     }
-                    mergedVars.put(key, e.getValue());
                 }
             }
-
-            beforeDone = true;
-            idx++;
+            // Single-command path: keys are still `outputs` / `playbooks` (no idx suffix).
+            Object outputsPlain = vars.get("outputs");
+            if (outputsPlain instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> m) {
+                        // noinspection unchecked
+                        mergedRawOutputs.add((Map<String, Object>) m);
+                    }
+                }
+            }
+            List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
+            if (pbs != null && !pbs.isEmpty()) {
+                mergedPlaybooks.addAll(pbs);
+            }
+            // Other vars from the marker (rare; non-list) — preserve last-wins copy semantics.
+            for (Map.Entry<String, Object> e : vars.entrySet()) {
+                String key = e.getKey();
+                if (key.equals("outputs") || key.equals("playbooks")
+                    || key.startsWith("outputs_") || key.startsWith("playbooks_")) {
+                    continue;
+                }
+                mergedVars.put(key, e.getValue());
+            }
         }
 
         // If we produced per-command logs, concatenate into final "log"
