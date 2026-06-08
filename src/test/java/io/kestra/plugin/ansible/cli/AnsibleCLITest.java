@@ -777,7 +777,9 @@ class AnsibleCLITest {
                 Property.ofValue(
                     List.of(
                         // With auto-install disabled, the role must not be present.
-                        "ansible-galaxy role list geerlingguy.docker"
+                        // `ansible-galaxy role list <role>` only warns (exit 0) when a role
+                        // is missing, so grep the listing to force a non-zero exit on absence.
+                        "ansible-galaxy role list 2>/dev/null | grep -q geerlingguy.docker"
                     )
                 )
             )
