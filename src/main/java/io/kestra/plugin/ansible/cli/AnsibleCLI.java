@@ -140,6 +140,46 @@ import lombok.experimental.SuperBuilder;
                     commands:
                       - ansible-playbook -i localhost -c local playbook.yml
                 """
+        ),
+        @Example(
+            title = "Expose only explicitly declared playbook values as outputs. With `outputsMode: EXPLICIT`, the bundled `kestra` module declares which values become task outputs; raw per-host results are redacted from outputs and logs, so sensitive data fetched by the playbook never leaks. The playbook is kept in flow variables so its Ansible Jinja expressions are not evaluated by Kestra.",
+            full = true,
+            code = """
+                id: ansible_explicit_outputs
+                namespace: company.team
+
+                variables:
+                  playbook: |
+                    ---
+                    - hosts: localhost
+                      tasks:
+                        - name: Fetch credentials needed by the automation
+                          ansible.builtin.set_fact:
+                            credential:
+                              username: svc-automation
+                              password: "not-for-kestra-outputs"
+
+                        - name: Do the work
+                          ansible.builtin.set_fact:
+                            records_updated: 3
+                          register: work_result
+
+                        - name: Declare what downstream tasks may see
+                          kestra:
+                            outputs:
+                              records_updated: "{{ records_updated }}"
+                              work_status: "{{ 'skipped' if work_result.skipped | default(false) else 'ok' }}"
+
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    outputsMode: EXPLICIT
+                    inputFiles:
+                      playbook.yml: "{{ vars.playbook }}"
+                    containerImage: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i localhost -c local playbook.yml
+                """
         )
     }
 )
@@ -147,6 +187,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
     public static final String ANSIBLE_CFG = "ansible.cfg";
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
+    public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
+    public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -215,7 +257,20 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         stdout_callback   = ansible.builtin.null
         result_format     = json
         pretty_results    = true
+        library           = ./library
         """);
+
+    @Schema(
+        title = "Outputs capture mode",
+        description = """
+            ALL (default) captures every per-host result of every playbook task as outputs.
+            EXPLICIT captures only values declared inside the playbook via the bundled `kestra` module; per-host result payloads are redacted to `{"changed": <bool>}` in outputs and live logs, while task names, timings, and statuses (ok/failed/skipped/unreachable) are preserved.
+            Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<OutputsMode> outputsMode = Property.ofValue(OutputsMode.ALL);
 
     @Schema(
         title = "Publish Ansible log file",
@@ -267,6 +322,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         var rEnv = runContext.render(this.env).asMap(String.class, String.class);
 
+        OutputsMode rOutputsModeEnum = runContext.render(this.outputsMode).as(OutputsMode.class)
+            .orElse(OutputsMode.ALL);
+        String rOutputsMode = rOutputsModeEnum.name().toLowerCase(Locale.ROOT);
+
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
@@ -310,6 +369,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, Object> mergedVars = new HashMap<>();
         List<AnsibleOutput.PlaybookOutput> mergedPlaybooks = new ArrayList<>();
         List<Map<String, Object>> mergedRawOutputs = new ArrayList<>();
+        Map<String, Object> mergedExplicitOutputs = new HashMap<>();
 
         int mergedExitCode = 0;
         int mergedStdOutCount = 0;
@@ -327,6 +387,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         int idx = 0;
         for (String cmd : rCommands) {
             Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
+            envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
 
             // If multiple commands and outputLogFile enabled,
             // override ANSIBLE_LOG_PATH so each run writes a different file.
@@ -364,7 +425,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             Map<String, Object> vars = out.getVars();
             if (vars != null) {
-                // merge raw outputs (backward compatible)
+                // merge raw outputs (backward compatible); in EXPLICIT mode the
+                // callback emits a map of declared outputs instead of a list
                 Object maybeOutputs = vars.get("outputs");
                 if (maybeOutputs instanceof List<?> list) {
                     for (Object o : list) {
@@ -373,6 +435,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                             mergedRawOutputs.add((Map<String, Object>) m);
                         }
                     }
+                } else if (maybeOutputs instanceof Map<?, ?> m) {
+                    m.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
                 }
 
                 // merge structured playbooks
@@ -430,7 +494,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         // ensure merged vars expose the expected root keys
-        mergedVars.put("outputs", mergedRawOutputs);
+        mergedVars.put("outputs", rOutputsModeEnum == OutputsMode.EXPLICIT ? mergedExplicitOutputs : mergedRawOutputs);
         mergedVars.put("playbooks", mergedPlaybooks);
 
         // minimal UI timeline support: emit dynamic worker results
@@ -463,6 +527,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         InputStream ansibleCustomLogger = getClass().getClassLoader().getResourceAsStream(PLUGINS_KESTRA_LOGGER_PY);
         URI pluginUri = runContext.storage().putFile(ansibleCustomLogger, PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
+
+        // Add the kestra module so playbooks can declare explicit outputs
+        InputStream kestraModule = getClass().getClassLoader().getResourceAsStream(LIBRARY_KESTRA_PY);
+        URI moduleUri = runContext.storage().putFile(kestraModule, LIBRARY_KESTRA_PY);
+        map.put(LIBRARY_KESTRA_PY, moduleUri.toString());
         return map;
     }
 
@@ -677,6 +746,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         if (!results.isEmpty()) {
             runContext.dynamicWorkerResult(results);
         }
+    }
+
+    public enum OutputsMode {
+        ALL,
+        EXPLICIT
     }
 
     @SuperBuilder

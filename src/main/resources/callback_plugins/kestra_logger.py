@@ -40,9 +40,21 @@ class CallbackModule(CallbackBase):
     CALLBACK_TYPE = 'aggregate'
     CALLBACK_NAME = 'kestra_logger'
 
+    # Action names under which the bundled kestra module can be invoked
+    KESTRA_OUTPUT_ACTIONS = frozenset({'kestra', 'ansible.legacy.kestra'})
+
     def __init__(self):
         # Raw Kestra output list (backward compatible)
         self._kestra_outputs = []
+
+        # --- explicit outputs (kestra module) ---
+        # Mode is set by the AnsibleCLI task via env var:
+        #   all      -> current behavior: every per-host result is emitted (default)
+        #   explicit -> only values declared via the kestra module are
+        #               emitted; per-host result payloads are redacted
+        self._outputs_mode = os.environ.get("KESTRA_OUTPUTS_MODE", "all").strip().lower()
+        self._kestra_explicit = {}
+        # -----------------------------------------------
 
         # Structured outputs
         self._kestra_playbooks = []
@@ -90,13 +102,34 @@ class CallbackModule(CallbackBase):
         We must put structured outputs under "outputs"
         because Kestra only reads that key.
         """
-        payload = {
-            "outputs": {
-                "outputs": self._kestra_outputs,
-                "playbooks": self._kestra_playbooks
+        if self._outputs_mode == "explicit":
+            payload = {
+                "outputs": {
+                    "outputs": self._kestra_explicit,
+                    "playbooks": self._kestra_playbooks
+                }
             }
-        }
+        else:
+            payload = {
+                "outputs": {
+                    "outputs": self._kestra_outputs,
+                    "playbooks": self._kestra_playbooks
+                }
+            }
         print("::" + json.dumps(payload, default=str) + "::")
+
+    def _is_kestra_output_task(self, result):
+        action = getattr(result._task, "action", None)
+        return action in self.KESTRA_OUTPUT_ACTIONS
+
+    def _collect_explicit_outputs(self, result):
+        """
+        Merge outputs declared via the kestra module.
+        Last write wins per key; use run_once/delegate_to for run-level outputs.
+        """
+        declared = result._result.get("outputs")
+        if isinstance(declared, dict):
+            self._kestra_explicit.update(declared)
 
     def _add_results_to_kestra_outputs(self, result):
         self._kestra_outputs.append(dict(result._result))
@@ -234,17 +267,30 @@ class CallbackModule(CallbackBase):
         """
         Add per-host result under current task (structured),
         and also append to raw outputs (compat).
+        In explicit mode, result payloads are redacted: only declared
+        declared kestra outputs are collected, statuses are preserved.
         """
-        self._add_results_to_kestra_outputs(result)
+        if self._is_kestra_output_task(result) and status == "ok":
+            self._collect_explicit_outputs(result)
+
+        if self._outputs_mode != "explicit":
+            self._add_results_to_kestra_outputs(result)
 
         if self._current_task is None:
             self._start_task(result._task)
 
         host_name = result._host.get_name() if result._host else "unknown_host"
+
+        if self._outputs_mode == "explicit":
+            # Keep skip-vs-failure visibility, drop the (possibly sensitive) payload
+            result_payload = {"changed": bool(result._result.get("changed", False))}
+        else:
+            result_payload = dict(result._result)
+
         host_result = {
             "host": host_name,
             "status": status,
-            "result": dict(result._result)
+            "result": result_payload
         }
         self._current_task["hosts"].append(host_result)
 

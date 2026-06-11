@@ -202,6 +202,67 @@ class AnsibleCLITest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void run_withExplicitOutputs() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-explicit-outputs.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-explicit-outputs.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-outputs.yml"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        // only the values declared via the kestra module are exposed
+        Object outputs = runOutput.getVars().get("outputs");
+        assertThat(outputs, is(instanceOf(Map.class)));
+        Map<String, Object> declared = (Map<String, Object>) outputs;
+        assertThat(declared.keySet(), containsInAnyOrder("records_updated", "skipped_status"));
+        assertThat(declared.get("records_updated"), is(3));
+        assertThat(declared.get("skipped_status"), is("skipped"));
+
+        // the sensitive value never reaches the outputs
+        assertThat(JacksonMapper.ofJson().writeValueAsString(runOutput.getVars()), not(containsString("super-secret-value")));
+
+        // structured playbooks keep names and statuses, payloads are redacted
+        List<AnsibleCLI.AnsibleOutput.PlaybookOutput> playbooks = runOutput.getPlaybooks();
+        assertThat(playbooks.size(), is(1));
+        List<AnsibleCLI.AnsibleOutput.TaskOutput> tasks = playbooks.getFirst().getPlays().getFirst().getTasks();
+        assertThat(tasks.size(), is(4));
+        assertThat(tasks.get(2).getHosts().getFirst().getStatus(), is("skipped"));
+        for (AnsibleCLI.AnsibleOutput.TaskOutput t : tasks) {
+            Map<String, Object> result = (Map<String, Object>) t.getHosts().getFirst().getResult();
+            assertThat(result.keySet(), contains("changed"));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void run_withStructuredOutputs() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
