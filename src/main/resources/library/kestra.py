@@ -28,6 +28,12 @@ options:
       - Arbitrary mapping of output names to JSON-serializable values.
     type: dict
     required: false
+notes:
+  - Do not invoke this module with a loop. Ansible aggregates per-item results
+    under a C(results) key, so declared outputs would not be collected; call
+    the module once with all values instead.
+  - On multi-host plays, outputs merge by key with last write winning. Use
+    C(run_once) for run-level outputs or key by hostname for per-host values.
 author:
   - Kestra (@kestra-io)
 """
