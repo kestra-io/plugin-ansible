@@ -180,6 +180,42 @@ import lombok.experimental.SuperBuilder;
                     commands:
                       - ansible-playbook -i localhost -c local playbook.yml
                 """
+        ),
+        @Example(
+            title = "Supply a custom `ansible.cfg` while keeping the Kestra integration working. When you provide your own `ansibleConfig`, the generated one is skipped entirely, so you must keep the `callback_plugins`/`callbacks_enabled` lines for output capture and the `library = ./library` line for the bundled `kestra` module to resolve; add your own settings below them.",
+            full = true,
+            code = """
+                id: ansible_custom_config
+                namespace: company.team
+
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    outputsMode: EXPLICIT
+                    ansibleConfig: |
+                      [defaults]
+                      log_path          = {{ workingDir }}/log
+                      callback_plugins  = ./callback_plugins
+                      callbacks_enabled = kestra_logger
+                      stdout_callback   = ansible.builtin.null
+                      result_format     = json
+                      pretty_results    = true
+                      library           = ./library
+                      forks             = 10
+                      timeout           = 30
+                    inputFiles:
+                      playbook.yml: |
+                        ---
+                        - hosts: localhost
+                          tasks:
+                            - name: Declare outputs
+                              kestra:
+                                outputs:
+                                  deployed: true
+                    containerImage: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i localhost -c local playbook.yml
+                """
         )
     }
 )
