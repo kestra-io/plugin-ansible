@@ -40,7 +40,10 @@ class CallbackModule(CallbackBase):
     CALLBACK_TYPE = 'aggregate'
     CALLBACK_NAME = 'kestra_logger'
 
-    # Action names under which the bundled kestra module can be invoked
+    # Action names under which the bundled kestra module can be invoked.
+    # 'ansible.legacy' is Ansible's implicit namespace for modules resolved
+    # from library/ paths (not collections); playbooks following the
+    # always-use-FQCN lint rule invoke the module as ansible.legacy.kestra.
     KESTRA_OUTPUT_ACTIONS = frozenset({'kestra', 'ansible.legacy.kestra'})
 
     def __init__(self):
