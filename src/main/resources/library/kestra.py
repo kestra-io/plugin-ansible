@@ -4,9 +4,7 @@
 # General-purpose Kestra integration module for Ansible playbooks.
 # Currently supports declaring explicit task outputs; designed so future
 # capabilities (e.g. metrics) can be added as new parameters without a
-# breaking change.
-#
-# Analogous to the Kestra Python library: one namespace, capability methods.
+# breaking change, analogous to the Kestra Python library.
 
 from __future__ import annotations
 

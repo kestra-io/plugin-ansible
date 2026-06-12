@@ -300,7 +300,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         title = "Outputs capture mode",
         description = """
             ALL (default) captures every per-host result of every playbook task as outputs.
-            EXPLICIT captures only values declared inside the playbook via the bundled `kestra` module; per-host result payloads are redacted to `{"changed": <bool>}` in outputs and live logs, while task names, timings, and statuses (ok/failed/skipped/unreachable) are preserved.
+            EXPLICIT captures only values declared in the playbook via the bundled `kestra` module; per-host result payloads are redacted to `{"changed": <bool>}` in outputs and live logs, while task names, timings, and statuses (ok/failed/skipped/unreachable) are preserved.
             Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
             """
     )

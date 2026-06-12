@@ -227,7 +227,7 @@ class CallbackModule(CallbackBase):
 
     def _start_task(self, task):
         """
-        Create a task entry inside the current play.
+        Create a task entry in the current play.
         If task name is empty, fallback to action or unnamed_task_<n>.
         Also record start time.
         IMPORTANT: store only JSON-serializable fields in task_entry.
