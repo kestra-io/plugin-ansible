@@ -142,7 +142,7 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
-            title = "Expose only explicitly declared playbook values as outputs. With `outputsMode: EXPLICIT`, the bundled `kestra` module declares which values become task outputs; raw per-host results are redacted from outputs and logs, so sensitive data fetched by the playbook never leaks. The playbook is kept in flow variables so its Ansible Jinja expressions are not evaluated by Kestra.",
+            title = "Expose only explicitly declared playbook values as outputs. With `outputsMode: EXPLICIT`, the bundled `kestra` module declares which values become task outputs; raw per-host results are redacted from outputs and logs, so sensitive data fetched by the playbook is never leaked. The playbook is kept in flow variables without using the `render()` function, so that its Ansible Jinja expressions are not evaluated by Kestra.",
             full = true,
             code = """
                 id: ansible_explicit_outputs
