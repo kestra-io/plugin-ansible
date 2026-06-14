@@ -29,6 +29,9 @@ options:
     type: dict
     required: false
 notes:
+  - C(outputs) is currently the only parameter, so it is required in practice.
+    The C(required_one_of) rule exists so future parameters can be added without
+    a breaking change, where any one of them would satisfy the requirement.
   - Do not invoke this module with a loop. Ansible aggregates per-item results
     under a C(results) key, so declared outputs would not be collected; call
     the module once with all values instead.
