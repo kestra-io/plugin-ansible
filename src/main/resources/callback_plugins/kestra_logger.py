@@ -130,6 +130,16 @@ class CallbackModule(CallbackBase):
         Merge outputs declared via the kestra module.
         Last write wins per key; use run_once/delegate_to for run-level outputs.
         """
+        # A looped kestra task nests every iteration under a "results" key,
+        # so the top-level "outputs" is absent. Loops are not supported (call
+        # the module once with all values). Warn instead of dropping silently.
+        if "results" in result._result and "outputs" not in result._result:
+            self._display.warning(
+                "kestra module was invoked with a loop. Declared outputs were "
+                "not collected. Call the module once with all values instead."
+            )
+            return
+
         declared = result._result.get("outputs")
         if isinstance(declared, dict):
             self._kestra_explicit.update(declared)
