@@ -263,6 +263,99 @@ class AnsibleCLITest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void run_withExplicitOutputs_loopIsNotCollected() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-explicit-loop.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-explicit-loop.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-loop.yml"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        // a looped kestra task runs fine, but declared outputs are not collected
+        assertThat(runOutput.getExitCode(), is(0));
+        Object outputs = runOutput.getVars().get("outputs");
+        assertThat(outputs, is(instanceOf(Map.class)));
+        assertThat(((Map<String, Object>) outputs).isEmpty(), is(true));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_withExplicitOutputs_keepsErrorMessageOnFailure() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-explicit-failure.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-explicit-failure.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-failure.yml"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        // ignore_errors keeps the run green so the structured output can be inspected
+        assertThat(runOutput.getExitCode(), is(0));
+
+        AnsibleCLI.AnsibleOutput.TaskOutput failedTask = runOutput.getPlaybooks().getFirst()
+            .getPlays().getFirst().getTasks().getFirst();
+        Map<String, Object> failedResult = (Map<String, Object>) failedTask.getHosts().getFirst().getResult();
+
+        // the error reason is preserved for debugging, the rest of the payload is redacted
+        assertThat(failedTask.getHosts().getFirst().getStatus(), is("failed"));
+        assertThat(failedResult.keySet(), containsInAnyOrder("changed", "msg"));
+        assertThat(failedResult.containsKey("cmd"), is(false));
+        assertThat(failedResult.containsKey("stdout"), is(false));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void run_withStructuredOutputs() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())

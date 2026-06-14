@@ -1,0 +1,12 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Declare outputs in a loop (unsupported)
+      kestra:
+        outputs:
+          account: "{{ item }}"
+      loop:
+        - alice
+        - bob
