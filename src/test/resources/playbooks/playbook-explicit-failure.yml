@@ -1,0 +1,13 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Fail on purpose
+      ansible.builtin.command: /bin/does-not-exist
+      ignore_errors: true
+
+    - name: Declare explicit outputs
+      kestra:
+        outputs:
+          done: true

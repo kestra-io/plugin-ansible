@@ -1,0 +1,24 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Fetch sensitive value
+      ansible.builtin.set_fact:
+        secret_value: "super-secret-value"
+
+    - name: Compute result
+      ansible.builtin.set_fact:
+        records_updated: 3
+
+    - name: Skipped on purpose
+      ansible.builtin.debug:
+        msg: "never runs"
+      register: skipped_result
+      when: false
+
+    - name: Declare explicit outputs
+      kestra:
+        outputs:
+          records_updated: "{{ records_updated }}"
+          skipped_status: "{{ 'skipped' if skipped_result.skipped | default(false) else 'ok' }}"
