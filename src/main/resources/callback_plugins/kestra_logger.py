@@ -281,7 +281,7 @@ class CallbackModule(CallbackBase):
         Add per-host result under current task (structured),
         and also append to raw outputs (compat).
         In explicit mode, result payloads are redacted: only declared
-        declared kestra outputs are collected, statuses are preserved.
+        kestra outputs are collected, statuses are preserved.
         """
         if self._is_kestra_output_task(result) and status == "ok":
             self._collect_explicit_outputs(result)
