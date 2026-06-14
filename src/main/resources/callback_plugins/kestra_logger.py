@@ -295,8 +295,16 @@ class CallbackModule(CallbackBase):
         host_name = result._host.get_name() if result._host else "unknown_host"
 
         if self._outputs_mode == "explicit":
-            # Keep skip-vs-failure visibility, drop the (possibly sensitive) payload
+            # Keep skip-vs-failure visibility, drop the (possibly sensitive) payload.
+            # On failures, keep only the human-readable error reason so the run can
+            # be debugged without switching to ALL mode. msg is the field least
+            # likely to carry a raw secret (cmd/stdout/facts stay dropped). Secrets
+            # placed directly on a command line can still surface here.
             result_payload = {"changed": bool(result._result.get("changed", False))}
+            if status in ("failed", "unreachable"):
+                msg = result._result.get("msg")
+                if msg is not None:
+                    result_payload["msg"] = msg
         else:
             result_payload = dict(result._result)
 
