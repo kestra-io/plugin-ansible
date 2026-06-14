@@ -561,15 +561,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         // Add python plugin
-        InputStream ansibleCustomLogger = getClass().getClassLoader().getResourceAsStream(PLUGINS_KESTRA_LOGGER_PY);
-        URI pluginUri = runContext.storage().putFile(ansibleCustomLogger, PLUGINS_KESTRA_LOGGER_PY);
+        URI pluginUri = runContext.storage().putFile(bundledResource(PLUGINS_KESTRA_LOGGER_PY), PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
 
         // Add the kestra module so playbooks can declare explicit outputs
-        InputStream kestraModule = getClass().getClassLoader().getResourceAsStream(LIBRARY_KESTRA_PY);
-        URI moduleUri = runContext.storage().putFile(kestraModule, LIBRARY_KESTRA_PY);
+        URI moduleUri = runContext.storage().putFile(bundledResource(LIBRARY_KESTRA_PY), LIBRARY_KESTRA_PY);
         map.put(LIBRARY_KESTRA_PY, moduleUri.toString());
         return map;
+    }
+
+    private InputStream bundledResource(String path) throws IOException {
+        InputStream stream = getClass().getClassLoader().getResourceAsStream(path);
+        if (stream == null) {
+            throw new IOException("Bundled resource not found on the classpath: " + path);
+        }
+        return stream;
     }
 
     private DockerOptions injectDefaults(DockerOptions original) {
