@@ -32,6 +32,7 @@ import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.models.tasks.runners.TaskRunnerDetailResult;
 import io.kestra.core.queues.QueueException;
 import io.kestra.core.runners.AssetEmit;
+import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
@@ -46,6 +47,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
+import org.slf4j.event.Level;
 
 @SuperBuilder
 @ToString
@@ -701,14 +703,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     /**
-     * Create dynamic TaskRuns per Ansible task so UI can render bars.
+     * Create one dynamic TaskRun per Ansible task and emit that task's host-result lines as logs
+     * tagged with the taskrun's id, so logs are attributed per Ansible task instead of all landing
+     * on the parent task's root taskrun (issue kestra-ee#8520).
      */
     private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks) throws IllegalVariableEvaluationException {
         if (playbooks == null || playbooks.isEmpty()) {
             return;
         }
-
-        List<WorkerTaskResult> results = new ArrayList<>();
 
         for (AnsibleOutput.PlaybookOutput pb : playbooks) {
             if (pb == null || pb.getPlays() == null)
@@ -759,35 +761,72 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     histories.add(new State.History(finalType, ended));
                     State state = State.of(finalType, histories);
 
-                    WorkerTaskResult wtr = WorkerTaskResult.builder()
-                        .taskRun(
-                            TaskRun.builder()
-                                .id(IdUtils.create())
-                                .namespace(runContext.render("{{ flow.namespace }}"))
-                                .flowId(runContext.render("{{ flow.id }}"))
-                                .taskId(uid) // stable identity for UI grouping
-                                .value(runContext.render("{{ taskrun.id }}"))
-                                .executionId(runContext.render("{{ execution.id }}"))
-                                .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
-                                .state(state)
-                                .attempts(
-                                    List.of(
-                                        TaskRunAttempt.builder()
-                                            .state(state)
-                                            .build()
-                                    )
-                                )
-                                .build()
+                    TaskRun subTaskRun = TaskRun.builder()
+                        .id(IdUtils.create())
+                        .tenantId(runContext.flowInfo().tenantId())
+                        .namespace(runContext.render("{{ flow.namespace }}"))
+                        .flowId(runContext.render("{{ flow.id }}"))
+                        .taskId(uid) // stable identity for per-task grouping
+                        .executionId(runContext.render("{{ execution.id }}"))
+                        .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
+                        .state(state)
+                        .attempts(
+                            List.of(
+                                TaskRunAttempt.builder()
+                                    .state(state)
+                                    .build()
+                            )
                         )
                         .build();
 
-                    results.add(wtr);
+                    // Register the dynamic taskrun together with its host-result log lines in one
+                    // call: the logs ride with the taskrun, so they can only attach to it, and the
+                    // run context fills in the execution/tenant context, fixes the attempt and masks
+                    // secrets (the plugin never builds a LogEntry).
+                    runContext.dynamicWorkerResult(
+                        WorkerTaskResult.builder().taskRun(subTaskRun).build(),
+                        taskLogs(task)
+                    );
                 }
             }
         }
+    }
 
-        if (!results.isEmpty()) {
-            runContext.dynamicWorkerResult(results);
+    /**
+     * Build the host-result log lines for a task. In EXPLICIT outputs mode the host result payload is
+     * already redacted by the callback.
+     */
+    private List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
+        if (task.getHosts() == null) {
+            return List.of();
+        }
+
+        List<DynamicTaskRunLog> logs = new ArrayList<>();
+        for (AnsibleOutput.HostResult hr : task.getHosts()) {
+            if (hr == null) {
+                continue;
+            }
+
+            String status = hr.getStatus();
+            boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
+            logs.add(new DynamicTaskRunLog(
+                failed ? Level.ERROR : Level.INFO,
+                "[" + hr.getHost() + "] " + status + " => " + stringifyResult(hr.getResult())
+            ));
+        }
+
+        return logs;
+    }
+
+    private static String stringifyResult(Object result) {
+        if (result == null) {
+            return "{}";
+        }
+
+        try {
+            return JacksonMapper.ofJson().writeValueAsString(result);
+        } catch (Exception e) {
+            return String.valueOf(result);
         }
     }
 

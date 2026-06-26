@@ -5,7 +5,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
 
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.queues.QueueFactoryInterface;
@@ -45,6 +47,10 @@ class AnsibleCLITest {
 
     @Inject
     private TestAssetManagerFactory assetManagerFactory;
+
+    @Inject
+    @Named(QueueFactoryInterface.WORKERTASKLOG_NAMED)
+    private QueueInterface<LogEntry> logQueue;
 
     @Test
     void extractInventoryAssetInputs_shouldParseHostsAsInputsOnly() {
@@ -453,6 +459,65 @@ class AnsibleCLITest {
         List<String> additionalMessages = (List<String>) t6res.get("msg");
         assertThat(additionalMessages.size(), is(2));
         assertThat(additionalMessages, containsInAnyOrder("Multiline message : line 3", "Multiline message : line 4"));
+    }
+
+    @Test
+    void run_emitsLogsUnderDynamicTaskRuns() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of("ansible-playbook -i localhost -c local playbooks/playbook.yml")
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+        assertThat(runOutput.getExitCode(), is(0));
+
+        // Each Ansible task produces a dynamic taskrun (issue kestra-ee#8520): its host results
+        // must be emitted as logs tagged with the dynamic taskrun id, not the parent root.
+        Set<String> dynamicTaskRunIds = runContext.dynamicWorkerResults().stream()
+            .map(r -> r.getTaskRun().getId())
+            .collect(Collectors.toSet());
+        assertThat(dynamicTaskRunIds, is(not(empty())));
+
+        TestsUtils.awaitLog(logs, l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()));
+        receive.blockLast();
+
+        List<LogEntry> dynamicLogs = List.copyOf(logs).stream()
+            .filter(l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()))
+            .toList();
+
+        // logs are attributed to each task's dynamic taskrun, all on the single localhost host
+        assertThat(dynamicLogs, is(not(empty())));
+        assertThat(dynamicLogs.stream().allMatch(l -> l.getMessage() != null && l.getMessage().contains("[localhost]")), is(true));
+        assertThat(dynamicLogs.stream().anyMatch(l -> l.getMessage().contains("[localhost] ok")), is(true));
+        // attemptNumber MUST be 0: logs are grouped per taskrun by (taskRunId, attemptNumber) and a
+        // single-attempt taskrun's logs live under attempt 0
+        assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
     }
 
     @Test
