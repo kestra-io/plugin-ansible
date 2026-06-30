@@ -198,10 +198,10 @@ class CallbackModule(CallbackBase):
 
         json_line = json.dumps(task_payload, default=str, separators=(",", ":"))
 
-        # stdout for Kestra live parsing
-        print(json_line)
-
-        # same line in log_path with timestamp prefix
+        # Do NOT print the per-task line to stdout: it would be captured on the parent task's
+        # root taskrun. Per-task data reaches Kestra via the final structured payload
+        # (see _log_kestra_outputs), which AnsibleCLI turns into logs attributed to each task's
+        # own taskrun (issue kestra-ee#8520). We still write it to log_path for `outputLogFile`.
         ts = ended_at_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         self._write_log_line(f"{ts} {json_line}")
 
