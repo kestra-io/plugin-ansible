@@ -4,10 +4,13 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
 
 import io.kestra.core.models.executions.LogEntry;
+import io.kestra.core.queues.DispatchQueueInterface;
+import io.kestra.core.queues.QueueSubscriber;
 import io.kestra.plugin.scripts.runner.docker.PullPolicy;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +44,9 @@ class AnsibleCLITest {
 
     @Inject
     private TestAssetManagerFactory assetManagerFactory;
+
+    @Inject
+    private DispatchQueueInterface<LogEntry> logQueue;
 
     @Test
     void extractInventoryAssetInputs_shouldParseHostsAsInputsOnly() {
@@ -295,6 +301,74 @@ class AnsibleCLITest {
         List<String> additionalMessages = (List<String>) t6res.get("msg");
         assertThat(additionalMessages.size(), is(2));
         assertThat(additionalMessages, containsInAnyOrder("Multiline message : line 3", "Multiline message : line 4"));
+    }
+
+    @Test
+    void run_emitsLogsUnderDynamicTaskRuns() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of("ansible-playbook -i localhost -c local playbooks/playbook.yml")
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        // DispatchQueueInterface has no TestsUtils.receive() helper (unlike QueueInterface/BroadcastQueueInterface),
+        // so we subscribe directly and close the subscription once assertions are done.
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        QueueSubscriber<LogEntry> subscriber = logQueue.subscriber().subscribe(either -> {
+            if (either.isLeft()) {
+                logs.add(either.getLeft());
+            }
+        });
+
+        try {
+            AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+            assertThat(runOutput.getExitCode(), is(0));
+
+            // Each Ansible task produces a dynamic taskrun (issue kestra-ee#8520): its host results
+            // must be emitted as logs tagged with the dynamic taskrun id, not the parent root.
+            Set<String> dynamicTaskRunIds = runContext.dynamicWorkerResults().stream()
+                .map(r -> r.getTaskRun().getId())
+                .collect(Collectors.toSet());
+            assertThat(dynamicTaskRunIds, is(not(empty())));
+
+            TestsUtils.awaitLog(logs, l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()));
+
+            List<LogEntry> dynamicLogs = List.copyOf(logs).stream()
+                .filter(l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()))
+                .toList();
+
+            // logs are attributed to each task's dynamic taskrun, all on the single localhost host
+            assertThat(dynamicLogs, is(not(empty())));
+            assertThat(dynamicLogs.stream().allMatch(l -> l.getMessage() != null && l.getMessage().contains("[localhost]")), is(true));
+            assertThat(dynamicLogs.stream().anyMatch(l -> l.getMessage().contains("[localhost] ok")), is(true));
+            // attemptNumber MUST be 0: logs are grouped per taskrun by (taskRunId, attemptNumber) and a
+            // single-attempt taskrun's logs live under attempt 0
+            assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
+        } finally {
+            subscriber.close();
+        }
     }
 
     @Test
@@ -773,7 +847,9 @@ class AnsibleCLITest {
                 Property.ofValue(
                     List.of(
                         // With auto-install disabled, the role must not be present.
-                        "ansible-galaxy role list geerlingguy.docker"
+                        // `ansible-galaxy role list <role>` only warns (exit 0) when a role
+                        // is missing, so grep the listing to force a non-zero exit on absence.
+                        "ansible-galaxy role list 2>/dev/null | grep -q geerlingguy.docker"
                     )
                 )
             )
