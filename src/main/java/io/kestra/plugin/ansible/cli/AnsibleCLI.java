@@ -64,7 +64,7 @@ import org.slf4j.event.Level;
 @Plugin(
     examples = {
         @Example(
-            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook stored in the Editor using [Namespace Files](https://kestra.io/docs/developer-guide/namespace-files).",
+            title = "Execute a list of Ansible CLI commands to orchestrate an Ansible playbook stored in the Editor using [Namespace Files](https://kestra.io/docs/concepts/namespace-files).",
             full = true,
             code = """
                 id: ansible
