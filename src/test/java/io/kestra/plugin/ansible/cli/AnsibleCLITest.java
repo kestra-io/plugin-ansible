@@ -4,16 +4,14 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 import io.kestra.core.models.executions.LogEntry;
-import io.kestra.core.queues.QueueFactoryInterface;
-import io.kestra.core.queues.QueueInterface;
+import io.kestra.core.queues.DispatchQueueInterface;
+import io.kestra.core.queues.QueueSubscriber;
 import io.kestra.plugin.scripts.runner.docker.PullPolicy;
-import jakarta.inject.Named;
 import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
@@ -31,7 +29,6 @@ import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 
 import jakarta.inject.Inject;
-import reactor.core.publisher.Flux;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -49,8 +46,7 @@ class AnsibleCLITest {
     private TestAssetManagerFactory assetManagerFactory;
 
     @Inject
-    @Named(QueueFactoryInterface.WORKERTASKLOG_NAMED)
-    private QueueInterface<LogEntry> logQueue;
+    private DispatchQueueInterface<LogEntry> logQueue;
 
     @Test
     void extractInventoryAssetInputs_shouldParseHostsAsInputsOnly() {
@@ -208,160 +204,6 @@ class AnsibleCLITest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void run_withExplicitOutputs() throws Exception {
-        AnsibleCLI execute = AnsibleCLI.builder()
-            .id(IdUtils.create())
-            .type(AnsibleCLI.class.getName())
-            .docker(
-                DockerOptions.builder()
-                    .image("cytopia/ansible:latest-tools")
-                    .entryPoint(Collections.emptyList())
-                    .build()
-            )
-            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
-            .inputFiles(
-                Map.of(
-                    "playbooks/playbook-explicit-outputs.yml", storage.put(
-                        TenantService.MAIN_TENANT,
-                        null,
-                        URI.create("/" + IdUtils.create() + ".ion"),
-                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-explicit-outputs.yml")
-                    ).toString()
-                )
-            )
-            .commands(
-                Property.ofValue(
-                    List.of(
-                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-outputs.yml"
-                    )
-                )
-            )
-            .build();
-
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
-
-        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
-
-        assertThat(runOutput.getExitCode(), is(0));
-
-        // only the values declared via the kestra module are exposed
-        Object outputs = runOutput.getVars().get("outputs");
-        assertThat(outputs, is(instanceOf(Map.class)));
-        Map<String, Object> declared = (Map<String, Object>) outputs;
-        assertThat(declared.keySet(), containsInAnyOrder("records_updated", "skipped_status"));
-        assertThat(declared.get("records_updated"), is(3));
-        assertThat(declared.get("skipped_status"), is("skipped"));
-
-        // the sensitive value never reaches the outputs
-        assertThat(JacksonMapper.ofJson().writeValueAsString(runOutput.getVars()), not(containsString("super-secret-value")));
-
-        // structured playbooks keep names and statuses, payloads are redacted
-        List<AnsibleCLI.AnsibleOutput.PlaybookOutput> playbooks = runOutput.getPlaybooks();
-        assertThat(playbooks.size(), is(1));
-        List<AnsibleCLI.AnsibleOutput.TaskOutput> tasks = playbooks.getFirst().getPlays().getFirst().getTasks();
-        assertThat(tasks.size(), is(4));
-        assertThat(tasks.get(2).getHosts().getFirst().getStatus(), is("skipped"));
-        for (AnsibleCLI.AnsibleOutput.TaskOutput t : tasks) {
-            Map<String, Object> result = (Map<String, Object>) t.getHosts().getFirst().getResult();
-            assertThat(result.keySet(), contains("changed"));
-        }
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void run_withExplicitOutputs_loopIsNotCollected() throws Exception {
-        AnsibleCLI execute = AnsibleCLI.builder()
-            .id(IdUtils.create())
-            .type(AnsibleCLI.class.getName())
-            .docker(
-                DockerOptions.builder()
-                    .image("cytopia/ansible:latest-tools")
-                    .entryPoint(Collections.emptyList())
-                    .build()
-            )
-            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
-            .inputFiles(
-                Map.of(
-                    "playbooks/playbook-explicit-loop.yml", storage.put(
-                        TenantService.MAIN_TENANT,
-                        null,
-                        URI.create("/" + IdUtils.create() + ".ion"),
-                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-explicit-loop.yml")
-                    ).toString()
-                )
-            )
-            .commands(
-                Property.ofValue(
-                    List.of(
-                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-loop.yml"
-                    )
-                )
-            )
-            .build();
-
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
-
-        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
-
-        // a looped kestra task runs fine, but declared outputs are not collected
-        assertThat(runOutput.getExitCode(), is(0));
-        Object outputs = runOutput.getVars().get("outputs");
-        assertThat(outputs, is(instanceOf(Map.class)));
-        assertThat(((Map<String, Object>) outputs).isEmpty(), is(true));
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void run_withExplicitOutputs_keepsErrorMessageOnFailure() throws Exception {
-        AnsibleCLI execute = AnsibleCLI.builder()
-            .id(IdUtils.create())
-            .type(AnsibleCLI.class.getName())
-            .docker(
-                DockerOptions.builder()
-                    .image("cytopia/ansible:latest-tools")
-                    .entryPoint(Collections.emptyList())
-                    .build()
-            )
-            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
-            .inputFiles(
-                Map.of(
-                    "playbooks/playbook-explicit-failure.yml", storage.put(
-                        TenantService.MAIN_TENANT,
-                        null,
-                        URI.create("/" + IdUtils.create() + ".ion"),
-                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-explicit-failure.yml")
-                    ).toString()
-                )
-            )
-            .commands(
-                Property.ofValue(
-                    List.of(
-                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-failure.yml"
-                    )
-                )
-            )
-            .build();
-
-        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
-
-        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
-
-        // ignore_errors keeps the run green so the structured output can be inspected
-        assertThat(runOutput.getExitCode(), is(0));
-
-        AnsibleCLI.AnsibleOutput.TaskOutput failedTask = runOutput.getPlaybooks().getFirst()
-            .getPlays().getFirst().getTasks().getFirst();
-        Map<String, Object> failedResult = (Map<String, Object>) failedTask.getHosts().getFirst().getResult();
-
-        // the error reason is preserved for debugging, the rest of the payload is redacted
-        assertThat(failedTask.getHosts().getFirst().getStatus(), is("failed"));
-        assertThat(failedResult.keySet(), containsInAnyOrder("changed", "msg"));
-        assertThat(failedResult.containsKey("cmd"), is(false));
-        assertThat(failedResult.containsKey("stdout"), is(false));
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
     void run_withStructuredOutputs() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
@@ -491,33 +333,42 @@ class AnsibleCLITest {
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
+        // DispatchQueueInterface has no TestsUtils.receive() helper (unlike QueueInterface/BroadcastQueueInterface),
+        // so we subscribe directly and close the subscription once assertions are done.
         List<LogEntry> logs = new CopyOnWriteArrayList<>();
-        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+        QueueSubscriber<LogEntry> subscriber = logQueue.subscriber().subscribe(either -> {
+            if (either.isLeft()) {
+                logs.add(either.getLeft());
+            }
+        });
 
-        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
-        assertThat(runOutput.getExitCode(), is(0));
+        try {
+            AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+            assertThat(runOutput.getExitCode(), is(0));
 
-        // Each Ansible task produces a dynamic taskrun (issue kestra-ee#8520): its host results
-        // must be emitted as logs tagged with the dynamic taskrun id, not the parent root.
-        Set<String> dynamicTaskRunIds = runContext.dynamicWorkerResults().stream()
-            .map(r -> r.getTaskRun().getId())
-            .collect(Collectors.toSet());
-        assertThat(dynamicTaskRunIds, is(not(empty())));
+            // Each Ansible task produces a dynamic taskrun (issue kestra-ee#8520): its host results
+            // must be emitted as logs tagged with the dynamic taskrun id, not the parent root.
+            Set<String> dynamicTaskRunIds = runContext.dynamicWorkerResults().stream()
+                .map(r -> r.getTaskRun().getId())
+                .collect(Collectors.toSet());
+            assertThat(dynamicTaskRunIds, is(not(empty())));
 
-        TestsUtils.awaitLog(logs, l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()));
-        receive.blockLast();
+            TestsUtils.awaitLog(logs, l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()));
 
-        List<LogEntry> dynamicLogs = List.copyOf(logs).stream()
-            .filter(l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()))
-            .toList();
+            List<LogEntry> dynamicLogs = List.copyOf(logs).stream()
+                .filter(l -> l.getTaskRunId() != null && dynamicTaskRunIds.contains(l.getTaskRunId()))
+                .toList();
 
-        // logs are attributed to each task's dynamic taskrun, all on the single localhost host
-        assertThat(dynamicLogs, is(not(empty())));
-        assertThat(dynamicLogs.stream().allMatch(l -> l.getMessage() != null && l.getMessage().contains("[localhost]")), is(true));
-        assertThat(dynamicLogs.stream().anyMatch(l -> l.getMessage().contains("[localhost] ok")), is(true));
-        // attemptNumber MUST be 0: logs are grouped per taskrun by (taskRunId, attemptNumber) and a
-        // single-attempt taskrun's logs live under attempt 0
-        assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
+            // logs are attributed to each task's dynamic taskrun, all on the single localhost host
+            assertThat(dynamicLogs, is(not(empty())));
+            assertThat(dynamicLogs.stream().allMatch(l -> l.getMessage() != null && l.getMessage().contains("[localhost]")), is(true));
+            assertThat(dynamicLogs.stream().anyMatch(l -> l.getMessage().contains("[localhost] ok")), is(true));
+            // attemptNumber MUST be 0: logs are grouped per taskrun by (taskRunId, attemptNumber) and a
+            // single-attempt taskrun's logs live under attempt 0
+            assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
+        } finally {
+            subscriber.close();
+        }
     }
 
     @Test

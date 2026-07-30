@@ -32,7 +32,6 @@ import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.models.tasks.runners.TaskRunnerDetailResult;
 import io.kestra.core.queues.QueueException;
 import io.kestra.core.runners.AssetEmit;
-import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
@@ -47,7 +46,6 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-import org.slf4j.event.Level;
 
 @SuperBuilder
 @ToString
@@ -142,82 +140,6 @@ import org.slf4j.event.Level;
                     commands:
                       - ansible-playbook -i localhost -c local playbook.yml
                 """
-        ),
-        @Example(
-            title = "Expose only explicitly declared playbook values as outputs. With `outputsMode: EXPLICIT`, the bundled `kestra` module declares which values become task outputs; raw per-host results are redacted from outputs and logs, so sensitive data fetched by the playbook is never leaked. The playbook is kept in flow variables without using the `render()` function, so that its Ansible Jinja expressions are not evaluated by Kestra.",
-            full = true,
-            code = """
-                id: ansible_explicit_outputs
-                namespace: company.team
-
-                variables:
-                  playbook: |
-                    ---
-                    - hosts: localhost
-                      tasks:
-                        - name: Fetch credentials needed by the automation
-                          ansible.builtin.set_fact:
-                            credential:
-                              username: svc-automation
-                              password: "not-for-kestra-outputs"
-
-                        - name: Do the work
-                          ansible.builtin.set_fact:
-                            records_updated: 3
-                          register: work_result
-
-                        - name: Declare what downstream tasks may see
-                          kestra:
-                            outputs:
-                              records_updated: "{{ records_updated }}"
-                              work_status: "{{ 'skipped' if work_result.skipped | default(false) else 'ok' }}"
-
-                tasks:
-                  - id: ansible_task
-                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                    outputsMode: EXPLICIT
-                    inputFiles:
-                      playbook.yml: "{{ vars.playbook }}"
-                    containerImage: cytopia/ansible:latest-tools
-                    commands:
-                      - ansible-playbook -i localhost -c local playbook.yml
-                """
-        ),
-        @Example(
-            title = "Supply a custom `ansible.cfg` while keeping the Kestra integration working. When you provide your own `ansibleConfig`, the generated one is skipped entirely, so you must keep the `callback_plugins`/`callbacks_enabled` lines for output capture and the `library = ./library` line for the bundled `kestra` module to resolve; add your own settings below them.",
-            full = true,
-            code = """
-                id: ansible_custom_config
-                namespace: company.team
-
-                tasks:
-                  - id: ansible_task
-                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
-                    outputsMode: EXPLICIT
-                    ansibleConfig: |
-                      [defaults]
-                      log_path          = {{ workingDir }}/log
-                      callback_plugins  = ./callback_plugins
-                      callbacks_enabled = kestra_logger
-                      stdout_callback   = ansible.builtin.null
-                      result_format     = json
-                      pretty_results    = true
-                      library           = ./library
-                      forks             = 10
-                      timeout           = 30
-                    inputFiles:
-                      playbook.yml: |
-                        ---
-                        - hosts: localhost
-                          tasks:
-                            - name: Declare outputs
-                              kestra:
-                                outputs:
-                                  deployed: true
-                    containerImage: cytopia/ansible:latest-tools
-                    commands:
-                      - ansible-playbook -i localhost -c local playbook.yml
-                """
         )
     }
 )
@@ -225,8 +147,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
     public static final String ANSIBLE_CFG = "ansible.cfg";
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
-    public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
-    public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -295,21 +215,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         stdout_callback   = ansible.builtin.null
         result_format     = json
         pretty_results    = true
-        library           = ./library
         """);
-
-    @Schema(
-        title = "Outputs capture mode",
-        description = """
-            ALL (default) captures every per-host result of every playbook task as outputs. The `outputs` value is a list of per-host result maps.
-            EXPLICIT captures only values declared in the playbook via the bundled `kestra` module; per-host result payloads are redacted to `{"changed": <bool>}` in outputs and live logs, while task names, timings, and statuses (ok/failed/skipped/unreachable) are preserved. The `outputs` value is a map of the declared key/value pairs, not a list, so switching a task between modes changes the shape of `outputs` for downstream references.
-            Redaction only covers what the bundled callback emits. A custom `ansibleConfig` that drops `stdout_callback = ansible.builtin.null` re-enables Ansible's default stdout, which can print raw results (notably on task failures, `debug` output, or verbose runs) that Kestra then captures into logs. Keep that line to preserve redaction.
-            Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
-            """
-    )
-    @Builder.Default
-    @PluginProperty(group = "execution")
-    protected Property<OutputsMode> outputsMode = Property.ofValue(OutputsMode.ALL);
 
     @Schema(
         title = "Publish Ansible log file",
@@ -361,10 +267,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         var rEnv = runContext.render(this.env).asMap(String.class, String.class);
 
-        OutputsMode rOutputsModeEnum = runContext.render(this.outputsMode).as(OutputsMode.class)
-            .orElse(OutputsMode.ALL);
-        String rOutputsMode = rOutputsModeEnum.name().toLowerCase(Locale.ROOT);
-
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
             .withWarningOnStdErr(false)
@@ -408,7 +310,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, Object> mergedVars = new HashMap<>();
         List<AnsibleOutput.PlaybookOutput> mergedPlaybooks = new ArrayList<>();
         List<Map<String, Object>> mergedRawOutputs = new ArrayList<>();
-        Map<String, Object> mergedExplicitOutputs = new HashMap<>();
 
         int mergedExitCode = 0;
         int mergedStdOutCount = 0;
@@ -417,85 +318,91 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, URI> lastOutputFiles = Map.of();
         TaskRunnerDetailResult lastTaskRunner = null;
 
-        boolean beforeDone = false;
-
         // Collect per-command log paths (because Ansible truncates log_path each run)
         boolean multiCmd = rCommands.size() > 1;
         List<Path> perCommandLogs = new ArrayList<>();
 
-        int idx = 0;
-        for (String cmd : rCommands) {
-            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
-            envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
-
-            // If multiple commands and outputLogFile enabled,
-            // override ANSIBLE_LOG_PATH so each run writes a different file.
+        // Run all commands in a SINGLE container to avoid pulling the image once per command
+        // (which can lead to "killed during image pull" failures on slow CI runners).
+        //
+        // To preserve per-command output isolation (Kestra merges marker outputs with
+        // putAll, so the second command's `playbooks` would overwrite the first), we set
+        // KESTRA_RUN_IDX inline per command — the kestra_logger.py callback then emits
+        // markers under unique keys (`outputs_0`, `playbooks_0`, `outputs_1`, ...). After
+        // the run, we reassemble the indexed entries into the merged outputs/playbooks lists.
+        List<String> shellLines = new ArrayList<>();
+        for (int i = 0; i < rCommands.size(); i++) {
+            String cmd = rCommands.get(i);
+            StringBuilder line = new StringBuilder("KESTRA_RUN_IDX=").append(i).append(' ');
             if (wantLogFile && multiCmd) {
-                Path logPath = workingDir.resolve("log-" + idx);
-                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
+                Path logPath = workingDir.resolve("log-" + i);
                 perCommandLogs.add(logPath);
+                line.append("ANSIBLE_LOG_PATH=").append(logPath).append(' ');
             }
+            line.append(cmd);
+            shellLines.add(line.toString());
+        }
 
-            Property<List<String>> mergedBeforeCommands = null;
-            if (!beforeDone) {
-                List<String> renderedBefore = runContext.render(this.beforeCommands).asList(String.class, extraVars);
-                // User beforeCommands run first so they can configure the environment
-                // (e.g. private pip index, proxy, auth) before auto-install fires.
-                List<String> merged = new ArrayList<>(renderedBefore);
-                merged.addAll(autoInstallCommands);
-                mergedBeforeCommands = Property.ofValue(merged);
-            }
+        CommandsWrapper commandWrapper = baseWrapper
+            .withEnv(rEnv)
+            .withBeforeCommands(
+                Property.ofValue(runContext.render(this.beforeCommands).asList(String.class, extraVars))
+            )
+            .withCommands(Property.ofValue(shellLines));
 
-            CommandsWrapper commandWrapper = baseWrapper
-                .withEnv(envForRun)
-                // run beforeCommands only once, before the first command (rendered with extra vars)
-                .withBeforeCommands(mergedBeforeCommands)
-                // single command per run so Kestra doesn't overwrite outputs
-                .withCommands(Property.ofValue(List.of(cmd)));
+        ScriptOutput out = commandWrapper.run();
+        mergedExitCode = out.getExitCode();
+        mergedStdOutCount = out.getStdOutLineCount();
+        mergedStdErrCount = out.getStdErrLineCount();
+        lastOutputFiles = out.getOutputFiles();
+        lastTaskRunner = out.getTaskRunner();
 
-            ScriptOutput out = commandWrapper.run();
-
-            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
-            mergedStdOutCount += out.getStdOutLineCount();
-            mergedStdErrCount += out.getStdErrLineCount();
-
-            lastOutputFiles = out.getOutputFiles();
-            lastTaskRunner = out.getTaskRunner();
-
-            Map<String, Object> vars = out.getVars();
-            if (vars != null) {
-                // merge raw outputs (backward compatible); in EXPLICIT mode the
-                // callback emits a map of declared outputs instead of a list
-                Object maybeOutputs = vars.get("outputs");
-                if (maybeOutputs instanceof List<?> list) {
+        // Reassemble per-run keys (`outputs_N`, `playbooks_N`) into merged lists, in run order.
+        Map<String, Object> vars = out.getVars();
+        if (vars != null) {
+            for (int i = 0; i < rCommands.size(); i++) {
+                Object outputsAtI = vars.get("outputs_" + i);
+                if (outputsAtI instanceof List<?> list) {
                     for (Object o : list) {
                         if (o instanceof Map<?, ?> m) {
                             // noinspection unchecked
                             mergedRawOutputs.add((Map<String, Object>) m);
                         }
                     }
-                } else if (maybeOutputs instanceof Map<?, ?> m) {
-                    m.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
                 }
-
-                // merge structured playbooks
-                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
-                if (pbs != null && !pbs.isEmpty()) {
-                    mergedPlaybooks.addAll(pbs);
-                }
-
-                // merge remaining vars (last-wins except lists above)
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    String key = e.getKey();
-                    if ("outputs".equals(key) || "playbooks".equals(key)) {
-                        continue;
+                Object playbooksAtI = vars.get("playbooks_" + i);
+                if (playbooksAtI instanceof List<?> list) {
+                    Map<String, Object> wrapper = new HashMap<>();
+                    wrapper.put("playbooks", list);
+                    List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(wrapper);
+                    if (pbs != null && !pbs.isEmpty()) {
+                        mergedPlaybooks.addAll(pbs);
                     }
-                    mergedVars.put(key, e.getValue());
                 }
             }
-
-            beforeDone = true;
-            idx++;
+            // Single-command path: keys are still `outputs` / `playbooks` (no idx suffix).
+            Object outputsPlain = vars.get("outputs");
+            if (outputsPlain instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> m) {
+                        // noinspection unchecked
+                        mergedRawOutputs.add((Map<String, Object>) m);
+                    }
+                }
+            }
+            List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
+            if (pbs != null && !pbs.isEmpty()) {
+                mergedPlaybooks.addAll(pbs);
+            }
+            // Other vars from the marker (rare; non-list) — preserve last-wins copy semantics.
+            for (Map.Entry<String, Object> e : vars.entrySet()) {
+                String key = e.getKey();
+                if (key.equals("outputs") || key.equals("playbooks")
+                    || key.startsWith("outputs_") || key.startsWith("playbooks_")) {
+                    continue;
+                }
+                mergedVars.put(key, e.getValue());
+            }
         }
 
         // If we produced per-command logs, concatenate into final "log"
@@ -533,7 +440,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         // ensure merged vars expose the expected root keys
-        mergedVars.put("outputs", rOutputsModeEnum == OutputsMode.EXPLICIT ? mergedExplicitOutputs : mergedRawOutputs);
+        mergedVars.put("outputs", mergedRawOutputs);
         mergedVars.put("playbooks", mergedPlaybooks);
 
         // minimal UI timeline support: emit dynamic worker results
@@ -563,21 +470,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         // Add python plugin
-        URI pluginUri = runContext.storage().putFile(bundledResource(PLUGINS_KESTRA_LOGGER_PY), PLUGINS_KESTRA_LOGGER_PY);
+        InputStream ansibleCustomLogger = getClass().getClassLoader().getResourceAsStream(PLUGINS_KESTRA_LOGGER_PY);
+        URI pluginUri = runContext.storage().putFile(ansibleCustomLogger, PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
-
-        // Add the kestra module so playbooks can declare explicit outputs
-        URI moduleUri = runContext.storage().putFile(bundledResource(LIBRARY_KESTRA_PY), LIBRARY_KESTRA_PY);
-        map.put(LIBRARY_KESTRA_PY, moduleUri.toString());
         return map;
-    }
-
-    private InputStream bundledResource(String path) throws IOException {
-        InputStream stream = getClass().getClassLoader().getResourceAsStream(path);
-        if (stream == null) {
-            throw new IOException("Bundled resource not found on the classpath: " + path);
-        }
-        return stream;
     }
 
     private DockerOptions injectDefaults(DockerOptions original) {
@@ -703,14 +599,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     /**
-     * Create one dynamic TaskRun per Ansible task and emit that task's host-result lines as logs
-     * tagged with the taskrun's id, so logs are attributed per Ansible task instead of all landing
-     * on the parent task's root taskrun (issue kestra-ee#8520).
+     * Create dynamic TaskRuns per Ansible task so UI can render bars.
      */
     private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks) throws IllegalVariableEvaluationException {
         if (playbooks == null || playbooks.isEmpty()) {
             return;
         }
+
+        List<WorkerTaskResult> results = new ArrayList<>();
 
         for (AnsibleOutput.PlaybookOutput pb : playbooks) {
             if (pb == null || pb.getPlays() == null)
@@ -761,78 +657,36 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     histories.add(new State.History(finalType, ended));
                     State state = State.of(finalType, histories);
 
-                    TaskRun subTaskRun = TaskRun.builder()
-                        .id(IdUtils.create())
-                        .tenantId(runContext.flowInfo().tenantId())
-                        .namespace(runContext.render("{{ flow.namespace }}"))
-                        .flowId(runContext.render("{{ flow.id }}"))
-                        .taskId(uid) // stable identity for per-task grouping
-                        .executionId(runContext.render("{{ execution.id }}"))
-                        .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
-                        .state(state)
-                        .attempts(
-                            List.of(
-                                TaskRunAttempt.builder()
-                                    .state(state)
-                                    .build()
-                            )
+                    WorkerTaskResult wtr = WorkerTaskResult.builder()
+                        .taskRun(
+                            TaskRun.builder()
+                                .id(IdUtils.create())
+                                .namespace(runContext.render("{{ flow.namespace }}"))
+                                .flowId(runContext.render("{{ flow.id }}"))
+                                .taskId(uid) // stable identity for UI grouping
+                                .value(runContext.render("{{ taskrun.id }}"))
+                                .executionId(runContext.render("{{ execution.id }}"))
+                                .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
+                                .state(state)
+                                .attempts(
+                                    List.of(
+                                        TaskRunAttempt.builder()
+                                            .state(state)
+                                            .build()
+                                    )
+                                )
+                                .build()
                         )
                         .build();
 
-                    // Register the dynamic taskrun together with its host-result log lines in one
-                    // call: the logs ride with the taskrun, so they can only attach to it, and the
-                    // run context fills in the execution/tenant context, fixes the attempt and masks
-                    // secrets (the plugin never builds a LogEntry).
-                    runContext.dynamicWorkerResult(
-                        WorkerTaskResult.builder().taskRun(subTaskRun).build(),
-                        taskLogs(task)
-                    );
+                    results.add(wtr);
                 }
             }
         }
-    }
 
-    /**
-     * Build the host-result log lines for a task. In EXPLICIT outputs mode the host result payload is
-     * already redacted by the callback.
-     */
-    private List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
-        if (task.getHosts() == null) {
-            return List.of();
+        if (!results.isEmpty()) {
+            runContext.dynamicWorkerResult(results);
         }
-
-        List<DynamicTaskRunLog> logs = new ArrayList<>();
-        for (AnsibleOutput.HostResult hr : task.getHosts()) {
-            if (hr == null) {
-                continue;
-            }
-
-            String status = hr.getStatus();
-            boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
-            logs.add(new DynamicTaskRunLog(
-                failed ? Level.ERROR : Level.INFO,
-                "[" + hr.getHost() + "] " + status + " => " + stringifyResult(hr.getResult())
-            ));
-        }
-
-        return logs;
-    }
-
-    private static String stringifyResult(Object result) {
-        if (result == null) {
-            return "{}";
-        }
-
-        try {
-            return JacksonMapper.ofJson().writeValueAsString(result);
-        } catch (Exception e) {
-            return String.valueOf(result);
-        }
-    }
-
-    public enum OutputsMode {
-        ALL,
-        EXPLICIT
     }
 
     @SuperBuilder
