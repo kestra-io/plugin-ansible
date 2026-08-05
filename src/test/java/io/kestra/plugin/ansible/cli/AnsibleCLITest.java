@@ -4,22 +4,19 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
-import io.kestra.core.models.executions.LogEntry;
-import io.kestra.core.queues.QueueFactoryInterface;
-import io.kestra.core.queues.QueueInterface;
-import io.kestra.plugin.scripts.runner.docker.PullPolicy;
-import jakarta.inject.Named;
 import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
+import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.queues.QueueFactoryInterface;
+import io.kestra.core.queues.QueueInterface;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
@@ -29,8 +26,10 @@ import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
+import io.kestra.plugin.scripts.runner.docker.PullPolicy;
 
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import reactor.core.publisher.Flux;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -1061,59 +1060,69 @@ class AnsibleCLITest {
         AnsibleCLI task = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
-            .beforeCommands(Property.ofValue(List.of(
-                "pip install --default-timeout=60 \"ansible>=9,<10\""
-            )))
-            .inputFiles(Map.of(
+            .beforeCommands(
+                Property.ofValue(
+                    List.of(
+                        "pip install --default-timeout=60 \"ansible>=9,<10\""
+                    )
+                )
+            )
+            .inputFiles(
+                Map.of(
 
-                "inventory.ini",
-                """
-                [target]
-                localhost ansible_connection=local
-                """,
+                    "inventory.ini",
+                    """
+                        [target]
+                        localhost ansible_connection=local
+                        """,
 
-                "vault_vars.yml",
-                """
-                vault_secret_value: !vault |
-                  $ANSIBLE_VAULT;1.1;AES256
-                  35363665656162366638396161616466313965383938313366633734306266633433333265313862
-                  3633646532336664623966666663386531363262336638360a363033373931376432393761613163
-                  35346336383665626335346134613638663561373230616631623538313636306332383431363637
-                  6665623938653066390a396563323430326335303164626661623064313234333633313431613666
-                  65666131633031653630393066383663373630666532383164303837663735393030
-                """,
+                    "vault_vars.yml",
+                    """
+                        vault_secret_value: !vault |
+                          $ANSIBLE_VAULT;1.1;AES256
+                          35363665656162366638396161616466313965383938313366633734306266633433333265313862
+                          3633646532336664623966666663386531363262336638360a363033373931376432393761613163
+                          35346336383665626335346134613638663561373230616631623538313636306332383431363637
+                          6665623938653066390a396563323430326335303164626661623064313234333633313431613666
+                          65666131633031653630393066383663373630666532383164303837663735393030
+                        """,
 
-                "playbook.yml",
-                """
-                ---
-                - name: Reproduce vault serialization bug
-                  hosts: target
-                  gather_facts: false
-                  tasks:
-                    - name: Hello world
-                      ansible.builtin.debug:
-                        msg: Hello!!
+                    "playbook.yml",
+                    """
+                        ---
+                        - name: Reproduce vault serialization bug
+                          hosts: target
+                          gather_facts: false
+                          tasks:
+                            - name: Hello world
+                              ansible.builtin.debug:
+                                msg: Hello!!
 
-                    - name: Load vault-encrypted vars at runtime
-                      ansible.builtin.include_vars:
-                        file: vault_vars.yml
+                            - name: Load vault-encrypted vars at runtime
+                              ansible.builtin.include_vars:
+                                file: vault_vars.yml
 
-                    - name: Use vault-encrypted variable in a task
-                      ansible.builtin.debug:
-                        msg: "Vault value is {{ '{{' }} vault_secret_value {{ '}}' }}"
+                            - name: Use vault-encrypted variable in a task
+                              ansible.builtin.debug:
+                                msg: "Vault value is {{ '{{' }} vault_secret_value {{ '}}' }}"
 
-                    - name: Set fact from vault-encrypted variable
-                      ansible.builtin.set_fact:
-                        derived_value: "{{ '{{' }} vault_secret_value {{ '}}' }}"
+                            - name: Set fact from vault-encrypted variable
+                              ansible.builtin.set_fact:
+                                derived_value: "{{ '{{' }} vault_secret_value {{ '}}' }}"
 
-                    - name: Use derived vault fact
-                      ansible.builtin.debug:
-                        msg: "Derived value is {{ '{{' }} derived_value {{ '}}' }}"
-                """
-            ))
-            .commands(Property.ofValue(List.of(
-                "echo \"bugreport\" > /tmp/vault_pass.txt && ansible-playbook -i inventory.ini --vault-password-file /tmp/vault_pass.txt playbook.yml"
-            )))
+                            - name: Use derived vault fact
+                              ansible.builtin.debug:
+                                msg: "Derived value is {{ '{{' }} derived_value {{ '}}' }}"
+                        """
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "echo \"bugreport\" > /tmp/vault_pass.txt && ansible-playbook -i inventory.ini --vault-password-file /tmp/vault_pass.txt playbook.yml"
+                    )
+                )
+            )
 
             .taskRunner(
                 io.kestra.plugin.scripts.runner.docker.Docker.builder()
@@ -1131,5 +1140,119 @@ class AnsibleCLITest {
         assertThat(output.getPlaybooks(), is(notNullValue()));
         assertThat(output.getPlaybooks().getFirst().getPlays(), is(notNullValue()));
 
+    }
+
+    // issue #120: subdirectory playbook + image-set ANSIBLE_CALLBACK_PLUGINS must still capture outputs.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_capturesOutputs_whenPlaybookInSubdir_andImageOverridesCallbackPath_issue120() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .env(Property.ofValue(Map.of("ANSIBLE_CALLBACK_PLUGINS", "/tmp/othercb")))
+            .beforeCommands(Property.ofValue(List.of("mkdir -p /tmp/othercb")))
+            .inputFiles(
+                Map.of(
+                    "inventory.ini",
+                    "localhost ansible_connection=local",
+
+                    "ansible/playbook.yml",
+                    """
+                        ---
+                        - hosts: localhost
+                          gather_facts: false
+                          tasks:
+                            - name: Report serial number
+                              ansible.builtin.debug:
+                                msg:
+                                  serial_number: "SN-12345"
+                        """
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-playbook -i inventory.ini ansible/playbook.yml"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        assertThat(outputs, is(not(empty())));
+
+        Map<String, Object> msg = (Map<String, Object>) outputs.getFirst().get("msg");
+        assertThat(msg.get("serial_number"), is("SN-12345"));
+
+        assertThat(runOutput.getPlaybooks(), is(not(empty())));
+    }
+
+    // issue #120: defining assets must not affect output capture; both must work in the same run.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_capturesOutputs_andEmitsAssets_together_issue120() throws Exception {
+        assetManagerFactory.reset();
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .assets(new AssetsDeclaration(true, null, null))
+            .inputFiles(
+                Map.of(
+                    "inventory.ini",
+                    "[all]\nlocalhost ansible_connection=local\n",
+
+                    "playbook.yml",
+                    """
+                        ---
+                        - hosts: all
+                          gather_facts: false
+                          tasks:
+                            - name: Report serial number
+                              ansible.builtin.debug:
+                                msg:
+                                  serial_number: "SN-12345"
+                        """
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        // outputs are captured even though assets are defined
+        assertThat(runOutput.getExitCode(), is(0));
+        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        assertThat(outputs, is(not(empty())));
+        Map<String, Object> msg = (Map<String, Object>) outputs.getFirst().get("msg");
+        assertThat(msg.get("serial_number"), is("SN-12345"));
+
+        // and the asset is emitted alongside, in the same run
+        var emitted = assetManagerFactory.emitter().emitted();
+        assertThat(emitted.size(), is(1));
+        assertThat(
+            emitted.getFirst().inputs().stream().map(AssetIdentifier::id).toList(),
+            contains("localhost")
+        );
     }
 }

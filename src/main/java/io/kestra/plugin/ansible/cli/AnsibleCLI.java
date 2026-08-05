@@ -17,6 +17,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+import org.slf4j.event.Level;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
@@ -47,7 +49,6 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-import org.slf4j.event.Level;
 
 @SuperBuilder
 @ToString
@@ -231,6 +232,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
 
+    // Ensure Ansible can find our bundled callback/library dirs regardless of where the playbook
+    // lives or what the image configures (issue #120). Prepend them onto the search path using the
+    // runtime working dir ($PWD, the current directory on every runner), keeping any existing value
+    // so an image's own callback (e.g. ARA) still loads.
+    private static final List<String> CALLBACK_PATH_EXPORTS = List.of(
+        "export ANSIBLE_CALLBACK_PLUGINS=\"$PWD/callback_plugins${ANSIBLE_CALLBACK_PLUGINS:+:$ANSIBLE_CALLBACK_PLUGINS}\"",
+        "export ANSIBLE_LIBRARY=\"$PWD/library${ANSIBLE_LIBRARY:+:$ANSIBLE_LIBRARY}\""
+    );
+
     @Schema(
         title = "Run once before commands",
         description = "Optional shell commands executed only before the first main command, rendered with the same variables."
@@ -283,6 +293,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             If omitted, a generated ansible.cfg in the working directory enables the Kestra callback plugin and logs to `log`.
             Provide custom content to override defaults; include the callback settings above if you still want structured outputs.
+            To guarantee output capture regardless of the playbook location or the image, the task also pins its bundled callback and module directories via the `ANSIBLE_CALLBACK_PLUGINS` and `ANSIBLE_LIBRARY` environment variables, keeping any value already set on those variables. If you use your own callbacks or modules, set their paths through the task's `env` (they are preserved and load alongside the Kestra ones). A callback or module path configured only in a custom `ansible.cfg` is superseded by these variables, so set it via `env` instead.
             """
     )
     @Builder.Default
@@ -436,19 +447,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 perCommandLogs.add(logPath);
             }
 
-            Property<List<String>> mergedBeforeCommands = null;
+            // First (before any user `cd`, so $PWD is the working-dir root) and on every command
+            // (each runs in its own container).
+            List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
             if (!beforeDone) {
-                List<String> renderedBefore = runContext.render(this.beforeCommands).asList(String.class, extraVars);
-                // User beforeCommands run first so they can configure the environment
+                // User beforeCommands can configure the environment
                 // (e.g. private pip index, proxy, auth) before auto-install fires.
-                List<String> merged = new ArrayList<>(renderedBefore);
-                merged.addAll(autoInstallCommands);
-                mergedBeforeCommands = Property.ofValue(merged);
+                beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
+                beforeForRun.addAll(autoInstallCommands);
             }
+            Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
 
             CommandsWrapper commandWrapper = baseWrapper
                 .withEnv(envForRun)
-                // run beforeCommands only once, before the first command (rendered with extra vars)
+                // user beforeCommands + auto-install run once before the first command; the callback
+                // path exports are re-applied before every command (each runs in its own container)
                 .withBeforeCommands(mergedBeforeCommands)
                 // single command per run so Kestra doesn't overwrite outputs
                 .withCommands(Property.ofValue(List.of(cmd)));
@@ -809,10 +822,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             String status = hr.getStatus();
             boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
-            logs.add(new DynamicTaskRunLog(
-                failed ? Level.ERROR : Level.INFO,
-                "[" + hr.getHost() + "] " + status + " => " + stringifyResult(hr.getResult())
-            ));
+            logs.add(
+                new DynamicTaskRunLog(
+                    failed ? Level.ERROR : Level.INFO,
+                    "[" + hr.getHost() + "] " + status + " => " + stringifyResult(hr.getResult())
+                )
+            );
         }
 
         return logs;
