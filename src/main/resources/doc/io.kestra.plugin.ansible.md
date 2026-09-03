@@ -14,7 +14,7 @@ Run Ansible playbooks and ad-hoc commands from Kestra flows inside a container w
 
 The task captures each playbook's results into `outputs.<taskId>.vars.outputs` and `outputs.<taskId>.vars.playbooks` through a bundled Ansible callback (`kestra_logger`). Ansible loads that callback only if it can find it on its callback search path, so the task adds its bundled callback and module directories to `ANSIBLE_CALLBACK_PLUGINS` and `ANSIBLE_LIBRARY` before running commands. This keeps outputs working even when the playbook is in a subdirectory (e.g. `ansible-playbook ansible/site.yml`) or the runner image sets its own callback path (e.g. ARA-instrumented images).
 
-The callback writes its outputs/playbooks payload to a file in the working directory instead of printing it to stdout, so a large ALL-mode run (many hosts/tasks) never depends on the task runner processing one giant stdout line.
+The callback writes its outputs/playbooks payload to a file in the working directory instead of printing it to stdout, so a large ALL-mode run (many hosts/tasks) never depends on the task runner processing one giant stdout line. `maxOutputsSize` bounds the serialized size of that payload (default 10 MB) and fails the task with an actionable error instead of risking an oversized `WorkerTaskResult`; raise it or switch to `outputsMode: EXPLICIT` if you hit it.
 
 Any value already present on those environment variables is preserved, so your own callbacks or modules keep loading alongside the Kestra ones. If you use your own callbacks or modules, set their paths through the task's `env`:
 

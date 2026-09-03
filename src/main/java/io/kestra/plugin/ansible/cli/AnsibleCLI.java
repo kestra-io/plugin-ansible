@@ -22,6 +22,7 @@ import java.util.stream.Stream;
 
 import org.slf4j.event.Level;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
@@ -51,6 +52,7 @@ import io.kestra.plugin.scripts.runner.docker.Docker;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
@@ -237,6 +239,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
+    // 10 MB: comfortably under common queue message-size limits (e.g. a customer's
+    // kestra.queue.message-protection.limit of 50 MB) while leaving headroom for the rest of the
+    // WorkerTaskResult. This is a judgement call, not a guarantee: a plugin cannot read the
+    // configured queue limit at runtime, see `maxOutputsSize` schema.
+    private static final long DEFAULT_MAX_OUTPUTS_SIZE = 10_000_000L;
 
     // Ensure Ansible can find our bundled callback/library dirs regardless of where the playbook
     // lives or what the image configures (issue #120). Prepend them onto the search path using the
@@ -332,6 +339,17 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected Property<OutputsMode> outputsMode = Property.ofValue(OutputsMode.ALL);
 
     @Schema(
+        title = "Maximum size of the outputs payload",
+        description = """
+            Upper bound, in bytes, on the serialized size of the merged `outputs`/`playbooks` payload; default 10 000 000 (10 MB). Exceeding it fails the task instead of emitting an oversized output.
+            This guards against the `WorkerTaskResult` being rejected by the message queue (`kestra.queue.message-protection.limit`), which a plugin cannot read: align this value with your instance's configuration. It is checked once all commands have completed, so it never shortens a slow run.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "reliability")
+    protected Property<@Min(1) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
+
+    @Schema(
         title = "Publish Ansible log file",
         description = "If true, uploads the ansible log as output file `log`; multi-command runs concatenate per-command logs. Default is false."
     )
@@ -384,6 +402,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         OutputsMode rOutputsModeEnum = runContext.render(this.outputsMode).as(OutputsMode.class)
             .orElse(OutputsMode.ALL);
         String rOutputsMode = rOutputsModeEnum.name().toLowerCase(Locale.ROOT);
+
+        long rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
 
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
@@ -569,6 +589,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             : flattenHostResults(mergedPlaybooks);
         mergedVars.put("outputs", mergedRawOrExplicitOutputs);
         mergedVars.put("playbooks", mergedPlaybooks);
+
+        checkOutputsSize(mergedVars, rMaxOutputsSize);
 
         // minimal UI timeline support: emit dynamic worker results
         emitDynamicTaskRuns(runContext, mergedPlaybooks);
@@ -795,6 +817,31 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             );
             return Optional.empty();
         }
+    }
+
+    /**
+     * Guards against a `WorkerTaskResult` the platform message queue may reject (see
+     * `kestra.queue.message-protection.limit`). This runs after every command has already
+     * completed, so it is a task-output/queue guard, not a fix for slow execution — it cannot
+     * make a long-running ansible-playbook command finish sooner.
+     */
+    void checkOutputsSize(Map<String, Object> mergedVars, long maxOutputsSize) throws JsonProcessingException {
+        Map<String, Object> outputsPayload = new HashMap<>();
+        outputsPayload.put("outputs", mergedVars.get("outputs"));
+        outputsPayload.put("playbooks", mergedVars.get("playbooks"));
+
+        long size = JacksonMapper.ofJson().writeValueAsBytes(outputsPayload).length;
+        if (size <= maxOutputsSize) {
+            return;
+        }
+
+        throw new IllegalStateException(
+            "Ansible outputs payload is " + size + " bytes, exceeding the configured `maxOutputsSize` of "
+                + maxOutputsSize + " bytes. This guards against a worker task result the platform queue may "
+                + "reject; it is unrelated to how long the ansible-playbook command itself took to run. Reduce "
+                + "the captured volume with `outputsMode: EXPLICIT` (only declared values are exposed), or raise "
+                + "`maxOutputsSize` if your instance's queue is configured to accept larger messages."
+        );
     }
 
     /**

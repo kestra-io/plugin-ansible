@@ -2,6 +2,7 @@ package io.kestra.plugin.ansible.cli;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -19,6 +20,8 @@ import jakarta.inject.Inject;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Fast, deterministic unit tests for the Java-side helpers introduced to fix issue #126: rebuilding
@@ -95,6 +98,34 @@ class AnsibleCLIOutputsBehaviorTest {
         var playbook = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder().plays(List.of(play)).build();
 
         assertThat(AnsibleCLI.flattenHostResults(List.of(playbook)), is(empty()));
+    }
+
+    // -------------------------------------------------------------------------
+    // checkOutputsSize: the queue/task-output guard (not the hang fix)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void checkOutputsSize_underLimit_doesNotThrow() {
+        AnsibleCLI task = newTask();
+        Map<String, Object> vars = new HashMap<>();
+        vars.put("outputs", List.of(Map.of("msg", "small")));
+        vars.put("playbooks", List.of());
+
+        assertDoesNotThrow(() -> task.checkOutputsSize(vars, 10_000_000L));
+    }
+
+    @Test
+    void checkOutputsSize_overLimit_throwsActionableError() {
+        AnsibleCLI task = newTask();
+        Map<String, Object> vars = new HashMap<>();
+        vars.put("outputs", List.of(Map.of("msg", "x".repeat(1000))));
+        vars.put("playbooks", List.of());
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> task.checkOutputsSize(vars, 100L));
+
+        // actionable: names the offending property and points at the escape hatch
+        assertThat(e.getMessage(), containsString("maxOutputsSize"));
+        assertThat(e.getMessage(), containsString("outputsMode: EXPLICIT"));
     }
 
     // -------------------------------------------------------------------------
