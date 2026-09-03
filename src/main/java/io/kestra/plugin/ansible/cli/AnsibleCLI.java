@@ -65,8 +65,8 @@ import lombok.experimental.SuperBuilder;
 @Schema(
     title = "Run Ansible CLI commands",
     description = """
-        Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one. Uses the cytopia/ansible:latest-tools image by default and merges outputs across multiple commands.
-        When a `requirements.txt` file is present in the working directory, the task automatically installs the listed Python packages with `pip` before running commands. When a `requirements.yml` file is present, it installs the listed Ansible Galaxy collections and roles with `ansible-galaxy install`. Both behaviors are enabled by default and can be disabled via `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
+        Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one, and merges outputs across multiple commands.
+        A `requirements.txt` or `requirements.yml` present in the working directory is installed before commands run; see `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
         """
 )
 @Plugin(
@@ -312,7 +312,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             If omitted, a generated ansible.cfg in the working directory enables the Kestra callback plugin and logs to `log`.
             Provide custom content to override defaults; include the callback settings above if you still want structured outputs.
-            To guarantee output capture regardless of the playbook location or the image, the task also pins its bundled callback and module directories via the `ANSIBLE_CALLBACK_PLUGINS` and `ANSIBLE_LIBRARY` environment variables, keeping any value already set on those variables. If you use your own callbacks or modules, set their paths through the task's `env` (they are preserved and load alongside the Kestra ones). A callback or module path configured only in a custom `ansible.cfg` is superseded by these variables, so set it via `env` instead.
+            The bundled callback and module directories are also pinned via `ANSIBLE_CALLBACK_PLUGINS` and `ANSIBLE_LIBRARY`, which supersede a custom `ansible.cfg`: declare your own callback or module paths through the task's `env` instead.
             """
     )
     @Builder.Default
@@ -331,10 +331,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Outputs capture mode",
         description = """
-            ALL (default) captures every per-host result of every playbook task as outputs. The `outputs` value is a list of per-host result maps.
-            EXPLICIT captures only values declared in the playbook via the bundled `kestra` module; per-host result payloads are redacted to `{"changed": <bool>}` in outputs and live logs, while task names, timings, and statuses (ok/failed/skipped/unreachable) are preserved. The `outputs` value is a map of the declared key/value pairs, not a list, so switching a task between modes changes the shape of `outputs` for downstream references.
-            Redaction only covers what the bundled callback emits. A custom `ansibleConfig` that drops `stdout_callback = ansible.builtin.null` re-enables Ansible's default stdout, which can print raw results (notably on task failures, `debug` output, or verbose runs) that Kestra then captures into logs. Keep that line to preserve redaction.
-            Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
+            ALL (default) captures every per-host result of every playbook task; `outputs` is a list of per-host result maps.
+            EXPLICIT captures only values declared in the playbook via the bundled `kestra` module, redacting per-host payloads to `{"changed": <bool>}` while keeping task names, timings, and statuses; `outputs` is then a map, not a list, so switching modes changes its shape for downstream references.
+            A custom `ansibleConfig` must keep `stdout_callback = ansible.builtin.null` to preserve redaction, and `library = ./library` for the bundled module to resolve.
             """
     )
     @Builder.Default
@@ -937,10 +936,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                         )
                         .build();
 
-                    // Register the dynamic taskrun together with its host-result log lines in one
-                    // call: the logs ride with the taskrun, so they can only attach to it, and the
-                    // run context fills in the execution/tenant context, fixes the attempt and masks
-                    // secrets (the plugin never builds a LogEntry).
+                    // Logs ride with the taskrun, so the run context fills in the execution context
+                    // and masks secrets; the plugin never builds a LogEntry itself.
                     runContext.dynamicWorkerResult(
                         WorkerTaskResult.builder().taskRun(subTaskRun).build(),
                         taskLogs(task, logsMode)
