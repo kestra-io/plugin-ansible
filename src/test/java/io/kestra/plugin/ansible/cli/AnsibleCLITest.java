@@ -590,6 +590,50 @@ class AnsibleCLITest {
         assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
     }
 
+    // issue #126 follow-up: the size guard must trip after dynamic taskrun logs are emitted, not
+    // before, so a run that exceeds maxOutputsSize still leaves per-task diagnostics behind
+    // instead of failing with zero information (the original "no error anywhere" complaint).
+    @Test
+    void run_sizeGuardTripped_stillEmitsDynamicTaskRunLogs() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of("ansible-playbook -i localhost -c local playbooks/playbook.yml")
+                )
+            )
+            // trips unconditionally regardless of actual payload size
+            .maxOutputsSize(Property.ofValue(1L))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        IllegalStateException e = org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalStateException.class,
+            () -> execute.run(runContext)
+        );
+        assertThat(e.getMessage(), containsString("maxOutputsSize"));
+
+        assertThat(runContext.dynamicWorkerResults(), is(not(empty())));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void run_withStructuredOutputs_multipleHosts() throws Exception {

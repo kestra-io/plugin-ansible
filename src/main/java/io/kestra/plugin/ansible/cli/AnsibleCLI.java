@@ -244,6 +244,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     // WorkerTaskResult. This is a judgement call, not a guarantee: a plugin cannot read the
     // configured queue limit at runtime, see `maxOutputsSize` schema.
     private static final long DEFAULT_MAX_OUTPUTS_SIZE = 10_000_000L;
+    // Plenty for a summary or a failure reason while keeping a single dynamic-taskrun log line
+    // from growing unbounded when a host result is large.
+    private static final int MAX_LOG_LINE_LENGTH = 4_000;
 
     // Ensure Ansible can find our bundled callback/library dirs regardless of where the playbook
     // lives or what the image configures (issue #120). Prepend them onto the search path using the
@@ -350,6 +353,17 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected Property<@Min(1) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
 
     @Schema(
+        title = "Per-host task log verbosity",
+        description = """
+            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable` hosts. FULL logs the whole per-host result payload (truncated past a few KB).
+            This changes only what is logged, never what is captured: EXPLICIT-mode redaction happens upstream in the callback, so FULL is not an escape hatch from it.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<LogsMode> logsMode = Property.ofValue(LogsMode.SUMMARY);
+
+    @Schema(
         title = "Publish Ansible log file",
         description = "If true, uploads the ansible log as output file `log`; multi-command runs concatenate per-command logs. Default is false."
     )
@@ -404,6 +418,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         String rOutputsMode = rOutputsModeEnum.name().toLowerCase(Locale.ROOT);
 
         long rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
+        LogsMode rLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.SUMMARY);
 
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
@@ -590,10 +605,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         mergedVars.put("outputs", mergedRawOrExplicitOutputs);
         mergedVars.put("playbooks", mergedPlaybooks);
 
-        checkOutputsSize(mergedVars, rMaxOutputsSize);
+        // Emit before the size guard: these travel on the log queue, not the WorkerTaskResult the
+        // guard protects, so a run that trips the guard still leaves per-task diagnostics behind.
+        emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode);
 
-        // minimal UI timeline support: emit dynamic worker results
-        emitDynamicTaskRuns(runContext, mergedPlaybooks);
+        checkOutputsSize(mergedVars, rMaxOutputsSize);
 
         return AnsibleOutput.builder()
             .vars(mergedVars)
@@ -849,7 +865,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * tagged with the taskrun's id, so logs are attributed per Ansible task instead of all landing
      * on the parent task's root taskrun (issue kestra-ee#8520).
      */
-    private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks) throws IllegalVariableEvaluationException {
+    private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks, LogsMode logsMode) throws IllegalVariableEvaluationException {
         if (playbooks == null || playbooks.isEmpty()) {
             return;
         }
@@ -927,7 +943,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     // secrets (the plugin never builds a LogEntry).
                     runContext.dynamicWorkerResult(
                         WorkerTaskResult.builder().taskRun(subTaskRun).build(),
-                        taskLogs(task)
+                        taskLogs(task, logsMode)
                     );
                 }
             }
@@ -935,10 +951,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     /**
-     * Build the host-result log lines for a task. In EXPLICIT outputs mode the host result payload is
-     * already redacted by the callback.
+     * Build the host-result log lines for a task.
+     * SUMMARY (default) logs only the status for ok/skipped hosts, and the status plus the
+     * failure reason for failed/unreachable hosts. FULL always logs the entire result payload.
+     * Neither mode overrides EXPLICIT-mode redaction: the host result payload is already reduced
+     * by the callback before it ever reaches this method.
      */
-    static List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
+    static List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task, LogsMode logsMode) {
         if (task.getHosts() == null) {
             return List.of();
         }
@@ -951,15 +970,34 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             String status = hr.getStatus();
             boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
-            logs.add(
-                new DynamicTaskRunLog(
-                    failed ? Level.ERROR : Level.INFO,
-                    "[" + hr.getHost() + "] " + status + " => " + stringifyResult(hr.getResult())
-                )
-            );
+
+            String message;
+            if (logsMode == LogsMode.FULL) {
+                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(stringifyResult(hr.getResult()));
+            } else if (failed) {
+                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult()));
+            } else {
+                message = "[" + hr.getHost() + "] " + status;
+            }
+
+            logs.add(new DynamicTaskRunLog(failed ? Level.ERROR : Level.INFO, message));
         }
 
         return logs;
+    }
+
+    static String failureReason(Object result) {
+        if (result instanceof Map<?, ?> m && m.get("msg") != null) {
+            return String.valueOf(m.get("msg"));
+        }
+        return stringifyResult(result);
+    }
+
+    static String truncateForLog(String s) {
+        if (s == null || s.length() <= MAX_LOG_LINE_LENGTH) {
+            return s;
+        }
+        return s.substring(0, MAX_LOG_LINE_LENGTH) + "... (truncated, see `outputs`)";
     }
 
     static String stringifyResult(Object result) {
@@ -977,6 +1015,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public enum OutputsMode {
         ALL,
         EXPLICIT
+    }
+
+    public enum LogsMode {
+        SUMMARY,
+        FULL
     }
 
     @SuperBuilder

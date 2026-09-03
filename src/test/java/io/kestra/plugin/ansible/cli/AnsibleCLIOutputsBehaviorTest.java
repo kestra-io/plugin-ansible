@@ -9,8 +9,10 @@ import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.event.Level;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.utils.IdUtils;
@@ -26,8 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /**
  * Fast, deterministic unit tests for the Java-side helpers introduced to fix issue #126: rebuilding
  * the flat "outputs" list from the structured playbooks (instead of the callback duplicating every
- * per-host result on stdout), and graceful degradation when the outputs file the callback writes is
- * missing or unreadable. None of these exercise Docker/Ansible, so they run in milliseconds.
+ * per-host result on stdout), the outputs-file size guard, the per-host log verbosity modes, and
+ * graceful degradation when the outputs file the callback writes is missing or unreadable.
+ * None of these exercise Docker/Ansible, so they run in milliseconds.
  */
 @KestraTest
 class AnsibleCLIOutputsBehaviorTest {
@@ -126,6 +129,61 @@ class AnsibleCLIOutputsBehaviorTest {
         // actionable: names the offending property and points at the escape hatch
         assertThat(e.getMessage(), containsString("maxOutputsSize"));
         assertThat(e.getMessage(), containsString("outputsMode: EXPLICIT"));
+    }
+
+    // -------------------------------------------------------------------------
+    // taskLogs: logsMode SUMMARY (default) vs FULL
+    // -------------------------------------------------------------------------
+
+    @Test
+    void taskLogs_summaryMode_okHostsHaveNoResultDetail() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "ok", Map.of("stdout", "lots of sensitive detail"))))
+            .build();
+
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
+
+        assertThat(logs.size(), is(1));
+        assertThat(logs.getFirst().message(), is("[h1] ok"));
+        assertThat(logs.getFirst().level(), is(Level.INFO));
+    }
+
+    @Test
+    void taskLogs_summaryMode_failedHostsKeepErrorReasonOnly() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "failed", Map.of("msg", "boom", "stdout", "lots of detail"))))
+            .build();
+
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
+
+        assertThat(logs.getFirst().message(), is("[h1] failed => boom"));
+        assertThat(logs.getFirst().level(), is(Level.ERROR));
+        assertThat(logs.getFirst().message(), not(containsString("lots of detail")));
+    }
+
+    @Test
+    void taskLogs_fullMode_logsEntireResultPayload() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "ok", Map.of("stdout", "full detail here"))))
+            .build();
+
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.FULL);
+
+        assertThat(logs.getFirst().message(), containsString("full detail here"));
+    }
+
+    @Test
+    void taskLogs_truncatesOverlyLongLines_andPointsAtOutputs() {
+        String longMsg = "x".repeat(10_000);
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "failed", Map.of("msg", longMsg))))
+            .build();
+
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
+
+        assertThat(logs.getFirst().message().length(), lessThan(longMsg.length()));
+        assertThat(logs.getFirst().message(), containsString("truncated"));
+        assertThat(logs.getFirst().message(), containsString("outputs"));
     }
 
     // -------------------------------------------------------------------------
