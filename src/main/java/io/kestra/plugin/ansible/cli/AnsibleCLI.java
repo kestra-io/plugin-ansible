@@ -221,6 +221,29 @@ import lombok.experimental.SuperBuilder;
                     commands:
                       - ansible-playbook -i localhost -c local playbook.yml
                 """
+        ),
+        @Example(
+            title = "Restore full per-host log detail for every host, regardless of status. By default (`logsMode: SUMMARY`), `ok`/`skipped` hosts only get a concise one-line summary in the logs; `logsMode: FULL` logs the complete per-host result for every host, matching Ansible's own `-v` output.",
+            full = true,
+            code = """
+                id: ansible_full_logs
+                namespace: company.team
+
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    logsMode: FULL
+                    inputFiles:
+                      playbook.yml: |
+                        ---
+                        - hosts: localhost
+                          tasks:
+                            - name: Gather facts and print them
+                              ansible.builtin.setup:
+                    containerImage: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i localhost -c local playbook.yml
+                """
         )
     }
 )
@@ -329,12 +352,24 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             Redaction only covers what the bundled callback emits. A custom `ansibleConfig` that drops `stdout_callback = ansible.builtin.null` re-enables Ansible's default stdout, which can print raw results (notably on task failures, `debug` output, or verbose runs) that Kestra then captures into logs. Keep that line to preserve redaction.
             Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
             In ALL mode, captured per-host results are capped at 10 MB of raw data; playbooks over a large host set or with large per-host payloads (facts, big `stdout`/`stderr`) can exceed this and fail the task with an explicit error rather than hanging or silently exceeding the queue message size limit. Switch to `EXPLICIT` and declare only the values you need if you hit this limit.
-            Per-task logs mirror this: `ok`/`skipped` hosts get a one-line summary (host, status, whether it changed, task name), while `failed`/`unreachable` hosts keep the full result so failures stay easy to debug. Any single log line is capped and marked if truncated. The complete per-host result is always available in this task's `outputs`/`playbooks`, regardless of mode or what gets logged.
+            This is separate from `logsMode`, which controls how much of each per-host result is written to this task's live logs.
             """
     )
     @Builder.Default
     @PluginProperty(group = "execution")
     protected Property<OutputsMode> outputsMode = Property.ofValue(OutputsMode.ALL);
+
+    @Schema(
+        title = "Per-host task logs verbosity",
+        description = """
+            SUMMARY (default) logs one concise line per host for `ok`/`skipped` results (host, status, whether it changed, and the task name); `failed`/`unreachable` hosts keep the full result logged, since that is what you actually need to debug a failure.
+            FULL logs the full per-host result for every host regardless of status, matching Ansible's own `-v` output. Use this if you were relying on seeing complete per-host detail (facts, full `stdout`/`stderr`) for successful hosts too.
+            Both modes cap any single log line, with a truncation marker naming how many characters were omitted: 2,000 characters in SUMMARY (failures only), 12,000 in FULL (comfortably under Kestra's internal log-chunking threshold, so one line still becomes at most one log entry). Truncation never loses data: the complete, untruncated per-host result is always available in this task's `outputs`/`playbooks`, in both modes.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<LogsMode> logsMode = Property.ofValue(LogsMode.SUMMARY);
 
     @Schema(
         title = "Publish Ansible log file",
@@ -389,6 +424,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         OutputsMode rOutputsModeEnum = runContext.render(this.outputsMode).as(OutputsMode.class)
             .orElse(OutputsMode.ALL);
         String rOutputsMode = rOutputsModeEnum.name().toLowerCase(Locale.ROOT);
+
+        LogsMode rLogsMode = runContext.render(this.logsMode).as(LogsMode.class)
+            .orElse(LogsMode.SUMMARY);
 
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
@@ -573,7 +611,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         mergedVars.put("playbooks", mergedPlaybooks);
 
         // minimal UI timeline support: emit dynamic worker results
-        emitDynamicTaskRuns(runContext, mergedPlaybooks);
+        emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode);
 
         return AnsibleOutput.builder()
             .vars(mergedVars)
@@ -805,7 +843,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * tagged with the taskrun's id, so logs are attributed per Ansible task instead of all landing
      * on the parent task's root taskrun (issue kestra-ee#8520).
      */
-    private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks) throws IllegalVariableEvaluationException {
+    private void emitDynamicTaskRuns(
+        RunContext runContext,
+        List<AnsibleOutput.PlaybookOutput> playbooks,
+        LogsMode logsMode
+    ) throws IllegalVariableEvaluationException {
         if (playbooks == null || playbooks.isEmpty()) {
             return;
         }
@@ -883,31 +925,36 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     // secrets (the plugin never builds a LogEntry).
                     runContext.dynamicWorkerResult(
                         WorkerTaskResult.builder().taskRun(subTaskRun).build(),
-                        taskLogs(task)
+                        taskLogs(task, logsMode)
                     );
                 }
             }
         }
     }
 
-    // Kept comfortably under RunContextLogger's ~15 KB chunking threshold (with margin for
-    // multi-byte UTF-8 and the truncation marker itself), so one pathological host result
-    // becomes at most one log entry instead of fanning out into many chunks (issue #126).
-    static final int MAX_LOG_LINE_LENGTH = 2_000;
+    // Both kept comfortably under RunContextLogger's ~15 KB chunking threshold (with margin for
+    // multi-byte UTF-8 and the truncation marker itself), so one pathological host result becomes
+    // at most one log entry instead of fanning out into many chunks (issue #126). FULL mode gets a
+    // higher cap: the user explicitly asked to see everything, so it's worth spending more of that
+    // budget before truncating.
+    static final int MAX_LOG_LINE_LENGTH_SUMMARY = 2_000;
+    static final int MAX_LOG_LINE_LENGTH_FULL = 12_000;
 
     /**
-     * Build the host-result log lines for a task. Mirrors Ansible's own default verbosity
-     * convention (see the {@code _run_is_verbose()} guard used throughout kestra_logger.py):
-     * a concise one-line summary per host by default, full detail only where it is actually
-     * needed to debug a failure. Previously the full per-host payload (facts, stdout/stderr) was
-     * logged unconditionally at INFO level for every host of every task in ALL mode, which alone
-     * could carry as much data as the whole outputs payload and fan out into many chunked log
-     * entries (issue #126). The complete per-host result always remains available in this task's
-     * `outputs`/`playbooks` for Pebble and the API, regardless of what gets logged here.
+     * Build the host-result log lines for a task. In SUMMARY mode (default), mirrors Ansible's
+     * own default verbosity convention (see the {@code _run_is_verbose()} guard used throughout
+     * kestra_logger.py): a concise one-line summary per host, full detail only where it is
+     * actually needed to debug a failure. FULL mode restores the full per-host payload (facts,
+     * stdout/stderr) for every host regardless of status - the pre-existing behavior before logs
+     * were summarized by default (issue #126: that full payload, logged unconditionally at INFO
+     * level for every host of every task in ALL mode, could alone carry as much data as the whole
+     * outputs payload and fan out into many chunked log entries). The complete per-host result
+     * always remains available in this task's `outputs`/`playbooks` for Pebble and the API,
+     * regardless of what gets logged here.
      */
     // Package-private (rather than private) so log summarization/truncation can be unit tested
     // directly without needing a real Ansible run.
-    List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
+    List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task, LogsMode logsMode) {
         if (task.getHosts() == null) {
             return List.of();
         }
@@ -920,12 +967,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             String status = hr.getStatus();
             boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
+            boolean full = logsMode == LogsMode.FULL || failed;
 
-            String message = "[" + hr.getHost() + "] " + status + " " + (failed
+            String message = "[" + hr.getHost() + "] " + status + " " + (full
                 ? "=> " + stringifyResult(hr.getResult())
                 : summarizeResult(task, hr.getResult()));
 
-            logs.add(new DynamicTaskRunLog(failed ? Level.ERROR : Level.INFO, capLogLine(message)));
+            int maxLength = logsMode == LogsMode.FULL ? MAX_LOG_LINE_LENGTH_FULL : MAX_LOG_LINE_LENGTH_SUMMARY;
+            logs.add(new DynamicTaskRunLog(failed ? Level.ERROR : Level.INFO, capLogLine(message, maxLength)));
         }
 
         return logs;
@@ -943,13 +992,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return "(task=" + taskName + ", changed=" + changed + ")";
     }
 
-    private static String capLogLine(String message) {
-        if (message.length() <= MAX_LOG_LINE_LENGTH) {
+    private static String capLogLine(String message, int maxLength) {
+        if (message.length() <= maxLength) {
             return message;
         }
 
-        int omitted = message.length() - MAX_LOG_LINE_LENGTH;
-        return message.substring(0, MAX_LOG_LINE_LENGTH)
+        int omitted = message.length() - maxLength;
+        return message.substring(0, maxLength)
             + "... [truncated " + omitted + " more character(s); see this task's `outputs`/`playbooks` for the full result]";
     }
 
@@ -968,6 +1017,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public enum OutputsMode {
         ALL,
         EXPLICIT
+    }
+
+    public enum LogsMode {
+        SUMMARY,
+        FULL
     }
 
     @SuperBuilder

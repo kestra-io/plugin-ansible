@@ -522,17 +522,39 @@ class AnsibleCLITest {
         assertThat(dynamicLogs, is(not(empty())));
         assertThat(dynamicLogs.stream().allMatch(l -> l.getMessage() != null && l.getMessage().contains("[localhost]")), is(true));
         assertThat(dynamicLogs.stream().anyMatch(l -> l.getMessage().contains("[localhost] ok")), is(true));
+        // logsMode is unset: the default must be SUMMARY, i.e. a concise "changed=" line, not the
+        // full per-host payload
+        assertThat(dynamicLogs.stream().anyMatch(l -> l.getMessage().contains("changed=")), is(true));
         // attemptNumber MUST be 0: logs are grouped per taskrun by (taskRunId, attemptNumber) and a
         // single-attempt taskrun's logs live under attempt 0
         assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
     }
 
+    // issue #126 (follow-up): logsMode defaults to SUMMARY (the Property's declared default), so
+    // an unset property behaves like run_emitsLogsUnderDynamicTaskRuns above.
+    @Test
+    void logsMode_defaultsToSummary_whenUnset() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .commands(Property.ofValue(List.of("ansible --version")))
+            .build();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.LogsMode resolved = runContext.render(execute.getLogsMode())
+            .as(AnsibleCLI.LogsMode.class)
+            .orElse(null);
+
+        assertThat(resolved, is(AnsibleCLI.LogsMode.SUMMARY));
+    }
+
     // issue #126 (follow-up): taskLogs() used to inline the full per-host result (facts, full
     // stdout/stderr) into an INFO log line unconditionally, for every host of every task in ALL
-    // mode - as much log volume as the whole outputs payload. Mirror Ansible's own default
-    // verbosity: concise by default, full detail kept only for failures.
+    // mode - as much log volume as the whole outputs payload. logsMode: SUMMARY (default) mirrors
+    // Ansible's own default verbosity: concise by default, full detail kept only for failures.
+    // logsMode: FULL is the escape hatch restoring the old behavior for every host.
     @Test
-    void taskLogs_summarizesOkAndSkippedHosts_withoutFullPayload() {
+    void taskLogs_summaryMode_summarizesOkAndSkippedHosts_withoutFullPayload() {
         AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
 
         String irrelevantDetail = "a lot of facts/stdout that should not be logged by default";
@@ -544,7 +566,7 @@ class AnsibleCLITest {
         AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .uid("play|Install nginx").name("Install nginx").hosts(List.of(ok, skipped)).build();
 
-        List<DynamicTaskRunLog> logs = execute.taskLogs(task);
+        List<DynamicTaskRunLog> logs = execute.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
 
         assertThat(logs.size(), is(2));
 
@@ -561,7 +583,7 @@ class AnsibleCLITest {
     }
 
     @Test
-    void taskLogs_keepsFullDetailForFailedAndUnreachableHosts() {
+    void taskLogs_summaryMode_keepsFullDetailForFailedAndUnreachableHosts() {
         AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
 
         AnsibleCLI.AnsibleOutput.HostResult failed = AnsibleCLI.AnsibleOutput.HostResult.builder()
@@ -576,7 +598,7 @@ class AnsibleCLITest {
         AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .uid("play|Copy file").name("Copy file").hosts(List.of(failed, unreachable)).build();
 
-        List<DynamicTaskRunLog> logs = execute.taskLogs(task);
+        List<DynamicTaskRunLog> logs = execute.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
 
         assertThat(logs.get(0).level(), is(Level.ERROR));
         assertThat(logs.get(0).message(), containsString("Destination directory does not exist"));
@@ -586,21 +608,61 @@ class AnsibleCLITest {
     }
 
     @Test
-    void taskLogs_capsLineLength_withTruncationMarker() {
+    void taskLogs_fullMode_logsFullPayload_evenForOkAndSkippedHosts() {
         AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
 
-        String hugeMessage = "e".repeat(AnsibleCLI.MAX_LOG_LINE_LENGTH * 5);
+        String detail = "complete facts/stdout that FULL mode must not summarize away";
+        AnsibleCLI.AnsibleOutput.HostResult ok = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("ok").result(Map.of("changed", true, "stdout", detail)).build();
+        AnsibleCLI.AnsibleOutput.HostResult skipped = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host2").status("skipped").result(Map.of("changed", false, "skip_reason", detail)).build();
+
+        AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("play|Install nginx").name("Install nginx").hosts(List.of(ok, skipped)).build();
+
+        List<DynamicTaskRunLog> logs = execute.taskLogs(task, AnsibleCLI.LogsMode.FULL);
+
+        assertThat(logs.get(0).message(), containsString(detail));
+        assertThat(logs.get(1).message(), containsString(detail));
+    }
+
+    @Test
+    void taskLogs_summaryMode_capsLineLength_withTruncationMarker() {
+        AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
+
+        String hugeMessage = "e".repeat(AnsibleCLI.MAX_LOG_LINE_LENGTH_SUMMARY * 5);
         AnsibleCLI.AnsibleOutput.HostResult failed = AnsibleCLI.AnsibleOutput.HostResult.builder()
             .host("host1").status("failed").result(Map.of("msg", hugeMessage)).build();
 
         AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .uid("play|Big failure").name("Big failure").hosts(List.of(failed)).build();
 
-        String message = execute.taskLogs(task).getFirst().message();
+        String message = execute.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY).getFirst().message();
 
-        assertThat(message.length(), lessThan(AnsibleCLI.MAX_LOG_LINE_LENGTH + 200));
+        assertThat(message.length(), lessThan(AnsibleCLI.MAX_LOG_LINE_LENGTH_SUMMARY + 200));
         assertThat(message, containsString("truncated"));
         // nothing is actually lost: point users at where the full result still lives
+        assertThat(message, containsString("outputs"));
+        assertThat(message, containsString("playbooks"));
+    }
+
+    @Test
+    void taskLogs_fullMode_capsLineLength_withTruncationMarker() {
+        AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
+
+        // FULL mode gets a higher cap than SUMMARY, but the safety net still applies, including
+        // to non-failure hosts (which SUMMARY would not even log in full).
+        String hugeMessage = "e".repeat(AnsibleCLI.MAX_LOG_LINE_LENGTH_FULL * 3);
+        AnsibleCLI.AnsibleOutput.HostResult ok = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("ok").result(Map.of("changed", true, "stdout", hugeMessage)).build();
+
+        AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("play|Big success").name("Big success").hosts(List.of(ok)).build();
+
+        String message = execute.taskLogs(task, AnsibleCLI.LogsMode.FULL).getFirst().message();
+
+        assertThat(message.length(), lessThan(AnsibleCLI.MAX_LOG_LINE_LENGTH_FULL + 200));
+        assertThat(message, containsString("truncated"));
         assertThat(message, containsString("outputs"));
         assertThat(message, containsString("playbooks"));
     }
