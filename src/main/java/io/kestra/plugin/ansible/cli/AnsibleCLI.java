@@ -223,7 +223,7 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
-            title = "Restore full per-host log detail for every host, regardless of status. By default (`logsMode: SUMMARY`), `ok`/`skipped` hosts only get a concise one-line summary in the logs; `logsMode: FULL` logs the complete per-host result for every host, matching Ansible's own `-v` output.",
+            title = "Log the full per-host result for every host",
             full = true,
             code = """
                 id: ansible_full_logs
@@ -364,7 +364,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             SUMMARY (default) logs one concise line per host for `ok`/`skipped` results (host, status, whether it changed, and the task name); `failed`/`unreachable` hosts keep the full result logged, since that is what you actually need to debug a failure.
             FULL logs the full per-host result for every host regardless of status, matching Ansible's own `-v` output. Use this if you were relying on seeing complete per-host detail (facts, full `stdout`/`stderr`) for successful hosts too.
-            Both modes cap any single log line, with a truncation marker naming how many characters were omitted: 2,000 characters in SUMMARY (failures only), 12,000 in FULL (comfortably under Kestra's internal log-chunking threshold, so one line still becomes at most one log entry). Truncation never loses data: the complete, untruncated per-host result is always available in this task's `outputs`/`playbooks`, in both modes.
+            Both modes cap any single log line, with a truncation marker naming how many characters were omitted: 2,000 characters in SUMMARY (failures only), 12,000 in FULL (comfortably under Kestra's internal log-chunking threshold, so one line still becomes at most one log entry).
+            With `outputsMode: ALL`, a SUMMARY line never loses data: the complete, untruncated per-host result is always available in this task's `outputs`/`playbooks` regardless of `logsMode`, so FULL only changes what shows up in the logs, not what you can retrieve.
+            With `outputsMode: EXPLICIT`, the bundled callback already redacts per-host payloads to `{"changed": <bool>}` (plus `msg` on failure) before this task ever sees them. `logsMode` cannot recover what the callback already dropped: FULL just logs that same redacted map, it does not restore per-host detail. Combining `EXPLICIT` with `SUMMARY` therefore keeps per-host payloads out of both the logs and `outputs`/`playbooks` entirely - a reasonable choice for large runs, but make it knowingly, not discover it after the fact.
             """
     )
     @Builder.Default
