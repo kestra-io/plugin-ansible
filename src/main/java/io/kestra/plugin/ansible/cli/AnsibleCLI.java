@@ -869,82 +869,66 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             return;
         }
 
-        for (AnsibleOutput.PlaybookOutput pb : playbooks) {
-            if (pb == null || pb.getPlays() == null)
-                continue;
-
-            for (AnsibleOutput.PlayOutput play : pb.getPlays()) {
-                if (play == null || play.getTasks() == null)
-                    continue;
-
-                for (AnsibleOutput.TaskOutput task : play.getTasks()) {
-                    if (task == null)
-                        continue;
-
-                    String uid = task.getUid();
-                    String startedAtStr = task.getStartedAt();
-                    String endedAtStr = task.getEndedAt();
-                    if (uid == null || startedAtStr == null || endedAtStr == null) {
-                        continue; // no timeline info => skip
-                    }
-
-                    Instant started;
-                    Instant ended;
-                    try {
-                        started = Instant.parse(startedAtStr);
-                        ended = Instant.parse(endedAtStr);
-                    } catch (Exception e) {
-                        continue; // bad format => skip
-                    }
-
-                    ArrayList<State.History> histories = new ArrayList<>();
-                    histories.add(new State.History(State.Type.CREATED, started));
-                    histories.add(new State.History(State.Type.RUNNING, started));
-
-                    // Compute final state: failed if any host failed/unreachable, else success.
-                    State.Type finalType = State.Type.SUCCESS;
-                    if (task.getHosts() != null) {
-                        for (AnsibleOutput.HostResult hr : task.getHosts()) {
-                            if (hr == null)
-                                continue;
-                            String status = hr.getStatus();
-                            if ("failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status)) {
-                                finalType = State.Type.FAILED;
-                                break;
-                            }
-                        }
-                    }
-
-                    histories.add(new State.History(finalType, ended));
-                    State state = State.of(finalType, histories);
-
-                    TaskRun subTaskRun = TaskRun.builder()
-                        .id(IdUtils.create())
-                        .tenantId(runContext.flowInfo().tenantId())
-                        .namespace(runContext.render("{{ flow.namespace }}"))
-                        .flowId(runContext.render("{{ flow.id }}"))
-                        .taskId(uid) // stable identity for per-task grouping
-                        .executionId(runContext.render("{{ execution.id }}"))
-                        .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
-                        .state(state)
-                        .attempts(
-                            List.of(
-                                TaskRunAttempt.builder()
-                                    .state(state)
-                                    .build()
-                            )
-                        )
-                        .build();
-
-                    // Logs ride with the taskrun, so the run context fills in the execution context
-                    // and masks secrets; the plugin never builds a LogEntry itself.
-                    runContext.dynamicWorkerResult(
-                        WorkerTaskResult.builder().taskRun(subTaskRun).build(),
-                        taskLogs(task, logsMode)
-                    );
-                }
+        // toList() so the body can throw the checked render() exception
+        for (AnsibleOutput.TaskOutput task : tasks(playbooks).toList()) {
+            String uid = task.getUid();
+            Instant started = parseInstant(task.getStartedAt());
+            Instant ended = parseInstant(task.getEndedAt());
+            if (uid == null || started == null || ended == null) {
+                continue; // missing or unparseable timeline info => skip
             }
+
+            State.Type finalType = hasFailedHost(task) ? State.Type.FAILED : State.Type.SUCCESS;
+            State state = State.of(finalType, new ArrayList<>(List.of(
+                new State.History(State.Type.CREATED, started),
+                new State.History(State.Type.RUNNING, started),
+                new State.History(finalType, ended)
+            )));
+
+            TaskRun subTaskRun = TaskRun.builder()
+                .id(IdUtils.create())
+                .tenantId(runContext.flowInfo().tenantId())
+                .namespace(runContext.render("{{ flow.namespace }}"))
+                .flowId(runContext.render("{{ flow.id }}"))
+                .taskId(uid) // stable identity for per-task grouping
+                .executionId(runContext.render("{{ execution.id }}"))
+                .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
+                .state(state)
+                .attempts(
+                    List.of(
+                        TaskRunAttempt.builder()
+                            .state(state)
+                            .build()
+                    )
+                )
+                .build();
+
+            // Logs ride with the taskrun, so the run context fills in the execution context
+            // and masks secrets; the plugin never builds a LogEntry itself.
+            runContext.dynamicWorkerResult(
+                WorkerTaskResult.builder().taskRun(subTaskRun).build(),
+                taskLogs(task, logsMode)
+            );
         }
+    }
+
+    private static Instant parseInstant(String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(value);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean hasFailedHost(AnsibleOutput.TaskOutput task) {
+        return nonNulls(task.getHosts()).anyMatch(host -> isFailure(host.getStatus()));
+    }
+
+    private static boolean isFailure(String status) {
+        return "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
     }
 
     /**
@@ -966,7 +950,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             }
 
             String status = hr.getStatus();
-            boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
+            boolean failed = isFailure(status);
 
             String message;
             if (logsMode == LogsMode.FULL) {
