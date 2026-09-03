@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -196,9 +195,10 @@ class AnsibleCLIOutputsBehaviorTest {
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
         Path missing = tempDir.resolve("does-not-exist.json");
 
-        Optional<Map<String, Object>> result = task.readOutputsFile(runContext, missing, true);
+        AnsibleCLI.OutputsFileRead result = task.readOutputsFile(runContext, missing, true, 10_000_000L);
 
-        assertThat(result.isEmpty(), is(true));
+        assertThat(result.payload().isEmpty(), is(true));
+        assertThat(result.oversizedBytes(), is(0L));
     }
 
     @Test
@@ -208,9 +208,10 @@ class AnsibleCLIOutputsBehaviorTest {
         Path malformed = tempDir.resolve("bad.json");
         Files.writeString(malformed, "{not valid json");
 
-        Optional<Map<String, Object>> result = task.readOutputsFile(runContext, malformed, true);
+        AnsibleCLI.OutputsFileRead result = task.readOutputsFile(runContext, malformed, true, 10_000_000L);
 
-        assertThat(result.isEmpty(), is(true));
+        assertThat(result.payload().isEmpty(), is(true));
+        assertThat(result.oversizedBytes(), is(0L));
     }
 
     @Test
@@ -220,9 +221,55 @@ class AnsibleCLIOutputsBehaviorTest {
         Path valid = tempDir.resolve("good.json");
         Files.writeString(valid, "{\"playbooks\":[{\"plays\":[]}]}");
 
-        Optional<Map<String, Object>> result = task.readOutputsFile(runContext, valid, true);
+        AnsibleCLI.OutputsFileRead result = task.readOutputsFile(runContext, valid, true, 10_000_000L);
 
-        assertThat(result.isPresent(), is(true));
-        assertThat(result.get().get("playbooks"), is(instanceOf(List.class)));
+        assertThat(result.payload().isPresent(), is(true));
+        assertThat(result.payload().get().get("playbooks"), is(instanceOf(List.class)));
+    }
+
+    // The payload can be hundreds of MB (the volume that caused #126): it must be rejected on the
+    // file's own size, never deserialized first, or the hang is traded for a worker OOM.
+    @Test
+    void readOutputsFile_fileLargerThanBound_isRejectedWithoutBeingParsed(@TempDir Path tempDir) throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        Path oversized = tempDir.resolve("oversized.json");
+        // deliberately unparseable: a parse attempt would fail the test instead of returning the size
+        Files.writeString(oversized, "x".repeat(2_000));
+
+        AnsibleCLI.OutputsFileRead result = task.readOutputsFile(runContext, oversized, true, 1_000L);
+
+        assertThat(result.payload().isEmpty(), is(true));
+        assertThat(result.oversizedBytes(), is(2_000L));
+    }
+
+    @Test
+    void readOutputsFile_deletesTheFileOnceConsumed(@TempDir Path tempDir) throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        Path valid = tempDir.resolve("good.json");
+        Files.writeString(valid, "{\"playbooks\":[{\"plays\":[]}]}");
+
+        task.readOutputsFile(runContext, valid, true, 10_000_000L);
+
+        // in ALL mode this file holds raw per-host results; it must not linger in plaintext
+        assertThat(Files.exists(valid), is(false));
+    }
+
+    @Test
+    void failOnOversizedOutputsFile_throwsSameActionableError() {
+        IllegalStateException e = assertThrows(
+            IllegalStateException.class,
+            () -> AnsibleCLI.failOnOversizedOutputsFile(2_000L, 1_000L)
+        );
+
+        assertThat(e.getMessage(), containsString("maxOutputsSize"));
+        assertThat(e.getMessage(), containsString("outputsMode: EXPLICIT"));
+        assertThat(e.getMessage(), containsString("2000"));
+    }
+
+    @Test
+    void failOnOversizedOutputsFile_nothingOversized_doesNotThrow() {
+        assertDoesNotThrow(() -> AnsibleCLI.failOnOversizedOutputsFile(0L, 1_000L));
     }
 }

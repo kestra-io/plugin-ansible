@@ -616,11 +616,17 @@ class AnsibleCLITest {
             )
             .commands(
                 Property.ofValue(
-                    List.of("ansible-playbook -i localhost -c local playbooks/playbook.yml")
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook.yml",
+                        // A second command pads the merged payload past the bound via the stdout
+                        // "::{...}::" path, so the playbook's own outputs file (~3 KB) still reads
+                        // back normally and its per-host logs are emitted before the guard trips.
+                        "echo \"::{\\\"outputs\\\":{\\\"playbooks\\\":[{\\\"plays\\\":[{\\\"name\\\":\\\"$(head -c 40000 /dev/zero | tr '\\0' x)\\\"}]}]}}::\""
+                    )
                 )
             )
-            // trips unconditionally regardless of actual payload size
-            .maxOutputsSize(Property.ofValue(1L))
+            // above the playbook's outputs file, below the padded merged payload
+            .maxOutputsSize(Property.ofValue(20_000L))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());

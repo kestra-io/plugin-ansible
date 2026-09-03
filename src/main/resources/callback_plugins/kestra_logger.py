@@ -128,7 +128,18 @@ class CallbackModule(CallbackBase):
 
         try:
             os.makedirs(os.path.dirname(self._outputs_file_path), exist_ok=True)
-            with open(self._outputs_file_path, "w", encoding="utf-8") as fh:
+            # 0600: in "all" mode this file holds raw per-host results (registered vars,
+            # stdout/msg, gathered facts) which may carry secrets a playbook fetched. Open with
+            # restrictive permissions and re-apply them on the descriptor, so an existing file
+            # created with a wider umask cannot leave the payload world-readable. AnsibleCLI
+            # deletes the file as soon as it has read it back.
+            fd = os.open(self._outputs_file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                # not all filesystems support fchmod; the O_CREAT mode above still applies
+                pass
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, default=str)
         except Exception as e:
             self._display.warning(

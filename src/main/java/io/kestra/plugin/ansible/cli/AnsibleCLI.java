@@ -3,6 +3,7 @@ package io.kestra.plugin.ansible.cli;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -22,7 +23,6 @@ import java.util.stream.Stream;
 
 import org.slf4j.event.Level;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
@@ -52,6 +52,7 @@ import io.kestra.plugin.scripts.runner.docker.Docker;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
@@ -244,6 +245,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     // WorkerTaskResult. This is a judgement call, not a guarantee: a plugin cannot read the
     // configured queue limit at runtime, see `maxOutputsSize` schema.
     private static final long DEFAULT_MAX_OUTPUTS_SIZE = 10_000_000L;
+    // 100 MB: an upper ceiling on what the property may be raised to. Past this, the payload is
+    // beyond any realistic queue message-size limit and the guard would only be nominal, while
+    // the parse itself would have to materialize that volume in the worker heap.
+    static final long MAX_OUTPUTS_SIZE_CEILING = 100_000_000L;
     // Plenty for a summary or a failure reason while keeping a single dynamic-taskrun log line
     // from growing unbounded when a host result is large.
     private static final int MAX_LOG_LINE_LENGTH = 4_000;
@@ -343,13 +348,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Maximum size of the outputs payload",
         description = """
-            Upper bound, in bytes, on the serialized size of the merged `outputs`/`playbooks` payload; default 10 000 000 (10 MB). Exceeding it fails the task instead of emitting an oversized output.
+            Upper bound, in bytes, on the serialized size of the merged `outputs`/`playbooks` payload; default 10 000 000 (10 MB), maximum 100 000 000 (100 MB). Exceeding it fails the task instead of emitting an oversized output.
             This guards against the `WorkerTaskResult` being rejected by the message queue (`kestra.queue.message-protection.limit`), which a plugin cannot read: align this value with your instance's configuration. It is checked once all commands have completed, so it never shortens a slow run.
+            It also bounds what is read back into memory: a callback outputs file larger than this value is never parsed, so an oversized run fails instead of materializing that volume in the worker heap.
             """
     )
     @Builder.Default
     @PluginProperty(group = "reliability")
-    protected Property<@Min(1) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
+    protected Property<@Min(1) @Max(MAX_OUTPUTS_SIZE_CEILING) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
 
     @Schema(
         title = "Per-host task log verbosity",
@@ -466,6 +472,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         int mergedExitCode = 0;
         int mergedStdOutCount = 0;
         int mergedStdErrCount = 0;
+        // largest callback outputs file that was refused before parsing, see readOutputsFile
+        long oversizedOutputsFileBytes = 0;
 
         Map<String, URI> lastOutputFiles = Map.of();
         TaskRunnerDetailResult lastTaskRunner = null;
@@ -547,7 +555,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             // file instead of printing to stdout: a single, potentially multi-MB stdout line
             // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
             boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
-            readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand).ifPresent(payload -> {
+            OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
+            oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
+            outputsRead.payload().ifPresent(payload -> {
                 if (payload.get("outputs") instanceof Map<?, ?> explicit) {
                     explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
                 }
@@ -608,6 +618,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         // guard protects, so a run that trips the guard still leaves per-task diagnostics behind.
         emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode);
 
+        failOnOversizedOutputsFile(oversizedOutputsFileBytes, rMaxOutputsSize);
         checkOutputsSize(mergedVars, rMaxOutputsSize);
 
         return AnsibleOutput.builder()
@@ -805,11 +816,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * the command did not run ansible-playbook at all, the playbook crashed before completing, or
      * a user-supplied `ansibleConfig` does not load the callback.
      *
+     * <p>The file is never parsed before its size has been checked against {@code maxOutputsSize}:
+     * the payload this fix moves off stdout can be hundreds of megabytes, and deserializing it
+     * would materialize that volume in the worker heap before the output guard could reject it.
+     * An oversized file is reported back through {@link OutputsFileRead#oversizedBytes()} so the
+     * caller can still emit the diagnostics it has before failing the task.
+     *
+     * <p>The file is deleted once consumed: in ALL mode it holds raw per-host results (registered
+     * vars, stdout/msg, gathered facts) that may carry secrets a playbook fetched, and there is no
+     * reason to leave them in plaintext in the working directory for the rest of the task.
+     *
      * @param warnIfMissing whether a missing file is worth a warning; suppressed for commands that
      *                       do not look like an ansible-playbook invocation, to avoid spurious
      *                       warnings on every auto-install/before-command in a multi-command task.
      */
-    Optional<Map<String, Object>> readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing) {
+    OutputsFileRead readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing, long maxOutputsSize) {
         if (!Files.isRegularFile(outputsFile)) {
             if (warnIfMissing) {
                 runContext.logger().warn(
@@ -820,18 +841,45 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     outputsFile
                 );
             }
-            return Optional.empty();
+            return OutputsFileRead.EMPTY;
         }
 
-        try (InputStream is = Files.newInputStream(outputsFile)) {
-            return Optional.ofNullable(JacksonMapper.ofJson().readValue(is, new TypeReference<Map<String, Object>>() {}));
+        try {
+            // The file only ever holds "playbooks" (plus "outputs" in EXPLICIT mode), while the
+            // final payload adds the flat list rebuilt from those same playbooks: a file already
+            // over the bound can never fit, so rejecting on file size raises no false failure.
+            long fileSize = Files.size(outputsFile);
+            if (fileSize > maxOutputsSize) {
+                return new OutputsFileRead(Optional.empty(), fileSize);
+            }
+
+            try (InputStream is = Files.newInputStream(outputsFile)) {
+                return new OutputsFileRead(
+                    Optional.ofNullable(JacksonMapper.ofJson().readValue(is, new TypeReference<Map<String, Object>>() {})),
+                    0
+                );
+            }
         } catch (IOException e) {
             runContext.logger().warn(
                 "Unable to parse the Ansible outputs file '{}': {}. Its outputs/playbooks will be empty.",
                 outputsFile, e.getMessage()
             );
-            return Optional.empty();
+            return OutputsFileRead.EMPTY;
+        } finally {
+            try {
+                Files.deleteIfExists(outputsFile);
+            } catch (IOException e) {
+                runContext.logger().debug("Unable to delete the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
+            }
         }
+    }
+
+    /**
+     * Outcome of {@link #readOutputsFile}: either the parsed payload, or the size of a file that
+     * was too large to be parsed at all (0 when nothing was oversized).
+     */
+    record OutputsFileRead(Optional<Map<String, Object>> payload, long oversizedBytes) {
+        static final OutputsFileRead EMPTY = new OutputsFileRead(Optional.empty(), 0);
     }
 
     /**
@@ -840,23 +888,82 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * completed, so it is a task-output/queue guard, not a fix for slow execution — it cannot
      * make a long-running ansible-playbook command finish sooner.
      */
-    void checkOutputsSize(Map<String, Object> mergedVars, long maxOutputsSize) throws JsonProcessingException {
+    void checkOutputsSize(Map<String, Object> mergedVars, long maxOutputsSize) throws IOException {
         Map<String, Object> outputsPayload = new HashMap<>();
         outputsPayload.put("outputs", mergedVars.get("outputs"));
         outputsPayload.put("playbooks", mergedVars.get("playbooks"));
 
-        long size = JacksonMapper.ofJson().writeValueAsBytes(outputsPayload).length;
-        if (size <= maxOutputsSize) {
+        // Measure by counting the serialized bytes as they are produced, and stop at the bound:
+        // materializing the whole payload as a byte[] just to read its length would allocate a
+        // second full copy of data that was itself just parsed out of the outputs file.
+        try (BoundedCountingOutputStream counter = new BoundedCountingOutputStream(maxOutputsSize)) {
+            JacksonMapper.ofJson().writeValue(counter, outputsPayload);
+        } catch (LimitExceededException e) {
+            throw new IllegalStateException(outputsTooLargeMessage(
+                "Ansible outputs payload exceeds the configured `maxOutputsSize` of " + maxOutputsSize + " bytes."
+            ));
+        }
+    }
+
+    /**
+     * Fails the task when a callback outputs file was too large to be parsed at all, with the same
+     * actionable message as {@link #checkOutputsSize}. Called after the per-task logs have been
+     * emitted, so the run still leaves behind whatever diagnostics the other commands produced.
+     */
+    static void failOnOversizedOutputsFile(long oversizedBytes, long maxOutputsSize) {
+        if (oversizedBytes <= 0) {
             return;
         }
 
-        throw new IllegalStateException(
-            "Ansible outputs payload is " + size + " bytes, exceeding the configured `maxOutputsSize` of "
-                + maxOutputsSize + " bytes. This guards against a worker task result the platform queue may "
-                + "reject; it is unrelated to how long the ansible-playbook command itself took to run. Reduce "
-                + "the captured volume with `outputsMode: EXPLICIT` (only declared values are exposed), or raise "
-                + "`maxOutputsSize` if your instance's queue is configured to accept larger messages."
-        );
+        throw new IllegalStateException(outputsTooLargeMessage(
+            "The Ansible outputs file written by the callback is " + oversizedBytes + " bytes, exceeding the "
+                + "configured `maxOutputsSize` of " + maxOutputsSize + " bytes; it was not parsed, so it could "
+                + "not exhaust the worker's heap."
+        ));
+    }
+
+    private static String outputsTooLargeMessage(String what) {
+        return what
+            + " This guards against a worker task result the platform queue may reject; it is unrelated to how"
+            + " long the ansible-playbook command itself took to run. Reduce the captured volume with"
+            + " `outputsMode: EXPLICIT` (only declared values are exposed), or raise `maxOutputsSize` if your"
+            + " instance's queue is configured to accept larger messages.";
+    }
+
+    /** Counts written bytes without keeping them, and aborts as soon as the bound is exceeded. */
+    private static final class BoundedCountingOutputStream extends OutputStream {
+        private final long limit;
+        private long count;
+
+        private BoundedCountingOutputStream(long limit) {
+            this.limit = limit;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            add(1);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            add(len);
+        }
+
+        private void add(long written) throws IOException {
+            count += written;
+            if (count > limit) {
+                throw new LimitExceededException();
+            }
+        }
+    }
+
+    /** Internal signal that {@link BoundedCountingOutputStream}'s bound was crossed. */
+    private static final class LimitExceededException extends IOException {
+        @Override
+        public synchronized Throwable fillInStackTrace() {
+            // control flow only, never surfaced: skip the stack trace
+            return this;
+        }
     }
 
     /**
