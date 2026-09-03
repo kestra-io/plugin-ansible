@@ -15,9 +15,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import org.slf4j.event.Level;
+
+import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
@@ -228,6 +233,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
     public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
+    public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -250,7 +256,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     @Schema(
         title = "Commands to run sequentially",
-        description = "Commands are executed one by one in the same working directory and their outputs are merged. Group related steps in a single task to optimize performance."
+        description = """
+            Commands are executed one by one in the same working directory and their outputs are merged.
+            List each `ansible-playbook` invocation as its own entry: the outputs payload is written to one file per entry, so invocations chained with `&&`/`;` overwrite each other's payload.
+            """
     )
     @NotNull
     @PluginProperty(group = "main")
@@ -418,7 +427,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         // run each ansible-playbook separately and merge outputs
         Map<String, Object> mergedVars = new HashMap<>();
         List<AnsibleOutput.PlaybookOutput> mergedPlaybooks = new ArrayList<>();
-        List<Map<String, Object>> mergedRawOutputs = new ArrayList<>();
         Map<String, Object> mergedExplicitOutputs = new HashMap<>();
 
         int mergedExitCode = 0;
@@ -438,6 +446,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         for (String cmd : rCommands) {
             Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
             envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
+
+            // Each command gets its own outputs file: the callback writes it once per
+            // ansible-playbook run, and a shared name would let a later command in a
+            // multi-command task overwrite an earlier one's payload before we read it back.
+            Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
+            envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
 
             // If multiple commands and outputLogFile enabled,
             // override ANSIBLE_LOG_PATH so each run writes a different file.
@@ -477,27 +491,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             Map<String, Object> vars = out.getVars();
             if (vars != null) {
-                // merge raw outputs (backward compatible); in EXPLICIT mode the
-                // callback emits a map of declared outputs instead of a list
-                Object maybeOutputs = vars.get("outputs");
-                if (maybeOutputs instanceof List<?> list) {
-                    for (Object o : list) {
-                        if (o instanceof Map<?, ?> m) {
-                            // noinspection unchecked
-                            mergedRawOutputs.add((Map<String, Object>) m);
-                        }
-                    }
-                } else if (maybeOutputs instanceof Map<?, ?> m) {
-                    m.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
-                }
-
-                // merge structured playbooks
+                // merge structured playbooks, in case a command's own stdout emits them
+                // directly (e.g. a user-authored "::{...}::" line); ansible-playbook runs no
+                // longer go through this path (see the outputs file read below, issue #126)
                 List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
                 if (pbs != null && !pbs.isEmpty()) {
                     mergedPlaybooks.addAll(pbs);
                 }
 
-                // merge remaining vars (last-wins except lists above)
+                // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below
                 for (Map.Entry<String, Object> e : vars.entrySet()) {
                     String key = e.getKey();
                     if ("outputs".equals(key) || "playbooks".equals(key)) {
@@ -506,6 +508,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     mergedVars.put(key, e.getValue());
                 }
             }
+
+            // Read back the outputs/playbooks payload the kestra_logger callback wrote to a
+            // file instead of printing to stdout: a single, potentially multi-MB stdout line
+            // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
+            boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
+            readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand).ifPresent(payload -> {
+                if (payload.get("outputs") instanceof Map<?, ?> explicit) {
+                    explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                }
+
+                List<AnsibleOutput.PlaybookOutput> filePlaybooks = extractPlaybooks(payload);
+                if (!filePlaybooks.isEmpty()) {
+                    mergedPlaybooks.addAll(filePlaybooks);
+                }
+            });
 
             beforeDone = true;
             idx++;
@@ -545,8 +562,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             lastOutputFiles = patched;
         }
 
-        // ensure merged vars expose the expected root keys
-        mergedVars.put("outputs", rOutputsModeEnum == OutputsMode.EXPLICIT ? mergedExplicitOutputs : mergedRawOutputs);
+        // ensure merged vars expose the expected root keys; in ALL mode the flat list is
+        // rebuilt from the structured playbooks instead of being duplicated by the callback
+        Object mergedRawOrExplicitOutputs = rOutputsModeEnum == OutputsMode.EXPLICIT
+            ? mergedExplicitOutputs
+            : flattenHostResults(mergedPlaybooks);
+        mergedVars.put("outputs", mergedRawOrExplicitOutputs);
         mergedVars.put("playbooks", mergedPlaybooks);
 
         // minimal UI timeline support: emit dynamic worker results
@@ -715,6 +736,67 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         );
     }
 
+    /** Streams the non-null elements of a possibly null list. */
+    private static <T> Stream<T> nonNulls(List<T> list) {
+        return list == null ? Stream.empty() : list.stream().filter(Objects::nonNull);
+    }
+
+    /** Walks the structured payload down to every Ansible task, in playbook -&gt; play -&gt; task order. */
+    private static Stream<AnsibleOutput.TaskOutput> tasks(List<AnsibleOutput.PlaybookOutput> playbooks) {
+        return nonNulls(playbooks)
+            .flatMap(playbook -> nonNulls(playbook.getPlays()))
+            .flatMap(play -> nonNulls(play.getTasks()));
+    }
+
+    /**
+     * Rebuilds the flat, backward-compatible ALL-mode "outputs" list from the structured
+     * playbooks, in playbook -&gt; play -&gt; task -&gt; host order. The callback used to emit every
+     * per-host result twice (once flat, once structured); it now only emits the structured form,
+     * see kestra_logger.py's `_log_kestra_outputs` (issue #126).
+     */
+    static List<Object> flattenHostResults(List<AnsibleOutput.PlaybookOutput> playbooks) {
+        return tasks(playbooks)
+            .flatMap(task -> nonNulls(task.getHosts()))
+            .map(AnsibleOutput.HostResult::getResult)
+            .toList();
+    }
+
+    /**
+     * Reads back the outputs/playbooks payload the kestra_logger callback writes to a file
+     * (env var {@link #OUTPUTS_FILE_ENV}) instead of printing it to stdout. Degrades gracefully:
+     * a missing or unreadable file is not a hard failure, since it can legitimately happen when
+     * the command did not run ansible-playbook at all, the playbook crashed before completing, or
+     * a user-supplied `ansibleConfig` does not load the callback.
+     *
+     * @param warnIfMissing whether a missing file is worth a warning; suppressed for commands that
+     *                       do not look like an ansible-playbook invocation, to avoid spurious
+     *                       warnings on every auto-install/before-command in a multi-command task.
+     */
+    Optional<Map<String, Object>> readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing) {
+        if (!Files.isRegularFile(outputsFile)) {
+            if (warnIfMissing) {
+                runContext.logger().warn(
+                    "Ansible outputs file '{}' was not found after running an ansible-playbook command; its "
+                        + "outputs/playbooks will be empty. This is expected if the playbook crashed before "
+                        + "completing, or if a custom `ansibleConfig` does not enable the bundled callback "
+                        + "(it needs both `callback_plugins`/`callbacks_enabled = kestra_logger` and `library = ./library`).",
+                    outputsFile
+                );
+            }
+            return Optional.empty();
+        }
+
+        try (InputStream is = Files.newInputStream(outputsFile)) {
+            return Optional.ofNullable(JacksonMapper.ofJson().readValue(is, new TypeReference<Map<String, Object>>() {}));
+        } catch (IOException e) {
+            runContext.logger().warn(
+                "Unable to parse the Ansible outputs file '{}': {}. Its outputs/playbooks will be empty.",
+                outputsFile, e.getMessage()
+            );
+            return Optional.empty();
+        }
+    }
+
     /**
      * Create one dynamic TaskRun per Ansible task and emit that task's host-result lines as logs
      * tagged with the taskrun's id, so logs are attributed per Ansible task instead of all landing
@@ -809,7 +891,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * Build the host-result log lines for a task. In EXPLICIT outputs mode the host result payload is
      * already redacted by the callback.
      */
-    private List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
+    static List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
         if (task.getHosts() == null) {
             return List.of();
         }
@@ -833,7 +915,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return logs;
     }
 
-    private static String stringifyResult(Object result) {
+    static String stringifyResult(Object result) {
         if (result == null) {
             return "{}";
         }

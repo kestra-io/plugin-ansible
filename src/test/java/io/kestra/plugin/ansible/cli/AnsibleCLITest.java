@@ -1,5 +1,6 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.util.Collections;
 import java.util.List;
@@ -9,6 +10,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
+
+import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
@@ -203,6 +206,74 @@ class AnsibleCLITest {
         List<String> additionalMessages = (List<String>) outputs.get(5).get("msg");
         assertThat(additionalMessages.size(), is(2));
         assertThat(additionalMessages, containsInAnyOrder("Multiline message : line 3", "Multiline message : line 4"));
+    }
+
+    // issue #126: the outputs/playbooks payload must transit through a file, never a single
+    // stdout line (which stalls the task runner's line-oriented log pipeline for minutes on a
+    // large host set), and per-host results must not be duplicated in that file.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_writesOutputsToFile_notStdout_andDoesNotDuplicatePerHostResults() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        // the callback writes its payload to "kestra-outputs-0.json" in the working
+                        // dir (env var set by AnsibleCLI); copy it under another name so the test can
+                        // inspect exactly what was written without racing AnsibleCLI's own read of the
+                        // original (declaring the original itself as an output file would have the
+                        // task runner upload-and-remove it before AnsibleCLI reads it back)
+                        "ansible-playbook -i localhost -c local playbooks/playbook.yml && cp kestra-outputs-0.json kestra-outputs-0-copy.json"
+                    )
+                )
+            )
+            .outputFiles(Property.ofValue(List.of("kestra-outputs-0-copy.json")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        URI outputsFileUri = runOutput.getOutputFiles().get("kestra-outputs-0-copy.json");
+        assertThat(
+            "the kestra_logger callback must write its payload to a file instead of printing it to stdout (issue #126)",
+            outputsFileUri, is(notNullValue())
+        );
+
+        Map<String, Object> filePayload;
+        try (InputStream is = storage.get(TenantService.MAIN_TENANT, null, outputsFileUri)) {
+            filePayload = JacksonMapper.ofJson().readValue(is, new TypeReference<>() {});
+        }
+
+        // ALL mode: per-host results live only under "playbooks" in the file; no separate flat
+        // "outputs" key is written there, since that would duplicate every host result. Java
+        // rebuilds the flat list itself from the structured playbooks.
+        assertThat(filePayload.containsKey("outputs"), is(false));
+        assertThat(filePayload.get("playbooks"), is(instanceOf(List.class)));
+
+        // the Java-rebuilt flat "outputs" list still matches the 6 tasks x 1 host from the playbook
+        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        assertThat(outputs.size(), is(6));
     }
 
     @Test
