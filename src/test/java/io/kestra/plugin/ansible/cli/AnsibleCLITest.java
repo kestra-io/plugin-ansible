@@ -1,7 +1,9 @@
 package io.kestra.plugin.ansible.cli;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -15,6 +17,7 @@ import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.queues.QueueFactoryInterface;
 import io.kestra.core.queues.QueueInterface;
 import io.kestra.core.runners.RunContext;
@@ -26,6 +29,7 @@ import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
+import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
 import io.kestra.plugin.scripts.runner.docker.PullPolicy;
 
 import jakarta.inject.Inject;
@@ -623,6 +627,101 @@ class AnsibleCLITest {
             List.of(t2h0.get("msg"), t2h1.get("msg")),
             everyItem(is("Hello from task 2"))
         );
+    }
+
+    // issue #126: in ALL mode, the callback used to emit every per-host result twice on the
+    // single stdout line printed by _log_kestra_outputs() in kestra_logger.py — once as a flat
+    // "outputs" list (_add_results_to_kestra_outputs) and once nested under "playbooks"
+    // (_add_host_result). On large host sets that oversized single line could hang execution
+    // or push the final task outputs over the queue message size limit, with no error surfaced.
+    // This drives the real production callback through a real ansible-playbook run, bypassing
+    // AnsibleCLI's higher-level merge, to observe the raw payload it actually prints on stdout.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_allMode_doesNotDuplicatePerHostResults_issue126() throws Exception {
+        String marker = "issue126-" + IdUtils.create() + "-" + "m".repeat(2000);
+
+        String inventory = """
+            [all]
+            host1 ansible_connection=local
+            host2 ansible_connection=local
+            host3 ansible_connection=local
+            """;
+
+        String playbook = """
+            ---
+            - hosts: all
+              gather_facts: false
+              tasks:
+                - name: Emit marker
+                  ansible.builtin.debug:
+                    msg: "%s"
+            """.formatted(marker);
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
+            .withWarningOnStdErr(false)
+            .withDockerOptions(execute.getDocker())
+            .withTaskRunner(execute.getTaskRunner())
+            .withContainerImage(runContext.render(execute.getContainerImage()).as(String.class).orElseThrow())
+            .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
+            .withNamespaceFiles(null)
+            .withOutputFiles(List.of())
+            .withEnableOutputDirectory(true);
+
+        Path workingDir = baseWrapper.getWorkingDirectory();
+
+        // Reuse AnsibleCLI's own bundled ansible.cfg + callback + kestra module, so this drives
+        // the exact production callback rather than a hand-rolled copy of it.
+        Map<String, String> inputFiles = new HashMap<>(execute.finalInputFiles(runContext, workingDir));
+        inputFiles.put("inventory.ini", inventory);
+        inputFiles.put("playbook.yml", playbook);
+        PluginUtilsService.createInputFilesRaw(runContext, workingDir, inputFiles);
+
+        CommandsWrapper commandWrapper = baseWrapper
+            .withEnv(Map.of(AnsibleCLI.OUTPUTS_MODE_ENV, "all"))
+            .withCommands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")));
+
+        ScriptOutput out = commandWrapper.run();
+
+        assertThat(out.getExitCode(), is(0));
+
+        Map<String, Object> vars = out.getVars();
+        assertThat(vars, is(notNullValue()));
+
+        // The flat "outputs" list must no longer carry per-host results: they are only sent
+        // once, nested under "playbooks".
+        Object outputs = vars.get("outputs");
+        assertThat(outputs, is(instanceOf(List.class)));
+        assertThat((List<?>) outputs, is(empty()));
+
+        // The marker must appear exactly once per host in the raw payload printed by the
+        // callback, not twice.
+        String json = JacksonMapper.ofJson().writeValueAsString(vars);
+        assertThat(countOccurrences(json, marker), is(3L));
+    }
+
+    private static long countOccurrences(String haystack, String needle) {
+        long count = 0;
+        int index = 0;
+        while ((index = haystack.indexOf(needle, index)) != -1) {
+            count++;
+            index += needle.length();
+        }
+        return count;
     }
 
     @Test

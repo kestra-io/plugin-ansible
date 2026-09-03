@@ -47,9 +47,6 @@ class CallbackModule(CallbackBase):
     KESTRA_OUTPUT_ACTIONS = frozenset({'kestra', 'ansible.legacy.kestra'})
 
     def __init__(self):
-        # Raw Kestra output list (backward compatible)
-        self._kestra_outputs = []
-
         # --- explicit outputs (kestra module) ---
         # Mode is set by the AnsibleCLI task via env var:
         #   all      -> current behavior: every per-host result is emitted (default)
@@ -104,21 +101,26 @@ class CallbackModule(CallbackBase):
         Final payload printed to stdout for Kestra parsing.
         We must put structured outputs under "outputs"
         because Kestra only reads that key.
+
+        In ALL mode, per-host results already live under "playbooks"
+        (see _add_host_result). Sending them a second time here as a flat
+        list used to double the size of this single stdout line and the
+        final task outputs, which could hang or fail large runs (issue
+        kestra-io/plugin-ansible#126). The AnsibleCLI task rebuilds that flat
+        list itself from "playbooks" for backward compatibility, so it is
+        left empty here rather than duplicated.
         """
         if self._outputs_mode == "explicit":
-            payload = {
-                "outputs": {
-                    "outputs": self._kestra_explicit,
-                    "playbooks": self._kestra_playbooks
-                }
-            }
+            outputs = self._kestra_explicit
         else:
-            payload = {
-                "outputs": {
-                    "outputs": self._kestra_outputs,
-                    "playbooks": self._kestra_playbooks
-                }
+            outputs = []
+
+        payload = {
+            "outputs": {
+                "outputs": outputs,
+                "playbooks": self._kestra_playbooks
             }
+        }
         print("::" + json.dumps(payload, default=str) + "::")
 
     def _is_kestra_output_task(self, result):
@@ -143,9 +145,6 @@ class CallbackModule(CallbackBase):
         declared = result._result.get("outputs")
         if isinstance(declared, dict):
             self._kestra_explicit.update(declared)
-
-    def _add_results_to_kestra_outputs(self, result):
-        self._kestra_outputs.append(dict(result._result))
 
     def _write_log_line(self, line: str):
         """
@@ -278,16 +277,13 @@ class CallbackModule(CallbackBase):
 
     def _add_host_result(self, result, status):
         """
-        Add per-host result under current task (structured),
-        and also append to raw outputs (compat).
+        Add per-host result under current task (structured). The flat "outputs"
+        list is derived by AnsibleCLI from this structure, not duplicated here.
         In explicit mode, result payloads are redacted: only declared
         kestra outputs are collected, statuses are preserved.
         """
         if self._is_kestra_output_task(result) and status == "ok":
             self._collect_explicit_outputs(result)
-
-        if self._outputs_mode != "explicit":
-            self._add_results_to_kestra_outputs(result)
 
         if self._current_task is None:
             self._start_task(result._task)

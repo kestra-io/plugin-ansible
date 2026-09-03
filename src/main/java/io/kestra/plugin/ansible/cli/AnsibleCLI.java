@@ -477,17 +477,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             Map<String, Object> vars = out.getVars();
             if (vars != null) {
-                // merge raw outputs (backward compatible); in EXPLICIT mode the
-                // callback emits a map of declared outputs instead of a list
+                // In EXPLICIT mode the callback emits a map of declared outputs. In ALL mode
+                // the callback no longer resends every per-host result under "outputs": it
+                // already carries them once under "playbooks" (see issue #126, where sending
+                // them twice on the same stdout line could hang or fail large runs). The flat
+                // list is instead rebuilt below from "playbooks" to keep it backward compatible.
                 Object maybeOutputs = vars.get("outputs");
-                if (maybeOutputs instanceof List<?> list) {
-                    for (Object o : list) {
-                        if (o instanceof Map<?, ?> m) {
-                            // noinspection unchecked
-                            mergedRawOutputs.add((Map<String, Object>) m);
-                        }
-                    }
-                } else if (maybeOutputs instanceof Map<?, ?> m) {
+                if (maybeOutputs instanceof Map<?, ?> m) {
                     m.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
                 }
 
@@ -495,6 +491,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
                 if (pbs != null && !pbs.isEmpty()) {
                     mergedPlaybooks.addAll(pbs);
+                    if (rOutputsModeEnum == OutputsMode.ALL) {
+                        mergedRawOutputs.addAll(flattenHostResults(pbs));
+                    }
                 }
 
                 // merge remaining vars (last-wins except lists above)
@@ -713,6 +712,37 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             JacksonMapper.ofJson().getTypeFactory()
                 .constructCollectionType(List.class, AnsibleOutput.PlaybookOutput.class)
         );
+    }
+
+    /**
+     * Rebuilds the flat, backward-compatible "outputs" list (one entry per per-host result, in
+     * execution order) from the structured playbooks, instead of the callback sending it a second
+     * time on the wire (issue #126).
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> flattenHostResults(List<AnsibleOutput.PlaybookOutput> playbooks) {
+        List<Map<String, Object>> flattened = new ArrayList<>();
+        for (AnsibleOutput.PlaybookOutput pb : playbooks) {
+            if (pb == null || pb.getPlays() == null) {
+                continue;
+            }
+            for (AnsibleOutput.PlayOutput play : pb.getPlays()) {
+                if (play == null || play.getTasks() == null) {
+                    continue;
+                }
+                for (AnsibleOutput.TaskOutput task : play.getTasks()) {
+                    if (task == null || task.getHosts() == null) {
+                        continue;
+                    }
+                    for (AnsibleOutput.HostResult hr : task.getHosts()) {
+                        if (hr != null && hr.getResult() instanceof Map<?, ?> result) {
+                            flattened.add((Map<String, Object>) result);
+                        }
+                    }
+                }
+            }
+        }
+        return flattened;
     }
 
     /**
