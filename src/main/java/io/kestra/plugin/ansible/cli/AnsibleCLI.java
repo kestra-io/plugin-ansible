@@ -329,6 +329,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             Redaction only covers what the bundled callback emits. A custom `ansibleConfig` that drops `stdout_callback = ansible.builtin.null` re-enables Ansible's default stdout, which can print raw results (notably on task failures, `debug` output, or verbose runs) that Kestra then captures into logs. Keep that line to preserve redaction.
             Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
             In ALL mode, captured per-host results are capped at 10 MB of raw data; playbooks over a large host set or with large per-host payloads (facts, big `stdout`/`stderr`) can exceed this and fail the task with an explicit error rather than hanging or silently exceeding the queue message size limit. Switch to `EXPLICIT` and declare only the values you need if you hit this limit.
+            Per-task logs mirror this: `ok`/`skipped` hosts get a one-line summary (host, status, whether it changed, task name), while `failed`/`unreachable` hosts keep the full result so failures stay easy to debug. Any single log line is capped and marked if truncated. The complete per-host result is always available in this task's `outputs`/`playbooks`, regardless of mode or what gets logged.
             """
     )
     @Builder.Default
@@ -889,11 +890,24 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
     }
 
+    // Kept comfortably under RunContextLogger's ~15 KB chunking threshold (with margin for
+    // multi-byte UTF-8 and the truncation marker itself), so one pathological host result
+    // becomes at most one log entry instead of fanning out into many chunks (issue #126).
+    static final int MAX_LOG_LINE_LENGTH = 2_000;
+
     /**
-     * Build the host-result log lines for a task. In EXPLICIT outputs mode the host result payload is
-     * already redacted by the callback.
+     * Build the host-result log lines for a task. Mirrors Ansible's own default verbosity
+     * convention (see the {@code _run_is_verbose()} guard used throughout kestra_logger.py):
+     * a concise one-line summary per host by default, full detail only where it is actually
+     * needed to debug a failure. Previously the full per-host payload (facts, stdout/stderr) was
+     * logged unconditionally at INFO level for every host of every task in ALL mode, which alone
+     * could carry as much data as the whole outputs payload and fan out into many chunked log
+     * entries (issue #126). The complete per-host result always remains available in this task's
+     * `outputs`/`playbooks` for Pebble and the API, regardless of what gets logged here.
      */
-    private List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
+    // Package-private (rather than private) so log summarization/truncation can be unit tested
+    // directly without needing a real Ansible run.
+    List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task) {
         if (task.getHosts() == null) {
             return List.of();
         }
@@ -906,15 +920,37 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             String status = hr.getStatus();
             boolean failed = "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
-            logs.add(
-                new DynamicTaskRunLog(
-                    failed ? Level.ERROR : Level.INFO,
-                    "[" + hr.getHost() + "] " + status + " => " + stringifyResult(hr.getResult())
-                )
-            );
+
+            String message = "[" + hr.getHost() + "] " + status + " " + (failed
+                ? "=> " + stringifyResult(hr.getResult())
+                : summarizeResult(task, hr.getResult()));
+
+            logs.add(new DynamicTaskRunLog(failed ? Level.ERROR : Level.INFO, capLogLine(message)));
         }
 
         return logs;
+    }
+
+    /**
+     * Concise, non-failure summary: whether the host changed and, cheaply, which task produced
+     * it. A task's name already falls back to its module/action when the playbook does not name
+     * it explicitly (see kestra_logger.py's {@code _start_task}), so it doubles as a lightweight
+     * action indicator without needing extra data from the callback.
+     */
+    private static String summarizeResult(AnsibleOutput.TaskOutput task, Object result) {
+        boolean changed = result instanceof Map<?, ?> m && Boolean.TRUE.equals(m.get("changed"));
+        String taskName = task.getName() != null ? task.getName() : "unnamed_task";
+        return "(task=" + taskName + ", changed=" + changed + ")";
+    }
+
+    private static String capLogLine(String message) {
+        if (message.length() <= MAX_LOG_LINE_LENGTH) {
+            return message;
+        }
+
+        int omitted = message.length() - MAX_LOG_LINE_LENGTH;
+        return message.substring(0, MAX_LOG_LINE_LENGTH)
+            + "... [truncated " + omitted + " more character(s); see this task's `outputs`/`playbooks` for the full result]";
     }
 
     private static String stringifyResult(Object result) {

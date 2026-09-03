@@ -11,6 +11,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.event.Level;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
@@ -20,6 +21,7 @@ import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.queues.QueueFactoryInterface;
 import io.kestra.core.queues.QueueInterface;
+import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
@@ -525,6 +527,84 @@ class AnsibleCLITest {
         assertThat(dynamicLogs.stream().allMatch(l -> l.getAttemptNumber() != null && l.getAttemptNumber() == 0), is(true));
     }
 
+    // issue #126 (follow-up): taskLogs() used to inline the full per-host result (facts, full
+    // stdout/stderr) into an INFO log line unconditionally, for every host of every task in ALL
+    // mode - as much log volume as the whole outputs payload. Mirror Ansible's own default
+    // verbosity: concise by default, full detail kept only for failures.
+    @Test
+    void taskLogs_summarizesOkAndSkippedHosts_withoutFullPayload() {
+        AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
+
+        String irrelevantDetail = "a lot of facts/stdout that should not be logged by default";
+        AnsibleCLI.AnsibleOutput.HostResult ok = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("ok").result(Map.of("changed", true, "stdout", irrelevantDetail)).build();
+        AnsibleCLI.AnsibleOutput.HostResult skipped = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host2").status("skipped").result(Map.of("changed", false, "skip_reason", irrelevantDetail)).build();
+
+        AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("play|Install nginx").name("Install nginx").hosts(List.of(ok, skipped)).build();
+
+        List<DynamicTaskRunLog> logs = execute.taskLogs(task);
+
+        assertThat(logs.size(), is(2));
+
+        assertThat(logs.get(0).level(), is(Level.INFO));
+        assertThat(logs.get(0).message(), containsString("[host1] ok"));
+        assertThat(logs.get(0).message(), containsString("changed=true"));
+        assertThat(logs.get(0).message(), containsString("Install nginx"));
+        assertThat(logs.get(0).message(), not(containsString(irrelevantDetail)));
+
+        assertThat(logs.get(1).level(), is(Level.INFO));
+        assertThat(logs.get(1).message(), containsString("[host2] skipped"));
+        assertThat(logs.get(1).message(), containsString("changed=false"));
+        assertThat(logs.get(1).message(), not(containsString(irrelevantDetail)));
+    }
+
+    @Test
+    void taskLogs_keepsFullDetailForFailedAndUnreachableHosts() {
+        AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
+
+        AnsibleCLI.AnsibleOutput.HostResult failed = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("failed")
+            .result(Map.of("changed", false, "msg", "Destination directory does not exist", "rc", 2))
+            .build();
+        AnsibleCLI.AnsibleOutput.HostResult unreachable = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host2").status("unreachable")
+            .result(Map.of("msg", "Failed to connect to the host via ssh"))
+            .build();
+
+        AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("play|Copy file").name("Copy file").hosts(List.of(failed, unreachable)).build();
+
+        List<DynamicTaskRunLog> logs = execute.taskLogs(task);
+
+        assertThat(logs.get(0).level(), is(Level.ERROR));
+        assertThat(logs.get(0).message(), containsString("Destination directory does not exist"));
+
+        assertThat(logs.get(1).level(), is(Level.ERROR));
+        assertThat(logs.get(1).message(), containsString("Failed to connect to the host via ssh"));
+    }
+
+    @Test
+    void taskLogs_capsLineLength_withTruncationMarker() {
+        AnsibleCLI execute = AnsibleCLI.builder().id(IdUtils.create()).type(AnsibleCLI.class.getName()).build();
+
+        String hugeMessage = "e".repeat(AnsibleCLI.MAX_LOG_LINE_LENGTH * 5);
+        AnsibleCLI.AnsibleOutput.HostResult failed = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("failed").result(Map.of("msg", hugeMessage)).build();
+
+        AnsibleCLI.AnsibleOutput.TaskOutput task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("play|Big failure").name("Big failure").hosts(List.of(failed)).build();
+
+        String message = execute.taskLogs(task).getFirst().message();
+
+        assertThat(message.length(), lessThan(AnsibleCLI.MAX_LOG_LINE_LENGTH + 200));
+        assertThat(message, containsString("truncated"));
+        // nothing is actually lost: point users at where the full result still lives
+        assertThat(message, containsString("outputs"));
+        assertThat(message, containsString("playbooks"));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void run_withStructuredOutputs_multipleHosts() throws Exception {
@@ -855,6 +935,54 @@ class AnsibleCLITest {
         List<AnsibleCLI.AnsibleOutput.PlaybookOutput> playbooks = List.of();
 
         assertDoesNotThrow(() -> AnsibleCLI.enforceAllModeOutputsBound(rawOutputs, playbooks));
+    }
+
+    // issue #126: the size bound must trip before any per-task dynamic taskrun/log is emitted -
+    // emitDynamicTaskRuns() (and the per-host log lines it builds via taskLogs()) is itself a
+    // source of log volume, so if it ran before the bound check, the bound would not actually
+    // protect against a hang caused by log fan-out. enforceAllModeOutputsBound() runs inside the
+    // per-command merge loop, strictly before emitDynamicTaskRuns() which only runs after that
+    // loop completes, so an over-limit run must fail with zero dynamic worker results emitted.
+    @Test
+    void run_allMode_exceedsSizeBound_failsBeforeEmittingDynamicLogs_issue126() throws Exception {
+        // ~6 MB; ends up counted twice by enforceAllModeOutputsBound (once via the flat outputs
+        // list, once via the structured playbooks), comfortably crossing the 10 MB bound.
+        String bigValue = "x".repeat(6 * 1024 * 1024);
+
+        String inventory = """
+            [all]
+            host1 ansible_connection=local
+            """;
+
+        String playbook = """
+            ---
+            - hosts: all
+              gather_facts: false
+              tasks:
+                - name: Emit big value
+                  ansible.builtin.debug:
+                    msg: "%s"
+            """.formatted(bigValue);
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(Map.of("inventory.ini", inventory, "playbook.yml", playbook))
+            .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () -> execute.run(runContext));
+        assertThat(exception.getMessage(), containsString("outputsMode: EXPLICIT"));
+
+        assertThat(runContext.dynamicWorkerResults(), is(empty()));
     }
 
     @Test
