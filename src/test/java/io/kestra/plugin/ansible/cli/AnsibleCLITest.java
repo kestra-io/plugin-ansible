@@ -38,6 +38,8 @@ import reactor.core.publisher.Flux;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @KestraTest
 class AnsibleCLITest {
@@ -722,6 +724,137 @@ class AnsibleCLITest {
             index += needle.length();
         }
         return count;
+    }
+
+    // issue #126 (follow-up): the previous test only proves the callback no longer duplicates
+    // per-host results on stdout. This exercises AnsibleCLI's own flattenHostResults() through
+    // the full execute.run() path, proving the flat "outputs" list is correctly rebuilt from the
+    // structured "playbooks" instead of silently staying empty.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_allMode_rebuildsFlatOutputsFromStructuredPlaybooks_issue126() throws Exception {
+        String marker = "issue126-full-" + IdUtils.create();
+
+        String inventory = """
+            [all]
+            host1 ansible_connection=local
+            host2 ansible_connection=local
+            host3 ansible_connection=local
+            """;
+
+        String playbook = """
+            ---
+            - hosts: all
+              gather_facts: false
+              tasks:
+                - name: Emit marker
+                  ansible.builtin.debug:
+                    msg: "%s"
+            """.formatted(marker);
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "inventory.ini", inventory,
+                    "playbook.yml", playbook
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        // One entry per host, in execution order, rebuilt from "playbooks" rather than received a
+        // second time from the callback.
+        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        assertThat(outputs, is(notNullValue()));
+        assertThat(outputs.size(), is(3));
+        assertThat(outputs.stream().map(m -> m.get("msg")).toList(), everyItem(is(marker)));
+    }
+
+    // issue #126 (follow-up): flattenHostResults() is what rebuilds the flat "outputs" list;
+    // verify it preserves execution order across multiple playbooks/plays/tasks/hosts without
+    // needing a real Ansible run.
+    @Test
+    void flattenHostResults_preservesOrder_acrossPlaybooksPlaysTasksHosts() {
+        AnsibleCLI.AnsibleOutput.HostResult pb1Task1Host1 = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("ok").result(Map.of("marker", "pb1-task1-host1")).build();
+        AnsibleCLI.AnsibleOutput.HostResult pb1Task1Host2 = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host2").status("ok").result(Map.of("marker", "pb1-task1-host2")).build();
+        AnsibleCLI.AnsibleOutput.TaskOutput pb1Task1 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("pb1-task1").hosts(List.of(pb1Task1Host1, pb1Task1Host2)).build();
+
+        AnsibleCLI.AnsibleOutput.HostResult pb1Task2Host1 = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("ok").result(Map.of("marker", "pb1-task2-host1")).build();
+        AnsibleCLI.AnsibleOutput.TaskOutput pb1Task2 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("pb1-task2").hosts(List.of(pb1Task2Host1)).build();
+
+        AnsibleCLI.AnsibleOutput.PlayOutput pb1Play = AnsibleCLI.AnsibleOutput.PlayOutput.builder()
+            .name("Play 1").tasks(List.of(pb1Task1, pb1Task2)).build();
+        AnsibleCLI.AnsibleOutput.PlaybookOutput pb1 = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder()
+            .plays(List.of(pb1Play)).build();
+
+        AnsibleCLI.AnsibleOutput.HostResult pb2Task1Host1 = AnsibleCLI.AnsibleOutput.HostResult.builder()
+            .host("host1").status("ok").result(Map.of("marker", "pb2-task1-host1")).build();
+        AnsibleCLI.AnsibleOutput.TaskOutput pb2Task1 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .uid("pb2-task1").hosts(List.of(pb2Task1Host1)).build();
+        AnsibleCLI.AnsibleOutput.PlayOutput pb2Play = AnsibleCLI.AnsibleOutput.PlayOutput.builder()
+            .name("Play 1").tasks(List.of(pb2Task1)).build();
+        AnsibleCLI.AnsibleOutput.PlaybookOutput pb2 = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder()
+            .plays(List.of(pb2Play)).build();
+
+        // a playbook/play/task with no hosts must not raise
+        AnsibleCLI.AnsibleOutput.PlaybookOutput empty = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder()
+            .plays(List.of(AnsibleCLI.AnsibleOutput.PlayOutput.builder().name("Empty").tasks(List.of()).build()))
+            .build();
+
+        List<Map<String, Object>> flattened = AnsibleCLI.flattenHostResults(List.of(pb1, empty, pb2));
+
+        assertThat(
+            flattened.stream().map(m -> m.get("marker")).toList(),
+            contains("pb1-task1-host1", "pb1-task1-host2", "pb1-task2-host1", "pb2-task1-host1")
+        );
+        // rebuilt entries are the same Map instances, not re-copied
+        assertThat(flattened.getFirst(), sameInstance(pb1Task1Host1.getResult()));
+    }
+
+    // issue #126: without a bound, ALL mode's raw per-host results (duplicated ~3x in the final
+    // task outputs between the flat list, vars.playbooks, and the top-level playbooks field) can
+    // grow without limit. Verify the guard triggers with an actionable message, and stays silent
+    // under the limit, without needing a multi-megabyte real Ansible run.
+    @Test
+    void enforceAllModeOutputsBound_throwsActionableError_whenOverLimit() {
+        String bigValue = "x".repeat(AnsibleCLI.MAX_ALL_MODE_OUTPUTS_BYTES + 1024);
+        List<Map<String, Object>> rawOutputs = List.of(Map.of("stdout", bigValue));
+        List<AnsibleCLI.AnsibleOutput.PlaybookOutput> playbooks = List.of();
+
+        IllegalStateException exception = assertThrows(
+            IllegalStateException.class,
+            () -> AnsibleCLI.enforceAllModeOutputsBound(rawOutputs, playbooks)
+        );
+
+        assertThat(exception.getMessage(), containsString("outputsMode: EXPLICIT"));
+        assertThat(exception.getMessage(), containsString("safety limit"));
+    }
+
+    @Test
+    void enforceAllModeOutputsBound_doesNotThrow_whenUnderLimit() {
+        List<Map<String, Object>> rawOutputs = List.of(Map.of("changed", false, "msg", "ok"));
+        List<AnsibleCLI.AnsibleOutput.PlaybookOutput> playbooks = List.of();
+
+        assertDoesNotThrow(() -> AnsibleCLI.enforceAllModeOutputsBound(rawOutputs, playbooks));
     }
 
     @Test

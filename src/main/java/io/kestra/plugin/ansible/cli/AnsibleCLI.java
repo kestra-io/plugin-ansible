@@ -19,6 +19,8 @@ import java.util.regex.Pattern;
 
 import org.slf4j.event.Level;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
@@ -232,6 +234,16 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
 
+    // In ALL mode, per-host results still end up duplicated in the final task outputs: once in
+    // the flat "outputs" list, once in "vars.playbooks", and once more in the top-level
+    // "playbooks" output field (kept for backward compatibility and Pebble/API access to
+    // structured data). This bounds the raw captured data (before that ~3x amplification) well
+    // under common queue message-size limits (issue #126: a customer with
+    // kestra.queue.message-protection.limit raised to 50 MB still hit an execution stuck
+    // RUNNING forever with no error, consistent with the final WorkerTaskResult silently never
+    // being enqueued once it exceeds that limit) instead of letting it grow unbounded.
+    static final int MAX_ALL_MODE_OUTPUTS_BYTES = 10 * 1024 * 1024;
+
     // Ensure Ansible can find our bundled callback/library dirs regardless of where the playbook
     // lives or what the image configures (issue #120). Prepend them onto the search path using the
     // runtime working dir ($PWD, the current directory on every runner), keeping any existing value
@@ -316,6 +328,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             EXPLICIT captures only values declared in the playbook via the bundled `kestra` module; per-host result payloads are redacted to `{"changed": <bool>}` in outputs and live logs, while task names, timings, and statuses (ok/failed/skipped/unreachable) are preserved. The `outputs` value is a map of the declared key/value pairs, not a list, so switching a task between modes changes the shape of `outputs` for downstream references.
             Redaction only covers what the bundled callback emits. A custom `ansibleConfig` that drops `stdout_callback = ansible.builtin.null` re-enables Ansible's default stdout, which can print raw results (notably on task failures, `debug` output, or verbose runs) that Kestra then captures into logs. Keep that line to preserve redaction.
             Users who supply their own `ansibleConfig` must include `library = ./library` for the bundled module to resolve.
+            In ALL mode, captured per-host results are capped at 10 MB of raw data; playbooks over a large host set or with large per-host payloads (facts, big `stdout`/`stderr`) can exceed this and fail the task with an explicit error rather than hanging or silently exceeding the queue message size limit. Switch to `EXPLICIT` and declare only the values you need if you hit this limit.
             """
     )
     @Builder.Default
@@ -485,6 +498,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 Object maybeOutputs = vars.get("outputs");
                 if (maybeOutputs instanceof Map<?, ?> m) {
                     m.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                } else if (maybeOutputs instanceof List<?> list && !list.isEmpty()) {
+                    // Should not happen with the bundled callback (it always sends an empty list
+                    // in ALL mode); warn instead of silently dropping in case of a mismatched or
+                    // custom callback plugin.
+                    runContext.logger().warn(
+                        "Ignoring {} unexpected per-host result(s) found directly under the Ansible callback's \"outputs\" key; " +
+                            "they are rebuilt from \"playbooks\" instead. This may indicate a mismatched or custom callback plugin.",
+                        list.size()
+                    );
                 }
 
                 // merge structured playbooks
@@ -493,6 +515,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     mergedPlaybooks.addAll(pbs);
                     if (rOutputsModeEnum == OutputsMode.ALL) {
                         mergedRawOutputs.addAll(flattenHostResults(pbs));
+                        enforceAllModeOutputsBound(mergedRawOutputs, mergedPlaybooks);
                     }
                 }
 
@@ -718,9 +741,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * Rebuilds the flat, backward-compatible "outputs" list (one entry per per-host result, in
      * execution order) from the structured playbooks, instead of the callback sending it a second
      * time on the wire (issue #126).
+     *
+     * <p>Package-private (rather than private) so it can be unit tested directly for ordering
+     * across multiple playbooks/plays/tasks/hosts without needing a real Ansible run.
      */
     @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> flattenHostResults(List<AnsibleOutput.PlaybookOutput> playbooks) {
+    static List<Map<String, Object>> flattenHostResults(List<AnsibleOutput.PlaybookOutput> playbooks) {
         List<Map<String, Object>> flattened = new ArrayList<>();
         for (AnsibleOutput.PlaybookOutput pb : playbooks) {
             if (pb == null || pb.getPlays() == null) {
@@ -743,6 +769,34 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             }
         }
         return flattened;
+    }
+
+    /**
+     * Fails fast, with a message pointing at {@code outputsMode: EXPLICIT}, once the raw per-host
+     * data captured in ALL mode crosses {@link #MAX_ALL_MODE_OUTPUTS_BYTES}. Without this bound,
+     * an oversized final task output can silently never be enqueued once it exceeds the queue's
+     * message size limit, leaving the execution stuck RUNNING with no error (issue #126).
+     *
+     * <p>Package-private so it can be unit tested directly without needing a real Ansible run
+     * large enough to cross the threshold.
+     */
+    static void enforceAllModeOutputsBound(
+        List<Map<String, Object>> rawOutputs,
+        List<AnsibleOutput.PlaybookOutput> playbooks
+    ) throws JsonProcessingException {
+        long size = JacksonMapper.ofJson().writeValueAsBytes(rawOutputs).length
+            + JacksonMapper.ofJson().writeValueAsBytes(playbooks).length;
+
+        if (size > MAX_ALL_MODE_OUTPUTS_BYTES) {
+            throw new IllegalStateException(
+                "Ansible outputsMode: ALL captured %,d bytes of per-host results across %d host result(s), over the %,d byte safety limit. ".formatted(
+                    size, rawOutputs.size(), MAX_ALL_MODE_OUTPUTS_BYTES
+                ) +
+                    "Capturing that much data on a large host set or with large per-host payloads (facts, big stdout/stderr) can hang the execution " +
+                    "or exceed the queue message size limit. Switch this task to outputsMode: EXPLICIT and declare only the values you need via the " +
+                    "bundled `kestra` module, or split the work across multiple tasks targeting fewer hosts."
+            );
+        }
     }
 
     /**
