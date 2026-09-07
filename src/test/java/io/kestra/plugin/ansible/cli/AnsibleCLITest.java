@@ -1438,10 +1438,10 @@ class AnsibleCLITest {
         assertThat(errors, is(empty()));
     }
 
-    // Without liveLogs the bundled callback stays muted and nothing is logged until the command
+    // Without streamLogs the bundled callback stays muted and nothing is logged until the command
     // returns, so a long playbook looks stalled.
     @Test
-    void run_withLiveLogs_streamsPlayAndTaskOutput() throws Exception {
+    void run_withStreamLogs_streamsPlayAndTaskOutput() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
@@ -1451,7 +1451,7 @@ class AnsibleCLITest {
                     .entryPoint(Collections.emptyList())
                     .build()
             )
-            .liveLogs(Property.ofValue(true))
+            .streamLogs(Property.ofValue(true))
             .inputFiles(
                 Map.of(
                     "playbooks/playbook.yml", storage.put(
@@ -1491,10 +1491,10 @@ class AnsibleCLITest {
         assertThat(outputs, is(not(empty())));
     }
 
-    // liveLogs re-enables the callback's own rendering, which dumps a failed host's result. In
+    // streamLogs re-enables the callback's own rendering, which dumps a failed host's result. In
     // EXPLICIT mode that payload must stay redacted in the streamed output too.
     @Test
-    void run_withLiveLogsAndExplicitOutputs_doesNotStreamHostPayloads() throws Exception {
+    void run_withStreamLogsAndExplicitOutputs_doesNotStreamHostPayloads() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
@@ -1504,19 +1504,19 @@ class AnsibleCLITest {
                     .entryPoint(Collections.emptyList())
                     .build()
             )
-            .liveLogs(Property.ofValue(true))
+            .streamLogs(Property.ofValue(true))
             .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
             .inputFiles(
                 Map.of(
-                    "playbooks/playbook-live-logs-failure.yml", storage.put(
+                    "playbooks/playbook-stream-logs-failure.yml", storage.put(
                         TenantService.MAIN_TENANT,
                         null,
                         URI.create("/" + IdUtils.create() + ".ion"),
-                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-live-logs-failure.yml")
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-stream-logs-failure.yml")
                     ).toString()
                 )
             )
-            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-live-logs-failure.yml")))
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-stream-logs-failure.yml")))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -1540,7 +1540,7 @@ class AnsibleCLITest {
 
         // the failed task's stdout never reaches the logs
         assertThat(
-            snapshot.stream().filter(l -> l.getMessage() != null && l.getMessage().contains("CANARY_LIVE_LOGS_9931")).toList(),
+            snapshot.stream().filter(l -> l.getMessage() != null && l.getMessage().contains("CANARY_STREAM_LOGS_9931")).toList(),
             is(empty())
         );
     }
@@ -1604,7 +1604,7 @@ class AnsibleCLITest {
             .orElseThrow(() -> new AssertionError("no log with message: " + message));
     }
 
-    // liveLogs makes CallbackBase._handle_exception reachable for the first time. It renders
+    // streamLogs makes CallbackBase._handle_exception reachable for the first time. It renders
     // result['exception'] outside _dump_results: on core 2.15 that is the exception's own message
     // at default verbosity ("The error was: ...") and the full traceback at -vvv, so EXPLICIT mode
     // has to intercept it separately. The override does not look at verbosity, so it covers both.
@@ -1612,7 +1612,7 @@ class AnsibleCLITest {
     // 2.21, which prints nothing from that path and so cannot be caught leaking. Demonstrating the
     // leak itself would need an image pinned to an older core.
     @Test
-    void run_withLiveLogsAndExplicitOutputs_redactsTheExceptionRendering() throws Exception {
+    void run_withStreamLogsAndExplicitOutputs_redactsTheExceptionRendering() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
@@ -1622,15 +1622,15 @@ class AnsibleCLITest {
                     .entryPoint(Collections.emptyList())
                     .build()
             )
-            .liveLogs(Property.ofValue(true))
+            .streamLogs(Property.ofValue(true))
             .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
             .inputFiles(
                 Map.of(
-                    "playbooks/playbook-live-logs-exception.yml", storage.put(
+                    "playbooks/playbook-stream-logs-exception.yml", storage.put(
                         TenantService.MAIN_TENANT,
                         null,
                         URI.create("/" + IdUtils.create() + ".ion"),
-                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-live-logs-exception.yml")
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-stream-logs-exception.yml")
                     ).toString(),
                     "library/boom.py", storage.put(
                         TenantService.MAIN_TENANT,
@@ -1640,7 +1640,7 @@ class AnsibleCLITest {
                     ).toString()
                 )
             )
-            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-live-logs-exception.yml")))
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-stream-logs-exception.yml")))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());

@@ -82,10 +82,10 @@ class CallbackModule(CallbackBase):
         super(CallbackModule, self).__init__()
 
         # Aggregate collector: muted by default so it does not duplicate the stdout callback.
-        # The AnsibleCLI task's `liveLogs` turns the inherited per-play/per-task display back on,
+        # The AnsibleCLI task's `streamLogs` turns the inherited per-play/per-task display back on,
         # so a long run streams progress instead of staying silent until the command returns
         # (issue #123). Redaction is preserved in explicit mode, see _dump_results.
-        self._silent = os.environ.get("KESTRA_LIVE_LOGS", "").strip().lower() not in ("1", "true", "yes")
+        self._silent = os.environ.get("KESTRA_STREAM_LOGS", "").strip().lower() not in ("1", "true", "yes")
 
         # Best-effort discovery of log_path (from ansible.cfg)
         self._log_file_path = getattr(C, "LOG_PATH", None) or getattr(C, "DEFAULT_LOG_PATH", None)
@@ -177,7 +177,7 @@ class CallbackModule(CallbackBase):
         Display rendering only. The outputs payload is built in _add_host_result.
         Explicit mode must not print per-host payloads, and v2_runner_on_failed and
         v2_runner_on_unreachable dump results unconditionally, so redact here the same way
-        _add_host_result does. Only reachable with liveLogs enabled.
+        _add_host_result does. Only reachable with streamLogs enabled.
         """
         if self._outputs_mode == "explicit" and hasattr(result, "get"):
             redacted = {"changed": bool(result.get("changed", False))}
@@ -193,7 +193,7 @@ class CallbackModule(CallbackBase):
         CallbackBase renders result['exception'], a raw Python traceback, straight to the display
         and not through _dump_results, so explicit mode has to intercept it here too. Called from
         v2_runner_on_failed and v2_runner_item_on_failed, both of which are only reachable with
-        liveLogs enabled.
+        streamLogs enabled.
         """
         if self._outputs_mode == "explicit" and hasattr(result, "get") and result.get("exception"):
             result.pop("exception", None)

@@ -5,7 +5,7 @@
   gather_facts: false
   tasks:
     - name: Emit a canary and fail
-      ansible.builtin.shell: echo CANARY_LIVE_LOGS_9931; exit 3
+      ansible.builtin.shell: echo CANARY_STREAM_LOGS_9931; exit 3
       ignore_errors: true
 
     - name: Declare explicit outputs

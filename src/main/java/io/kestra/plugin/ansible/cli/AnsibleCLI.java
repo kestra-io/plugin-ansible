@@ -237,7 +237,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
-    public static final String LIVE_LOGS_ENV = "KESTRA_LIVE_LOGS";
+    public static final String STREAM_LOGS_ENV = "KESTRA_STREAM_LOGS";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -370,7 +370,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected Property<LogsMode> logsMode = Property.ofValue(LogsMode.SUMMARY);
 
     @Schema(
-        title = "Stream Ansible output while the playbook runs",
+        title = "Enable log streaming during playbook execution",
         description = """
             If true, the bundled callback prints Ansible's own per-play and per-task output as it happens (`PLAY [...]`, `TASK [...]`, `ok:`/`changed:` per host), so a long run shows progress instead of staying silent until the command returns. Default is false.
             The end-of-run per-host logs are unchanged (see `logsMode`), so a task that prints content is rendered twice and log volume grows with the number of tasks in the playbook. Drop any `ANSIBLE_STDOUT_CALLBACK` override from `env` when enabling this, or Ansible's own stdout callback renders every line a third time.
@@ -379,7 +379,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     )
     @Builder.Default
     @PluginProperty(group = "execution")
-    protected Property<Boolean> liveLogs = Property.ofValue(false);
+    protected Property<Boolean> streamLogs = Property.ofValue(false);
 
     @Schema(
         title = "Publish Ansible log file",
@@ -438,7 +438,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         long rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
         LogsMode rLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.SUMMARY);
 
-        boolean rLiveLogs = runContext.render(this.liveLogs).as(Boolean.class).orElse(false);
+        boolean rStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(false);
 
         // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
         AnsibleLogConsumer logConsumer = new AnsibleLogConsumer(runContext);
@@ -506,7 +506,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         for (String cmd : rCommands) {
             Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
             envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
-            envForRun.put(LIVE_LOGS_ENV, String.valueOf(rLiveLogs));
+            envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
 
             // Each command gets its own outputs file: the callback writes it once per
             // ansible-playbook run, and a shared name would let a later command in a
