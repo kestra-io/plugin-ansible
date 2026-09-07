@@ -374,7 +374,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             If true, the bundled callback prints Ansible's own per-play and per-task output as it happens (`PLAY [...]`, `TASK [...]`, `ok:`/`changed:` per host), so a long run shows progress instead of staying silent until the command returns. Default is false.
             The end-of-run per-host logs are unchanged (see `logsMode`), so a task that prints content is rendered twice and log volume grows with the number of tasks in the playbook. Drop any `ANSIBLE_STDOUT_CALLBACK` override from `env` when enabling this, or Ansible's own stdout callback renders every line a third time.
-            EXPLICIT `outputsMode` redaction still applies: streamed lines carry play names, task names and per-host statuses, never per-host payloads.
+            EXPLICIT `outputsMode` redaction still applies: streamed lines carry play names, task names and per-host statuses, never per-host payloads, and a module traceback on a failed host is replaced by a notice rather than printed.
             """
     )
     @Builder.Default
@@ -440,12 +440,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         boolean rLiveLogs = runContext.render(this.liveLogs).as(Boolean.class).orElse(false);
 
-        // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
-        AnsibleLogConsumer logConsumer = new AnsibleLogConsumer(runContext);
-
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
-            .withLogConsumer(logConsumer)
+            // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
+            .withLogConsumer(new AnsibleLogConsumer(runContext))
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
@@ -541,13 +539,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 // single command per run so Kestra doesn't overwrite outputs
                 .withCommands(Property.ofValue(List.of(cmd)));
 
-            ScriptOutput out;
-            try {
-                out = commandWrapper.run();
-            } finally {
-                // A warning can be the last thing on stderr, and it is buffered until then.
-                logConsumer.flush();
-            }
+            ScriptOutput out = commandWrapper.run();
 
             mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
             mergedStdOutCount += out.getStdOutLineCount();

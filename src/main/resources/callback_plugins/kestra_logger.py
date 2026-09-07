@@ -188,6 +188,25 @@ class CallbackModule(CallbackBase):
 
         return super(CallbackModule, self)._dump_results(result, *args, **kwargs)
 
+    def _handle_exception(self, result, use_stderr=False, *args, **kwargs):
+        """
+        CallbackBase renders result['exception'], a raw Python traceback, straight to the display
+        and not through _dump_results, so explicit mode has to intercept it here too. Called from
+        v2_runner_on_failed and v2_runner_item_on_failed, both of which are only reachable with
+        liveLogs enabled.
+        """
+        if self._outputs_mode == "explicit" and hasattr(result, "get") and result.get("exception"):
+            result.pop("exception", None)
+            self._display.display(
+                "An exception occurred during task execution. The traceback is not shown "
+                "because outputsMode is EXPLICIT.",
+                color=C.COLOR_ERROR,
+                stderr=use_stderr
+            )
+            return
+
+        return super(CallbackModule, self)._handle_exception(result, use_stderr, *args, **kwargs)
+
     def _write_log_line(self, line: str):
         """
         Write a line to log_path if available.

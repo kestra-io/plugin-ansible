@@ -1,0 +1,14 @@
+---
+# The failing task raises inside a module, so the result carries an `exception` traceback on top of
+# the usual module_stderr. With `outputsMode: EXPLICIT` neither may reach the logs.
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Raise inside a module
+      boom:
+      ignore_errors: true
+
+    - name: Declare explicit outputs
+      kestra:
+        outputs:
+          done: true

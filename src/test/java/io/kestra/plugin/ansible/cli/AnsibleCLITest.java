@@ -1549,7 +1549,7 @@ class AnsibleCLITest {
     // frames. ansible-core 2.21 in the current image no longer wraps warnings, so feed the exact
     // two stderr lines 2.15.13 emits (the version the report came from) through it instead.
     @Test
-    void run_wrappedWarningOnStderr_isRejoinedIntoASingleWarning() throws Exception {
+    void run_wrappedWarningOnStderr_bothLinesAreWarnAndNothingIsError() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
@@ -1586,12 +1586,87 @@ class AnsibleCLITest {
             .filter(l -> l.getMessage() != null && l.getMessage().startsWith("[WARNING]"))
             .toList();
 
-        // one warning, not the two lines it arrived as, and the version is not a row of its own
+        // the prefixed line and the prefix-less continuation both reach WARN, and neither the
+        // fragment nor anything else lands at ERROR
         assertThat(warnings, hasSize(1));
         assertThat(warnings.getFirst().getLevel(), is(Level.WARN));
+        assertThat(byMessage(logs, "2.15.13").getLevel(), is(Level.WARN));
         assertThat(
-            warnings.getFirst().getMessage(),
-            is("[WARNING]: Collection community.general does not support Ansible version 2.15.13")
+            List.copyOf(logs).stream().filter(l -> l.getLevel() == Level.ERROR).toList(),
+            is(empty())
         );
+    }
+
+    private static LogEntry byMessage(List<LogEntry> logs, String message) {
+        return List.copyOf(logs).stream()
+            .filter(l -> message.equals(l.getMessage()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no log with message: " + message));
+    }
+
+    // liveLogs makes CallbackBase._handle_exception reachable for the first time. It renders
+    // result['exception'] outside _dump_results, and on core 2.15 at -vvv that is the full Python
+    // traceback with frame names and paths, so EXPLICIT mode has to intercept it separately.
+    // What is asserted is that the interception fires. The default image ships core 2.21, which
+    // prints nothing from that path at any verbosity, so the traceback itself cannot be caught
+    // leaking here; the notice replacing it is the observable signal on this image.
+    @Test
+    void run_withLiveLogsAndExplicitOutputs_redactsTheExceptionRendering() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .liveLogs(Property.ofValue(true))
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-live-logs-exception.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-live-logs-exception.yml")
+                    ).toString(),
+                    "library/boom.py", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("library/boom.py")
+                    ).toString()
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-live-logs-exception.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        // ignore_errors keeps the run green
+        assertThat(runOutput.getExitCode(), is(0));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().contains("outputsMode is EXPLICIT"));
+        receive.blockLast();
+
+        List<LogEntry> snapshot = List.copyOf(logs);
+
+        // _handle_exception was reached with an exception present, and our override answered it
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("outputsMode is EXPLICIT")), is(true));
+
+        // no traceback frame reaches the logs
+        assertThat(
+            snapshot.stream().filter(l -> l.getMessage() != null && l.getMessage().contains("frame_named_canary_7742")).toList(),
+            is(empty())
+        );
+
+        // the failure reason is kept on purpose in EXPLICIT mode, so a redacted run stays debuggable
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("module failed on purpose")), is(true));
     }
 }
