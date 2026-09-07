@@ -81,8 +81,11 @@ class CallbackModule(CallbackBase):
 
         super(CallbackModule, self).__init__()
 
-        # aggregate collector only: avoid duplicating stdout_callback output
-        self._silent = True
+        # Aggregate collector: muted by default so it does not duplicate the stdout callback.
+        # The AnsibleCLI task's `liveLogs` turns the inherited per-play/per-task display back on,
+        # so a long run streams progress instead of staying silent until the command returns
+        # (issue #123). Redaction is preserved in explicit mode, see _dump_results.
+        self._silent = os.environ.get("KESTRA_LIVE_LOGS", "").strip().lower() not in ("1", "true", "yes")
 
         # Best-effort discovery of log_path (from ansible.cfg)
         self._log_file_path = getattr(C, "LOG_PATH", None) or getattr(C, "DEFAULT_LOG_PATH", None)
@@ -168,6 +171,22 @@ class CallbackModule(CallbackBase):
         declared = result._result.get("outputs")
         if isinstance(declared, dict):
             self._kestra_explicit.update(declared)
+
+    def _dump_results(self, result, *args, **kwargs):
+        """
+        Display rendering only. The outputs payload is built in _add_host_result.
+        Explicit mode must not print per-host payloads, and v2_runner_on_failed and
+        v2_runner_on_unreachable dump results unconditionally, so redact here the same way
+        _add_host_result does. Only reachable with liveLogs enabled.
+        """
+        if self._outputs_mode == "explicit" and hasattr(result, "get"):
+            redacted = {"changed": bool(result.get("changed", False))}
+            msg = result.get("msg")
+            if msg is not None:
+                redacted["msg"] = msg
+            result = redacted
+
+        return super(CallbackModule, self)._dump_results(result, *args, **kwargs)
 
     def _write_log_line(self, line: str):
         """
