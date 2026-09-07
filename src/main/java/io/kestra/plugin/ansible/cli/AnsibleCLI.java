@@ -237,6 +237,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
+    public static final String STREAM_LOGS_ENV = "KESTRA_STREAM_LOGS";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -338,7 +339,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             ALL (default) captures every per-host result of every playbook task; `outputs` is a list of per-host result maps.
             EXPLICIT captures only values declared in the playbook via the bundled `kestra` module, redacting per-host payloads to `{"changed": <bool>}` while keeping task names, timings, and statuses; `outputs` is then a map, not a list, so switching modes changes its shape for downstream references.
-            A custom `ansibleConfig` must keep `stdout_callback = ansible.builtin.null` to preserve redaction, and `library = ./library` for the bundled module to resolve.
+            A custom `ansibleConfig` must keep `library = ./library` for the bundled module to resolve. In EXPLICIT mode it must also keep `stdout_callback = ansible.builtin.null`: another stdout callback renders per-host payloads itself (a failed host, or any host with `-v`), which the redaction cannot reach. In ALL mode the setting makes no difference to what is logged, since per-host results are logged from the captured outputs anyway.
             """
     )
     @Builder.Default
@@ -367,6 +368,18 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Builder.Default
     @PluginProperty(group = "execution")
     protected Property<LogsMode> logsMode = Property.ofValue(LogsMode.SUMMARY);
+
+    @Schema(
+        title = "Enable log streaming during playbook execution",
+        description = """
+            If true, the bundled callback prints Ansible's own per-play and per-task output as it happens (`PLAY [...]`, `TASK [...]`, `ok:`/`changed:` per host), so a long run shows progress instead of staying silent until the command returns. Default is false.
+            The end-of-run per-host logs are unchanged (see `logsMode`), so a task that prints content is rendered twice and log volume grows with the number of tasks in the playbook. Drop any `ANSIBLE_STDOUT_CALLBACK` override from `env` when enabling this, or Ansible's own stdout callback renders every line a third time.
+            EXPLICIT `outputsMode` redaction still applies: streamed lines carry play names, task names and per-host statuses, never per-host payloads, and a module traceback on a failed host is replaced by a notice rather than printed.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Boolean> streamLogs = Property.ofValue(false);
 
     @Schema(
         title = "Publish Ansible log file",
@@ -425,9 +438,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         long rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
         LogsMode rLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.SUMMARY);
 
+        boolean rStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(false);
+
+        // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
+        AnsibleLogConsumer logConsumer = new AnsibleLogConsumer(runContext);
+
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
-            .withWarningOnStdErr(false)
+            .withLogConsumer(logConsumer)
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
@@ -488,6 +506,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         for (String cmd : rCommands) {
             Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
             envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
+            envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
 
             // Each command gets its own outputs file: the callback writes it once per
             // ansible-playbook run, and a shared name would let a later command in a
@@ -521,6 +540,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 .withBeforeCommands(mergedBeforeCommands)
                 // single command per run so Kestra doesn't overwrite outputs
                 .withCommands(Property.ofValue(List.of(cmd)));
+
+            // the consumer is shared across commands, so drop any half-wrapped warning state
+            // left by the previous one before its successor's stderr starts arriving
+            logConsumer.reset();
 
             ScriptOutput out = commandWrapper.run();
 
@@ -557,7 +580,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
             OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
             oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
-            outputsRead.payload().ifPresent(payload -> {
+            outputsRead.payload().ifPresent(payload ->
+            {
                 if (payload.get("outputs") instanceof Map<?, ?> explicit) {
                     explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
                 }
@@ -816,19 +840,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * the command did not run ansible-playbook at all, the playbook crashed before completing, or
      * a user-supplied `ansibleConfig` does not load the callback.
      *
-     * <p>The file is never parsed before its size has been checked against {@code maxOutputsSize}:
+     * <p>
+     * The file is never parsed before its size has been checked against {@code maxOutputsSize}:
      * the payload this fix moves off stdout can be hundreds of megabytes, and deserializing it
      * would materialize that volume in the worker heap before the output guard could reject it.
      * An oversized file is reported back through {@link OutputsFileRead#oversizedBytes()} so the
      * caller can still emit the diagnostics it has before failing the task.
      *
-     * <p>The file is deleted once consumed: in ALL mode it holds raw per-host results (registered
+     * <p>
+     * The file is deleted once consumed: in ALL mode it holds raw per-host results (registered
      * vars, stdout/msg, gathered facts) that may carry secrets a playbook fetched, and there is no
      * reason to leave them in plaintext in the working directory for the rest of the task.
      *
      * @param warnIfMissing whether a missing file is worth a warning; suppressed for commands that
-     *                       do not look like an ansible-playbook invocation, to avoid spurious
-     *                       warnings on every auto-install/before-command in a multi-command task.
+     *        do not look like an ansible-playbook invocation, to avoid spurious
+     *        warnings on every auto-install/before-command in a multi-command task.
      */
     OutputsFileRead readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing, long maxOutputsSize) {
         if (!Files.isRegularFile(outputsFile)) {
@@ -855,7 +881,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             try (InputStream is = Files.newInputStream(outputsFile)) {
                 return new OutputsFileRead(
-                    Optional.ofNullable(JacksonMapper.ofJson().readValue(is, new TypeReference<Map<String, Object>>() {})),
+                    Optional.ofNullable(JacksonMapper.ofJson().readValue(is, new TypeReference<Map<String, Object>>() {
+                    })),
                     0
                 );
             }
@@ -899,9 +926,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         try (BoundedCountingOutputStream counter = new BoundedCountingOutputStream(maxOutputsSize)) {
             JacksonMapper.ofJson().writeValue(counter, outputsPayload);
         } catch (LimitExceededException e) {
-            throw new IllegalStateException(outputsTooLargeMessage(
-                "Ansible outputs payload exceeds the configured `maxOutputsSize` of " + maxOutputsSize + " bytes."
-            ));
+            throw new IllegalStateException(
+                outputsTooLargeMessage(
+                    "Ansible outputs payload exceeds the configured `maxOutputsSize` of " + maxOutputsSize + " bytes."
+                )
+            );
         }
     }
 
@@ -915,11 +944,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             return;
         }
 
-        throw new IllegalStateException(outputsTooLargeMessage(
-            "The Ansible outputs file written by the callback is " + oversizedBytes + " bytes, exceeding the "
-                + "configured `maxOutputsSize` of " + maxOutputsSize + " bytes; it was not parsed, so it could "
-                + "not exhaust the worker's heap."
-        ));
+        throw new IllegalStateException(
+            outputsTooLargeMessage(
+                "The Ansible outputs file written by the callback is " + oversizedBytes + " bytes, exceeding the "
+                    + "configured `maxOutputsSize` of " + maxOutputsSize + " bytes; it was not parsed, so it could "
+                    + "not exhaust the worker's heap."
+            )
+        );
     }
 
     private static String outputsTooLargeMessage(String what) {
@@ -986,11 +1017,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             }
 
             State.Type finalType = hasFailedHost(task) ? State.Type.FAILED : State.Type.SUCCESS;
-            State state = State.of(finalType, new ArrayList<>(List.of(
-                new State.History(State.Type.CREATED, started),
-                new State.History(State.Type.RUNNING, started),
-                new State.History(finalType, ended)
-            )));
+            State state = State.of(
+                finalType, new ArrayList<>(
+                    List.of(
+                        new State.History(State.Type.CREATED, started),
+                        new State.History(State.Type.RUNNING, started),
+                        new State.History(finalType, ended)
+                    )
+                )
+            );
 
             TaskRun subTaskRun = TaskRun.builder()
                 .id(IdUtils.create())

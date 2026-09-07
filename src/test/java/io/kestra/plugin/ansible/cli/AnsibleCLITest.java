@@ -10,6 +10,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.event.Level;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 
@@ -262,7 +263,8 @@ class AnsibleCLITest {
 
         Map<String, Object> filePayload;
         try (InputStream is = storage.get(TenantService.MAIN_TENANT, null, outputsFileUri)) {
-            filePayload = JacksonMapper.ofJson().readValue(is, new TypeReference<>() {});
+            filePayload = JacksonMapper.ofJson().readValue(is, new TypeReference<>() {
+            });
         }
 
         // ALL mode: per-host results live only under "playbooks" in the file; no separate flat
@@ -1375,5 +1377,297 @@ class AnsibleCLITest {
             emitted.getFirst().inputs().stream().map(AssetIdentifier::id).toList(),
             contains("localhost")
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // issue #123: Ansible warnings, and live task output
+    // -------------------------------------------------------------------------
+
+    // ansible-core writes every `[WARNING]:` to stderr, and core's default log consumer logs
+    // stderr at ERROR without looking at it, so a run that exits 0 used to be a wall of ERROR
+    // rows. The plugin's own consumer reclassifies them.
+    @Test
+    void run_ansibleWarnings_areLoggedAtWarnAndNothingAtError() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-warning.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-warning.yml")
+                    ).toString()
+                )
+            )
+            // deliberately no -i: that is what makes ansible-core warn
+            .commands(Property.ofValue(List.of("ansible-playbook playbooks/playbook-warning.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+        assertThat(runOutput.getExitCode(), is(0));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().contains("[WARNING]"));
+        receive.blockLast();
+
+        List<LogEntry> snapshot = List.copyOf(logs);
+
+        List<LogEntry> warnings = snapshot.stream()
+            .filter(l -> l.getMessage() != null && l.getMessage().contains("[WARNING]"))
+            .toList();
+        assertThat(warnings, is(not(empty())));
+        assertThat(warnings.stream().allMatch(l -> l.getLevel() == Level.WARN), is(true));
+
+        // the whole point of the report: a successful playbook logs nothing at ERROR
+        List<String> errors = snapshot.stream()
+            .filter(l -> l.getLevel() == Level.ERROR)
+            .map(LogEntry::getMessage)
+            .toList();
+        assertThat(errors, is(empty()));
+    }
+
+    // Without streamLogs the bundled callback stays muted and nothing is logged until the command
+    // returns, so a long playbook looks stalled.
+    @Test
+    void run_withStreamLogs_streamsPlayAndTaskOutput() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .streamLogs(Property.ofValue(true))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook.yml")
+                    ).toString()
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+        assertThat(runOutput.getExitCode(), is(0));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().startsWith("TASK ["));
+        receive.blockLast();
+
+        List<LogEntry> snapshot = List.copyOf(logs);
+
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().startsWith("PLAY [")), is(true));
+        assertThat(
+            snapshot.stream()
+                .filter(l -> l.getMessage() != null && l.getMessage().startsWith("TASK ["))
+                .allMatch(l -> l.getLevel() == Level.INFO),
+            is(true)
+        );
+
+        // streaming must not change what the task captures
+        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        assertThat(outputs, is(not(empty())));
+    }
+
+    // streamLogs re-enables the callback's own rendering, which dumps a failed host's result. In
+    // EXPLICIT mode that payload must stay redacted in the streamed output too.
+    @Test
+    void run_withStreamLogsAndExplicitOutputs_doesNotStreamHostPayloads() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .streamLogs(Property.ofValue(true))
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-stream-logs-failure.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-stream-logs-failure.yml")
+                    ).toString()
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-stream-logs-failure.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        // ignore_errors keeps the run green
+        assertThat(runOutput.getExitCode(), is(0));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().startsWith("TASK ["));
+        receive.blockLast();
+
+        List<LogEntry> snapshot = List.copyOf(logs);
+
+        // the streamed rendering ran, so the absence of the canary below is not vacuous
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().startsWith("TASK [")), is(true));
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("FAILED!")), is(true));
+
+        // the failed task's stdout never reaches the logs
+        assertThat(
+            snapshot.stream().filter(l -> l.getMessage() != null && l.getMessage().contains("CANARY_STREAM_LOGS_9931")).toList(),
+            is(empty())
+        );
+    }
+
+    // The rejoin has to survive the runner's log pipeline, which splits and re-assembles stderr
+    // frames. ansible-core 2.21 in the current image no longer wraps warnings, so feed the exact
+    // two stderr lines 2.15.13 emits (the version the report came from) through it instead.
+    @Test
+    void run_wrappedWarningOnStderr_bothLinesAreWarnAndNothingIsError() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "printf '%s\\n%s\\n' "
+                            + "'[WARNING]: Collection community.general does not support Ansible version' "
+                            + "'2.15.13' >&2"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+        assertThat(runOutput.getExitCode(), is(0));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().startsWith("[WARNING]"));
+        receive.blockLast();
+
+        // the echoed command carries the literal prefix too, so anchor on the start of the line
+        List<LogEntry> warnings = List.copyOf(logs).stream()
+            .filter(l -> l.getMessage() != null && l.getMessage().startsWith("[WARNING]"))
+            .toList();
+
+        // the prefixed line and the prefix-less continuation both reach WARN, and neither the
+        // fragment nor anything else lands at ERROR
+        assertThat(warnings, hasSize(1));
+        assertThat(warnings.getFirst().getLevel(), is(Level.WARN));
+        assertThat(byMessage(logs, "2.15.13").getLevel(), is(Level.WARN));
+        assertThat(
+            List.copyOf(logs).stream().filter(l -> l.getLevel() == Level.ERROR).toList(),
+            is(empty())
+        );
+    }
+
+    private static LogEntry byMessage(List<LogEntry> logs, String message) {
+        return List.copyOf(logs).stream()
+            .filter(l -> message.equals(l.getMessage()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no log with message: " + message));
+    }
+
+    // streamLogs makes CallbackBase._handle_exception reachable for the first time. It renders
+    // result['exception'] outside _dump_results: on core 2.15 that is the exception's own message
+    // at default verbosity ("The error was: ...") and the full traceback at -vvv, so EXPLICIT mode
+    // has to intercept it separately. The override does not look at verbosity, so it covers both.
+    // What is asserted here is that the interception fires, because the default image ships core
+    // 2.21, which prints nothing from that path and so cannot be caught leaking. Demonstrating the
+    // leak itself would need an image pinned to an older core.
+    @Test
+    void run_withStreamLogsAndExplicitOutputs_redactsTheExceptionRendering() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .streamLogs(Property.ofValue(true))
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-stream-logs-exception.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("playbooks/playbook-stream-logs-exception.yml")
+                    ).toString(),
+                    "library/boom.py", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader().getResourceAsStream("library/boom.py")
+                    ).toString()
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbooks/playbook-stream-logs-exception.yml")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        // ignore_errors keeps the run green
+        assertThat(runOutput.getExitCode(), is(0));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().contains("outputsMode is EXPLICIT"));
+        receive.blockLast();
+
+        List<LogEntry> snapshot = List.copyOf(logs);
+
+        // _handle_exception was reached with an exception present, and our override answered it
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("outputsMode is EXPLICIT")), is(true));
+
+        // no traceback frame reaches the logs
+        assertThat(
+            snapshot.stream().filter(l -> l.getMessage() != null && l.getMessage().contains("frame_named_canary_7742")).toList(),
+            is(empty())
+        );
+
+        // the failure reason is kept on purpose in EXPLICIT mode, so a redacted run stays debuggable
+        assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("module failed on purpose")), is(true));
     }
 }

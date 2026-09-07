@@ -1,0 +1,14 @@
+---
+# A failing task whose payload carries a canary: with `outputsMode: EXPLICIT`, no rendering of the
+# result may reach the logs, streamed ones included.
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Emit a canary and fail
+      ansible.builtin.shell: echo CANARY_STREAM_LOGS_9931; exit 3
+      ignore_errors: true
+
+    - name: Declare explicit outputs
+      kestra:
+        outputs:
+          done: true

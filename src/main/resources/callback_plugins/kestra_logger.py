@@ -81,8 +81,11 @@ class CallbackModule(CallbackBase):
 
         super(CallbackModule, self).__init__()
 
-        # aggregate collector only: avoid duplicating stdout_callback output
-        self._silent = True
+        # Aggregate collector: muted by default so it does not duplicate the stdout callback.
+        # The AnsibleCLI task's `streamLogs` turns the inherited per-play/per-task display back on,
+        # so a long run streams progress instead of staying silent until the command returns
+        # (issue #123). Redaction is preserved in explicit mode, see _dump_host_result.
+        self._silent = os.environ.get("KESTRA_STREAM_LOGS", "").strip().lower() not in ("1", "true", "yes")
 
         # Best-effort discovery of log_path (from ansible.cfg)
         self._log_file_path = getattr(C, "LOG_PATH", None) or getattr(C, "DEFAULT_LOG_PATH", None)
@@ -168,6 +171,45 @@ class CallbackModule(CallbackBase):
         declared = result._result.get("outputs")
         if isinstance(declared, dict):
             self._kestra_explicit.update(declared)
+
+    def _dump_host_result(self, result, *args, **kwargs):
+        """
+        Renders a per-host result for display. The outputs payload itself is built in
+        _add_host_result. Explicit mode must not print per-host payloads, and v2_runner_on_failed
+        and v2_runner_on_unreachable dump results unconditionally, so redact here the same way
+        _add_host_result does. Only reachable with streamLogs enabled.
+
+        Deliberately not an override of _dump_results: that is also used to render
+        `set_stats` values in v2_playbook_on_stats, which the playbook author exported on purpose
+        and explicit mode is meant to show, not hide.
+        """
+        if self._outputs_mode == "explicit" and hasattr(result, "get"):
+            redacted = {"changed": bool(result.get("changed", False))}
+            msg = result.get("msg")
+            if msg is not None:
+                redacted["msg"] = msg
+            result = redacted
+
+        return self._dump_results(result, *args, **kwargs)
+
+    def _handle_exception(self, result, use_stderr=False, *args, **kwargs):
+        """
+        CallbackBase renders result['exception'], a raw Python traceback, straight to the display
+        and not through _dump_results, so explicit mode has to intercept it here too. Called from
+        v2_runner_on_failed and v2_runner_item_on_failed, both of which are only reachable with
+        streamLogs enabled.
+        """
+        if self._outputs_mode == "explicit" and hasattr(result, "get") and result.get("exception"):
+            result.pop("exception", None)
+            self._display.display(
+                "An exception occurred during task execution. The traceback is not shown "
+                "because outputsMode is EXPLICIT.",
+                color=C.COLOR_ERROR,
+                stderr=use_stderr
+            )
+            return
+
+        return super(CallbackModule, self)._handle_exception(result, use_stderr, *args, **kwargs)
 
     def _write_log_line(self, line: str):
         """
@@ -438,7 +480,7 @@ class CallbackModule(CallbackBase):
         else:
             self._clean_results(result._result, result._task.action)
             if self._run_is_verbose(result):
-                msg += " => %s" % (self._dump_results(result._result),)
+                msg += " => %s" % (self._dump_host_result(result._result),)
             self._display.display(msg, color=color)
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
@@ -465,7 +507,7 @@ class CallbackModule(CallbackBase):
             if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
                 self._print_task_path(result._task)
             msg = "fatal: [%s]: FAILED! => %s" % (
-                host_label, self._dump_results(result._result)
+                host_label, self._dump_host_result(result._result)
             )
             self._display.display(
                 msg,
@@ -492,7 +534,7 @@ class CallbackModule(CallbackBase):
 
             msg = "skipping: [%s]" % result._host.get_name()
             if self._run_is_verbose(result):
-                msg += " => %s" % self._dump_results(result._result)
+                msg += " => %s" % self._dump_host_result(result._result)
             self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_runner_on_unreachable(self, result):
@@ -506,7 +548,7 @@ class CallbackModule(CallbackBase):
 
         host_label = self.host_label(result)
         msg = "fatal: [%s]: UNREACHABLE! => %s" % (
-            host_label, self._dump_results(result._result)
+            host_label, self._dump_host_result(result._result)
         )
         self._display.display(
             msg,
@@ -678,7 +720,7 @@ class CallbackModule(CallbackBase):
         msg = "%s: [%s] => (item=%s)" % (msg, host_label, self._get_item_label(result._result))
         self._clean_results(result._result, result._task.action)
         if self._run_is_verbose(result):
-            msg += " => %s" % self._dump_results(result._result)
+            msg += " => %s" % self._dump_host_result(result._result)
         self._display.display(msg, color=color)
 
     def v2_runner_item_on_failed(self, result):
@@ -698,7 +740,7 @@ class CallbackModule(CallbackBase):
         self._display.display(
             msg + " (item=%s) => %s" % (
                 self._get_item_label(result._result),
-                self._dump_results(result._result)
+                self._dump_host_result(result._result)
             ),
             color=C.COLOR_ERROR,
             stderr=self.get_option('display_failed_stderr')
@@ -719,7 +761,7 @@ class CallbackModule(CallbackBase):
                 self._get_item_label(result._result)
             )
             if self._run_is_verbose(result):
-                msg += " => %s" % self._dump_results(result._result)
+                msg += " => %s" % self._dump_host_result(result._result)
             self._display.display(msg, color=C.COLOR_SKIP)
 
     # -------------------------------------------------------------------------
@@ -747,7 +789,7 @@ class CallbackModule(CallbackBase):
             result._result['retries'] - result._result['attempts']
         )
         if self._run_is_verbose(result, verbosity=2):
-            msg += "Result was: %s" % self._dump_results(result._result)
+            msg += "Result was: %s" % self._dump_host_result(result._result)
         self._display.display(msg, color=C.COLOR_DEBUG)
 
     def v2_runner_on_async_poll(self, result):

@@ -1,0 +1,9 @@
+---
+# `hosts: all` with no inventory makes ansible-core emit its startup warnings on stderr, which is
+# the shape reported in issue #123. The play itself succeeds against the implicit localhost.
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: Print a message
+      ansible.builtin.debug:
+        msg: "warning repro"
