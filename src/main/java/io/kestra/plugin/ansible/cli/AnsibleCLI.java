@@ -440,10 +440,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         boolean rLiveLogs = runContext.render(this.liveLogs).as(Boolean.class).orElse(false);
 
+        // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
+        AnsibleLogConsumer logConsumer = new AnsibleLogConsumer(runContext);
+
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
-            // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
-            .withLogConsumer(new AnsibleLogConsumer(runContext))
+            .withLogConsumer(logConsumer)
             .withDockerOptions(injectDefaults(docker))
             .withTaskRunner(this.taskRunner)
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
@@ -538,6 +540,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 .withBeforeCommands(mergedBeforeCommands)
                 // single command per run so Kestra doesn't overwrite outputs
                 .withCommands(Property.ofValue(List.of(cmd)));
+
+            // the consumer is shared across commands, so drop any half-wrapped warning state
+            // left by the previous one before its successor's stderr starts arriving
+            logConsumer.reset();
 
             ScriptOutput out = commandWrapper.run();
 

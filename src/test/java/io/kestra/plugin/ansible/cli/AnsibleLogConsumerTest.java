@@ -248,6 +248,24 @@ class AnsibleLogConsumerTest {
         assertThat(logs.getFirst().getLevel(), is(Level.INFO));
     }
 
+    // A task can run several commands through one consumer. Each is its own process, so a warning
+    // the previous command left mid-wrap must not claim the next command's first stderr line.
+    @Test
+    void resetStopsAWarningFromSpanningTwoCommands() {
+        String warning = "[WARNING]: Collection community.general does not support Ansible version";
+        String nextCommandError = "Traceback (most recent call last):";
+
+        List<LogEntry> logs = consume(2, c ->
+        {
+            c.accept(warning, true);
+            c.reset();
+            c.accept(nextCommandError, true);
+        });
+
+        assertThat(byMessage(logs, warning).getLevel(), is(Level.WARN));
+        assertThat(byMessage(logs, nextCommandError).getLevel(), is(Level.ERROR));
+    }
+
     @Test
     void lineCountsCoverWarnings() {
         AnsibleLogConsumer consumer = new AnsibleLogConsumer(runContext());

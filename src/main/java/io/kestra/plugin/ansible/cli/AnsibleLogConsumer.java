@@ -74,6 +74,15 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
         this.parse(line, true, instant);
     }
 
+    /**
+     * Forgets the last stderr line. Called by the task between commands: each command is its own
+     * process, so a warning left mid-wrap by one cannot be continued by the next one's first line.
+     */
+    public synchronized void reset() {
+        lastStdErrLine = null;
+        lastStdErrWasWarning = false;
+    }
+
     private void parse(String line, boolean isStdErr, Instant instant) {
         outputs.putAll(PluginUtilsService.parseOut(line, runContext.logger(), runContext, isStdErr, instant));
     }
