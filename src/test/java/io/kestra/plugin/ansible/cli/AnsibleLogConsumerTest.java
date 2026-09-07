@@ -25,14 +25,23 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 /**
- * Issue #123: Ansible writes every `[WARNING]:` to stderr, and core logs stderr at ERROR without
- * looking at it, so a playbook exiting 0 filled the execution logs with ERROR rows. These feed the
- * consumer the exact stderr lines ansible-core produces, so no Docker or Ansible is involved.
+ * Issue #123: Ansible writes every {@code [WARNING]:} to stderr, and core logs stderr at ERROR
+ * without looking at it, so a playbook exiting 0 filled the execution logs with ERROR rows.
  *
  * <p>
- * The wrapped inputs below are not invented: they are what
- * {@code textwrap.wrap("[WARNING]: " + msg, 79, drop_whitespace=False)} emits, which is how
- * ansible-core's Display formats a warning when it has no TTY.
+ * Every multi-line input below is captured output, not a reconstruction. It comes from
+ * ansible-core 2.15.13 (the version in the customer report) in the plugin's default image, via:
+ *
+ * <pre>
+ * docker run --rm --entrypoint bash cytopia/ansible:latest-tools -c '
+ *   pip install -q "ansible-core==2.15.13"
+ *   python3 -c "from ansible.utils.display import Display; Display().warning(\\"...\\")" 2&gt;&amp;1'
+ * </pre>
+ *
+ * <p>
+ * Re-capture rather than hand-edit these if the wrapping ever needs revisiting. An earlier
+ * version of this test derived them from a reading of the ansible source instead, got
+ * {@code drop_whitespace} backwards, and passed against an implementation with the same mistake.
  */
 @KestraTest
 class AnsibleLogConsumerTest {
@@ -55,38 +64,12 @@ class AnsibleLogConsumerTest {
         assertThat(logs.getFirst().getMessage(), is(line));
     }
 
+    // The customer's fourth warning, and the one their env-var workarounds could not silence. Its
+    // first line is 72 characters, well short of the 79-column wrap width, so a rule keyed on the
+    // line looking "full" misses it and leaves `2.15.13` alone on an ERROR row.
     @Test
-    void deprecationWarning_isLoggedAtWarn() {
-        String line = "[DEPRECATION WARNING]: Ansible will require Python 3.8 or newer on the target";
-
-        List<LogEntry> logs = consume(1, c -> c.accept(line, true));
-
-        assertThat(logs.getFirst().getLevel(), is(Level.WARN));
-    }
-
-    // The wrap fell on a space that stayed at the start of the second line, so the first line
-    // filled the width. Reported as two ERROR rows, the second one prefix-less.
-    @Test
-    void wrappedWarning_brokenOnLeadingSpace_isRejoinedIntoOneWarning() {
-        String first = "[WARNING]: provided hosts list is empty, only localhost is available. Note that";
-        String second = " the implicit localhost does not match 'all'";
-
-        List<LogEntry> logs = consume(1, c ->
-        {
-            c.accept(first, true);
-            c.accept(second, true);
-        });
-
-        assertThat(logs, hasSize(1));
-        assertThat(logs.getFirst().getLevel(), is(Level.WARN));
-        assertThat(logs.getFirst().getMessage(), is(first + second));
-    }
-
-    // The wrap left its space at the end of the first line, which is therefore short of the width.
-    // This is the `2.15.13` fragment the customer saw as a standalone ERROR row.
-    @Test
-    void wrappedWarning_brokenOnTrailingSpace_isRejoinedIntoOneWarning() {
-        String first = "[WARNING]: Collection community.general does not support Ansible version ";
+    void wrappedWarning_shortFirstLine_isRejoinedIntoOneWarning() {
+        String first = "[WARNING]: Collection community.general does not support Ansible version";
         String second = "2.15.13";
 
         List<LogEntry> logs = consume(1, c ->
@@ -96,13 +79,35 @@ class AnsibleLogConsumerTest {
         });
 
         assertThat(logs, hasSize(1));
-        assertThat(logs.getFirst().getMessage(), is("[WARNING]: Collection community.general does not support Ansible version 2.15.13"));
+        assertThat(logs.getFirst().getLevel(), is(Level.WARN));
+        assertThat(
+            logs.getFirst().getMessage(),
+            is("[WARNING]: Collection community.general does not support Ansible version 2.15.13")
+        );
+    }
+
+    @Test
+    void wrappedWarning_firstLineAtFullWidth_isRejoinedIntoOneWarning() {
+        String first = "[WARNING]: provided hosts list is empty, only localhost is available. Note that";
+        String second = "the implicit localhost does not match 'all'";
+
+        List<LogEntry> logs = consume(1, c ->
+        {
+            c.accept(first, true);
+            c.accept(second, true);
+        });
+
+        assertThat(logs, hasSize(1));
+        assertThat(
+            logs.getFirst().getMessage(),
+            is("[WARNING]: provided hosts list is empty, only localhost is available. Note that the implicit localhost does not match 'all'")
+        );
     }
 
     @Test
     void wrappedWarning_acrossThreeLines_isRejoinedIntoOneWarning() {
-        String first = "[WARNING]: Host 'localhost' is using the discovered Python interpreter at ";
-        String second = "'/usr/bin/python3.11', but future installation of another Python interpreter ";
+        String first = "[WARNING]: Host 'localhost' is using the discovered Python interpreter at";
+        String second = "'/usr/bin/python3.11', but future installation of another Python interpreter";
         String third = "could change the meaning of that path";
 
         List<LogEntry> logs = consume(1, c ->
@@ -113,7 +118,39 @@ class AnsibleLogConsumerTest {
         });
 
         assertThat(logs, hasSize(1));
-        assertThat(logs.getFirst().getMessage(), is(first + second + third));
+        assertThat(
+            logs.getFirst().getMessage(),
+            is(
+                "[WARNING]: Host 'localhost' is using the discovered Python interpreter at '/usr/bin/python3.11', but future installation of another Python interpreter could change the meaning of that path"
+            )
+        );
+    }
+
+    // Display.deprecated wraps with drop_whitespace=False, so unlike Display.warning it leaves the
+    // break space at the end of each line and the rejoin must not add another.
+    @Test
+    void wrappedDeprecationWarning_keepsItsOwnSpacing() {
+        String first = "[DEPRECATION WARNING]: The connection plugin future is deprecated and will be ";
+        String second = "removed in a future release of ansible-core. This feature will be removed in ";
+        String third = "version 2.19. Deprecation warnings can be disabled by setting ";
+        String fourth = "deprecation_warnings=False in ansible.cfg.";
+
+        List<LogEntry> logs = consume(1, c ->
+        {
+            c.accept(first, true);
+            c.accept(second, true);
+            c.accept(third, true);
+            c.accept(fourth, true);
+        });
+
+        assertThat(logs, hasSize(1));
+        assertThat(logs.getFirst().getLevel(), is(Level.WARN));
+        assertThat(
+            logs.getFirst().getMessage(),
+            is(
+                "[DEPRECATION WARNING]: The connection plugin future is deprecated and will be removed in a future release of ansible-core. This feature will be removed in version 2.19. Deprecation warnings can be disabled by setting deprecation_warnings=False in ansible.cfg."
+            )
+        );
     }
 
     @Test
@@ -126,10 +163,10 @@ class AnsibleLogConsumerTest {
         assertThat(logs.getFirst().getMessage(), is(line));
     }
 
-    // The continuation rule must not swallow the next message: a warning that fit within the width
-    // cannot have been wrapped, so whatever follows it is its own line even when indented.
+    // A warning with room left on it cannot have been wrapped, so the line after it is judged on
+    // its own. This is what stops the rejoin from swallowing a real failure.
     @Test
-    void lineFollowingAnUnwrappedWarning_staysAtError() {
+    void lineFollowingAWarningWithRoomLeft_staysAtError() {
         String warning = "[WARNING]: something short";
         String detail = "  File \"/usr/lib/python3/site.py\", line 1";
 
@@ -140,6 +177,23 @@ class AnsibleLogConsumerTest {
         });
 
         assertThat(logs, hasSize(2));
+        assertThat(byMessage(logs, warning).getLevel(), is(Level.WARN));
+        assertThat(byMessage(logs, detail).getLevel(), is(Level.ERROR));
+    }
+
+    // A blank line closes the block, so the next stderr line is never folded into the warning.
+    @Test
+    void blankLineClosesTheWarningBlock() {
+        String warning = "[WARNING]: provided hosts list is empty, only localhost is available. Note that";
+        String detail = "the connection to the host was reset";
+
+        List<LogEntry> logs = consume(3, c ->
+        {
+            c.accept(warning, true);
+            c.accept("", true);
+            c.accept(detail, true);
+        });
+
         assertThat(byMessage(logs, warning).getLevel(), is(Level.WARN));
         assertThat(byMessage(logs, detail).getLevel(), is(Level.ERROR));
     }
@@ -157,7 +211,7 @@ class AnsibleLogConsumerTest {
     void lineCountsCoverBufferedWarnings() {
         AnsibleLogConsumer consumer = new AnsibleLogConsumer(runContext());
 
-        consumer.accept("[WARNING]: Collection community.general does not support Ansible version ", true);
+        consumer.accept("[WARNING]: Collection community.general does not support Ansible version", true);
         consumer.accept("2.15.13", true);
         consumer.accept("PLAY RECAP ****", false);
         consumer.flush();
@@ -188,8 +242,8 @@ class AnsibleLogConsumerTest {
 
     /**
      * Feeds the consumer and returns the logs it produced, in emission order. `expectedCount` is
-     * the number of log lines the consumer should end up emitting, which is what the assertions
-     * are really about: a rejoined warning is one line, not the several it arrived as.
+     * the number of log lines the consumer should end up emitting, which is what the assertions are
+     * really about: a rejoined warning is one line, not the several it arrived as.
      */
     private List<LogEntry> consume(int expectedCount, Consumer<AnsibleLogConsumer> feed) {
         RunContext runContext = runContext();

@@ -21,8 +21,9 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
     // Prefixes ansible-core's Display uses for non-fatal messages, both written to stderr.
     private static final List<String> WARNING_PREFIXES = List.of("[WARNING]:", "[DEPRECATION WARNING]:");
 
-    // ansible-core wraps warning text at Display.columns, which is max(79, tty_width - 1). No task
-    // runner gives Ansible a TTY, so the width is always exactly 79 here.
+    // ansible-core wraps warning text with textwrap at Display.columns, which is
+    // max(79, tty_width - 1). No task runner gives Ansible a TTY, so it is always exactly 79.
+    // Measured on core 2.15.13, 2.16.14 and 2.17.13 in cytopia/ansible:latest-tools.
     static final int WRAP_COLUMNS = 79;
 
     private final RunContext runContext;
@@ -82,15 +83,17 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
             return true;
         }
 
-        if (pendingWarning != null && isContinuation(pendingLastLine, line)) {
-            // The wrapper leaves the whitespace it broke on, on one side of the cut, so plain
-            // concatenation restores the original text.
-            pendingWarning.append(line);
-            pendingLastLine = line;
-            return true;
+        if (pendingWarning == null || !isContinuation(pendingLastLine, line)) {
+            return false;
         }
 
-        return false;
+        if (needsSpace(pendingLastLine, line)) {
+            pendingWarning.append(' ');
+        }
+        pendingWarning.append(line);
+        pendingLastLine = line;
+
+        return true;
     }
 
     static boolean isWarningStart(String line) {
@@ -98,15 +101,35 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
     }
 
     /**
-     * A stderr line continues the previous warning only when that line looks cut off by the
-     * wrapper: it either filled the width or ends on the whitespace the wrap happened at. Anything
-     * else is a new message, so an indented line following a short warning still reaches ERROR.
+     * A stderr line continues the previous warning when the wrapper had no room for this line's
+     * first word on it. That is the invariant a continuation still carries once it has lost the
+     * prefix: had the word fit, textwrap would have kept it on the previous line rather than start
+     * a new one. A warning short enough never to have been wrapped therefore cannot absorb the
+     * line after it, which is what keeps a real error out of a warning block.
      */
     static boolean isContinuation(String previous, String line) {
         if (line.isBlank() || isWarningStart(line)) {
             return false;
         }
 
-        return previous.length() >= WRAP_COLUMNS || previous.endsWith(" ");
+        int gap = needsSpace(previous, line) ? 1 : 0;
+
+        return previous.length() + gap + firstToken(line).length() > WRAP_COLUMNS;
+    }
+
+    /**
+     * {@code Display.warning} wraps with textwrap's default {@code drop_whitespace}, so the space it
+     * broke on is gone from both sides and has to be put back to rebuild the message.
+     * {@code Display.deprecated} passes {@code drop_whitespace=False} and leaves it on one side.
+     */
+    private static boolean needsSpace(String previous, String line) {
+        return !previous.endsWith(" ") && !line.startsWith(" ");
+    }
+
+    private static String firstToken(String line) {
+        String text = line.stripLeading();
+        int space = text.indexOf(' ');
+
+        return space < 0 ? text : text.substring(0, space);
     }
 }

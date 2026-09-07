@@ -1545,9 +1545,9 @@ class AnsibleCLITest {
         );
     }
 
-    // The rejoin relies on the whitespace ansible-core's wrapper leaves at the cut surviving the
-    // runner's log pipeline. ansible-core 2.21 no longer wraps, so feed the exact two stderr lines
-    // 2.15 emits (the version the report came from) through the real Docker stream instead.
+    // The rejoin has to survive the runner's log pipeline, which splits and re-assembles stderr
+    // frames. ansible-core 2.21 in the current image no longer wraps warnings, so feed the exact
+    // two stderr lines 2.15.13 emits (the version the report came from) through it instead.
     @Test
     void run_wrappedWarningOnStderr_isRejoinedIntoASingleWarning() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
@@ -1563,7 +1563,7 @@ class AnsibleCLITest {
                 Property.ofValue(
                     List.of(
                         "printf '%s\\n%s\\n' "
-                            + "'[WARNING]: Collection community.general does not support Ansible version ' "
+                            + "'[WARNING]: Collection community.general does not support Ansible version' "
                             + "'2.15.13' >&2"
                     )
                 )
