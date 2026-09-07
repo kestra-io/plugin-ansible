@@ -1605,11 +1605,12 @@ class AnsibleCLITest {
     }
 
     // liveLogs makes CallbackBase._handle_exception reachable for the first time. It renders
-    // result['exception'] outside _dump_results, and on core 2.15 at -vvv that is the full Python
-    // traceback with frame names and paths, so EXPLICIT mode has to intercept it separately.
-    // What is asserted is that the interception fires. The default image ships core 2.21, which
-    // prints nothing from that path at any verbosity, so the traceback itself cannot be caught
-    // leaking here; the notice replacing it is the observable signal on this image.
+    // result['exception'] outside _dump_results: on core 2.15 that is the exception's own message
+    // at default verbosity ("The error was: ...") and the full traceback at -vvv, so EXPLICIT mode
+    // has to intercept it separately. The override does not look at verbosity, so it covers both.
+    // What is asserted here is that the interception fires, because the default image ships core
+    // 2.21, which prints nothing from that path and so cannot be caught leaking. Demonstrating the
+    // leak itself would need an image pinned to an older core.
     @Test
     void run_withLiveLogsAndExplicitOutputs_redactsTheExceptionRendering() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
