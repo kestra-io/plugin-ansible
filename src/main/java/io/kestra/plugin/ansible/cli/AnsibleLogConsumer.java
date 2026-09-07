@@ -123,10 +123,21 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
      * be told apart from a wrapped one, so an unrelated stderr line whose first word would have
      * overflowed the width is read as its continuation and logged at WARN. stderr carries no
      * severity of its own, so distinguishing the two needs a signal that is not on the wire. See
-     * {@code unrelatedStderrAfterANearFullWarning_isMisreadAsAContinuation}.
+     * {@code unrelatedStderrAfterANearFullWarning_isMisreadAsAContinuation}. It costs one line and
+     * no more, which is what the width anchor below is for.
      */
     static boolean isContinuation(String previous, String line) {
         if (line.isBlank() || isWarningStart(line)) {
+            return false;
+        }
+
+        // textwrap never emits a line longer than the width, so a line that exceeds it did not
+        // come from the wrapper and cannot have a continuation of its own. Without this the test
+        // below is unconditionally true for any previous line of 79 characters or more (the first
+        // token is at least one character), so one absorbed long line -- a traceback frame with a
+        // full site-packages path, say -- would keep the chain alive over every stderr line left
+        // in the command and a real failure would produce no ERROR row at all.
+        if (previous.length() > WRAP_COLUMNS) {
             return false;
         }
 

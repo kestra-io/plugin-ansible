@@ -222,6 +222,29 @@ class AnsibleLogConsumerTest {
         assertThat(byMessage(logs, unrelated).getLevel(), is(Level.WARN));
     }
 
+    // Review finding: without the width anchor, any absorbed line of 79+ characters made the next
+    // line an unconditional continuation, so one misread traceback frame kept every remaining
+    // stderr line at WARN and a genuine failure produced no ERROR row.
+    @Test
+    void aLongMisreadLineDoesNotKeepTheChainAlive() {
+        String warning = "[WARNING]: provided hosts list is empty, only localhost is available. Note that";
+        String frame = "  File \"/usr/local/lib/python3.11/site-packages/ansible/executor/task_executor.py\", line 158, in run";
+        String next = "    res = self._execute(current_variables)";
+
+        List<LogEntry> logs = consume(3, c ->
+        {
+            c.accept(warning, true);
+            c.accept(frame, true);
+            c.accept(next, true);
+        });
+
+        assertThat(byMessage(logs, warning).getLevel(), is(Level.WARN));
+        // the frame is the one line the documented limitation costs
+        assertThat(byMessage(logs, frame).getLevel(), is(Level.WARN));
+        // and the chain stops there: the frame is longer than the wrap width, so nothing follows it
+        assertThat(byMessage(logs, next).getLevel(), is(Level.ERROR));
+    }
+
     // A blank line closes the block, so a later stderr line is judged on its own again.
     @Test
     void blankLineClosesTheWarningBlock() {
