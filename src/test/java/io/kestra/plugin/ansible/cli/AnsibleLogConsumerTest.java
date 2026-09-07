@@ -266,6 +266,11 @@ class AnsibleLogConsumerTest {
         assertThat(byMessage(logs, nextCommandError).getLevel(), is(Level.ERROR));
     }
 
+    // Not tested here: the `##kestra:log:debug##` markers the runner wraps generated
+    // before-commands in are handled by the delegate, so whether they are swallowed depends on the
+    // core version on the classpath (absent in the 1.3.26 the plugin compiles against, present in
+    // 1.3.35). Delegating is the point: the plugin matches whatever core does, on every version.
+
     @Test
     void lineCountsCoverWarnings() {
         AnsibleLogConsumer consumer = new AnsibleLogConsumer(runContext());

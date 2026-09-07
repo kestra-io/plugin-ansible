@@ -1,9 +1,10 @@
 package io.kestra.plugin.ansible.cli;
 
 import java.time.Instant;
+import java.util.Map;
 
 import io.kestra.core.models.tasks.runners.AbstractLogConsumer;
-import io.kestra.core.models.tasks.runners.PluginUtilsService;
+import io.kestra.core.models.tasks.runners.DefaultLogConsumer;
 import io.kestra.core.runners.RunContext;
 
 /**
@@ -11,10 +12,15 @@ import io.kestra.core.runners.RunContext;
  *
  * <p>
  * Ansible writes all of its {@code [WARNING]:} text to stderr, and core's
- * {@link io.kestra.core.models.tasks.runners.DefaultLogConsumer} logs every stderr line at ERROR
- * without inspecting it, so a playbook that exits 0 still fills the execution logs with ERROR rows
- * (issue #123). Lines not recognised as a warning keep the default behaviour, so {@code ERROR!} and
- * {@code fatal:} stay at ERROR.
+ * {@link DefaultLogConsumer} logs every stderr line at ERROR without inspecting it, so a playbook
+ * that exits 0 still fills the execution logs with ERROR rows (issue #123).
+ *
+ * <p>
+ * Warning lines are logged here and every other line is handed to core's own consumer
+ * untouched, so {@code ERROR!} and {@code fatal:} still reach ERROR and the rest of its behaviour
+ * comes along for free: the {@code ##kestra:log:debug##} markers the runner wraps generated
+ * before-commands in, the {@code ::{json}::} outputs matcher, and whatever it gains next.
+ * Reimplementing it instead meant losing the markers, which showed up as bare INFO log rows.
  *
  * <p>
  * Each line is logged as it arrives. A wrapped warning stays several log entries rather than
@@ -34,6 +40,10 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
     static final int WRAP_COLUMNS = 79;
 
     private final RunContext runContext;
+    private final DefaultLogConsumer delegate;
+
+    // Warning lines never reach the delegate, so its stderr count has to be topped up with them.
+    private int warningCount;
 
     // Only the previous stderr line matters: a wrapped warning's continuation lines lose the
     // prefix, so they can only be recognised from the line they continue. stdout never touches
@@ -43,6 +53,7 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
 
     public AnsibleLogConsumer(RunContext runContext) {
         this.runContext = runContext;
+        this.delegate = new DefaultLogConsumer(runContext);
     }
 
     @Override
@@ -53,12 +64,9 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
     @Override
     public synchronized void accept(String line, Boolean isStdErr, Instant instant) {
         if (!Boolean.TRUE.equals(isStdErr)) {
-            this.stdOutCount.incrementAndGet();
-            this.parse(line, false, instant);
+            delegate.accept(line, false, instant);
             return;
         }
-
-        this.stdErrCount.incrementAndGet();
 
         boolean warning = isWarningStart(line)
             || (lastStdErrWasWarning && isContinuation(lastStdErrLine, line));
@@ -67,11 +75,12 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
         lastStdErrWasWarning = warning;
 
         if (warning) {
+            warningCount++;
             runContext.logger().warn(line);
             return;
         }
 
-        this.parse(line, true, instant);
+        delegate.accept(line, true, instant);
     }
 
     /**
@@ -83,8 +92,19 @@ public class AnsibleLogConsumer extends AbstractLogConsumer {
         lastStdErrWasWarning = false;
     }
 
-    private void parse(String line, boolean isStdErr, Instant instant) {
-        outputs.putAll(PluginUtilsService.parseOut(line, runContext.logger(), runContext, isStdErr, instant));
+    @Override
+    public Map<String, Object> getOutputs() {
+        return delegate.getOutputs();
+    }
+
+    @Override
+    public int getStdOutCount() {
+        return delegate.getStdOutCount();
+    }
+
+    @Override
+    public int getStdErrCount() {
+        return delegate.getStdErrCount() + warningCount;
     }
 
     static boolean isWarningStart(String line) {
