@@ -45,6 +45,7 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
+import io.kestra.core.utils.UnixModeToPosixFilePermissions;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -238,6 +239,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
     public static final String STREAM_LOGS_ENV = "KESTRA_STREAM_LOGS";
+    // kept in sync with the marker key kestra_logger.py's _log_kestra_outputs adds to its stdout fallback frame
+    private static final String EXPLICIT_OUTPUTS_FALLBACK_MARKER = "_kestra_outputs_fallback";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -513,13 +516,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             // multi-command task overwrite an earlier one's payload before we read it back.
             Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
             envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
+            // the container may run as a non-root user while the working dir stays root-owned, so
+            // it can't create a new file there; pre-create one it can open with O_TRUNC instead
+            createContainerWritableFile(runContext, outputsFile);
 
             // If multiple commands and outputLogFile enabled,
             // override ANSIBLE_LOG_PATH so each run writes a different file.
+            // The default ansibleConfig always sets log_path, so pre-create whichever file
+            // is actually targeted this run, otherwise Ansible warns on every non-root run.
             if (wantLogFile && multiCmd) {
                 Path logPath = workingDir.resolve("log-" + idx);
                 envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
                 perCommandLogs.add(logPath);
+                createContainerWritableFile(runContext, logPath);
+            } else {
+                createContainerWritableFile(runContext, workingDir.resolve("log"));
             }
 
             // First (before any user `cd`, so $PWD is the working-dir root) and on every command
@@ -564,10 +575,28 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     mergedPlaybooks.addAll(pbs);
                 }
 
-                // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below
+                // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below.
+                // An unmarked "outputs" key stays skipped in both modes, exactly as before
+                // commit cd79bfb: it may be a user-authored "::{...}::" stdout line, which is
+                // indistinguishable from the callback's own frame without the marker below.
+                // Only the callback's stdout fallback frame (see kestra_logger.py
+                // _log_kestra_outputs) carries EXPLICIT_OUTPUTS_FALLBACK_MARKER, so in EXPLICIT
+                // mode that marked frame is the sole trusted carrier of the declared outputs map,
+                // recovered here because the outputs-file read below is empty precisely when
+                // that fallback fired.
+                boolean isTrustedFallbackFrame = Boolean.TRUE.equals(vars.get(EXPLICIT_OUTPUTS_FALLBACK_MARKER));
                 for (Map.Entry<String, Object> e : vars.entrySet()) {
                     String key = e.getKey();
-                    if ("outputs".equals(key) || "playbooks".equals(key)) {
+                    if ("outputs".equals(key)) {
+                        if (
+                            rOutputsModeEnum == OutputsMode.EXPLICIT && isTrustedFallbackFrame
+                                && e.getValue() instanceof Map<?, ?> explicit
+                        ) {
+                            explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                        }
+                        continue;
+                    }
+                    if ("playbooks".equals(key) || EXPLICIT_OUTPUTS_FALLBACK_MARKER.equals(key)) {
                         continue;
                     }
                     mergedVars.put(key, e.getValue());
@@ -857,7 +886,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      *        warnings on every auto-install/before-command in a multi-command task.
      */
     OutputsFileRead readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing, long maxOutputsSize) {
-        if (!Files.isRegularFile(outputsFile)) {
+        // a zero-byte file is the pre-created placeholder (see createContainerWritableFile) left
+        // untouched because the callback never ran or failed before writing; treat it as missing
+        boolean isMissingOrEmpty;
+        try {
+            isMissingOrEmpty = !Files.isRegularFile(outputsFile) || Files.size(outputsFile) == 0;
+        } catch (IOException e) {
+            isMissingOrEmpty = true;
+        }
+        if (isMissingOrEmpty) {
             if (warnIfMissing) {
                 runContext.logger().warn(
                     "Ansible outputs file '{}' was not found after running an ansible-playbook command; its "
@@ -866,6 +903,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                         + "(it needs both `callback_plugins`/`callbacks_enabled = kestra_logger` and `library = ./library`).",
                     outputsFile
                 );
+            }
+            // the placeholder itself is zero-byte and otherwise never cleaned up on this branch,
+            // contradicting the "deleted once consumed" contract and risking an upload via outputFiles globs
+            try {
+                Files.deleteIfExists(outputsFile);
+            } catch (IOException e) {
+                runContext.logger().debug("Unable to delete the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
             }
             return OutputsFileRead.EMPTY;
         }
@@ -898,6 +942,32 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             } catch (IOException e) {
                 runContext.logger().debug("Unable to delete the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Pre-creates a file the container needs to open rather than create: the outputs file the
+     * kestra_logger callback writes to, and the log file Ansible's log_path setting targets. The
+     * container the command runs in may run as a non-root user while the working directory stays
+     * root-owned (Docker's VOLUME file-handling strategy copies it in as root and never chowns it),
+     * which blocks it from creating a new file there but not from opening an existing file with
+     * O_TRUNC. 0622 (owner read-write, others write-only) rather than 0666: both consumers, the
+     * kestra_logger callback's outputs file and Ansible's log_path, only ever open these files
+     * write-only, and the outputs file in particular can hold secrets a playbook fetched, so it
+     * must not be left world-readable. Best-effort only: a failure here just means whichever
+     * consumer needed the file is back to needing to create it itself.
+     * Idempotent: a no-op if the file already exists, since "log" resolves to the same path on
+     * every command in a multi-command task.
+     */
+    static void createContainerWritableFile(RunContext runContext, Path file) {
+        if (Files.exists(file)) {
+            return;
+        }
+        try {
+            Path created = runContext.workingDir().createFile(file.getFileName().toString());
+            Files.setPosixFilePermissions(created, UnixModeToPosixFilePermissions.toPosixPermissions(0622));
+        } catch (UnsupportedOperationException | IOException e) {
+            runContext.logger().debug("Unable to pre-create the file '{}': {}", file, e.getMessage());
         }
     }
 

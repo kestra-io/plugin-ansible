@@ -2,6 +2,7 @@ package io.kestra.plugin.ansible.cli;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,10 +61,12 @@ class AnsibleCLIOutputsBehaviorTest {
     void flattenHostResults_preservesPlaybookPlayTaskHostOrder() {
         var task1 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .name("task1")
-            .hosts(List.of(
-                host("h1", "ok", Map.of("k", "t1h1")),
-                host("h2", "ok", Map.of("k", "t1h2"))
-            ))
+            .hosts(
+                List.of(
+                    host("h1", "ok", Map.of("k", "t1h1")),
+                    host("h2", "ok", Map.of("k", "t1h2"))
+                )
+            )
             .build();
         var task2 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .name("task2")
@@ -271,5 +274,65 @@ class AnsibleCLIOutputsBehaviorTest {
     @Test
     void failOnOversizedOutputsFile_nothingOversized_doesNotThrow() {
         assertDoesNotThrow(() -> AnsibleCLI.failOnOversizedOutputsFile(0L, 1_000L));
+    }
+
+    // -------------------------------------------------------------------------
+    // readOutputsFile / createContainerWritableFile: issue #131, non-root container users
+    // -------------------------------------------------------------------------
+
+    @Test
+    void readOutputsFile_emptyFile_isTreatedAsMissingWithoutThrowing(@TempDir Path tempDir) throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        Path empty = tempDir.resolve("kestra-outputs-0.json");
+        Files.createFile(empty);
+
+        AnsibleCLI.OutputsFileRead result = task.readOutputsFile(runContext, empty, true, 10_000_000L);
+
+        assertThat(result.payload().isEmpty(), is(true));
+        assertThat(result.oversizedBytes(), is(0L));
+        // the placeholder is never written to by the callback on this path (crash, or a non-playbook
+        // command); it must not linger in the working directory, e.g. to be swept up by an
+        // outputFiles glob such as "*.json"
+        assertThat(Files.exists(empty), is(false));
+    }
+
+    @Test
+    void createContainerWritableFile_createsFileWritableButNotReadableByOthers() throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        // createContainerWritableFile goes through runContext.workingDir(), same as AnsibleCLI.run()
+        Path outputsFile = runContext.workingDir().path().resolve("kestra-outputs-0.json");
+
+        AnsibleCLI.createContainerWritableFile(runContext, outputsFile);
+
+        assertThat(Files.exists(outputsFile), is(true));
+
+        // POSIX permissions only apply on filesystems that support them (e.g. not Windows)
+        if (outputsFile.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+            // 0622: others can write (non-root container user opens with O_TRUNC) but not read,
+            // since the file may end up holding secrets a playbook fetched
+            assertThat(
+                Files.getPosixFilePermissions(outputsFile),
+                hasItem(PosixFilePermission.OTHERS_WRITE)
+            );
+            assertThat(
+                Files.getPosixFilePermissions(outputsFile),
+                not(hasItem(PosixFilePermission.OTHERS_READ))
+            );
+        }
+    }
+
+    @Test
+    void createContainerWritableFile_calledTwice_isIdempotent() throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        // "log" resolves to the same path on every command of a multi-command task
+        Path logFile = runContext.workingDir().path().resolve("log");
+
+        AnsibleCLI.createContainerWritableFile(runContext, logFile);
+        assertDoesNotThrow(() -> AnsibleCLI.createContainerWritableFile(runContext, logFile));
+
+        assertThat(Files.exists(logFile), is(true));
     }
 }

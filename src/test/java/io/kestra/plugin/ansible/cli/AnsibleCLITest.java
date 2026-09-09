@@ -432,6 +432,158 @@ class AnsibleCLITest {
         assertThat(failedResult.containsKey("stdout"), is(false));
     }
 
+    // kestra_logger.py falls back to a "::{...}::" stdout frame when it cannot write the outputs
+    // file (see createContainerWritableFile); in EXPLICIT mode that frame is the only carrier of
+    // the declared outputs map and must not be dropped by the merge loop in run(). The callback
+    // tags its own frame with "_kestra_outputs_fallback": true so it can be told apart from a
+    // user-authored "::{...}::" line on stdout with the same "outputs" key.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_explicitMode_markedStdoutFallbackFrame_recoversDeclaredOutputs() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "echo '::{\"outputs\": {\"outputs\": {\"foo\": \"bar\"}, \"playbooks\": [], "
+                            + "\"_kestra_outputs_fallback\": true}}::'"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        Object outputs = runOutput.getVars().get("outputs");
+        assertThat(outputs, is(instanceOf(Map.class)));
+        assertThat(((Map<String, Object>) outputs).get("foo"), is("bar"));
+        // the marker is internal wiring between the callback and AnsibleCLI, never a task output
+        assertThat(runOutput.getVars().containsKey("_kestra_outputs_fallback"), is(false));
+    }
+
+    // same frame shape as above but without the marker: a user-authored "::{...}::" line can
+    // carry an "outputs" key too, and must stay skipped in EXPLICIT mode exactly as it did before
+    // the fallback-recovery merge was introduced, otherwise raw playbook data could override a
+    // value declared through the bundled kestra module.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_explicitMode_unmarkedStdoutFrameWithOutputsKey_doesNotContributeOutputs() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "echo '::{\"outputs\": {\"outputs\": {\"foo\": \"bar\"}, \"playbooks\": []}}::'"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        Object outputs = runOutput.getVars().get("outputs");
+        assertThat(outputs, is(instanceOf(Map.class)));
+        assertThat(((Map<String, Object>) outputs).isEmpty(), is(true));
+    }
+
+    // same frame shape as the marked case above, in ALL mode: the callback never puts an
+    // "outputs" key in its own payload in this mode, so a frame that happens to carry one (with
+    // or without the marker) must stay skipped, proving the EXPLICIT-only gating above does not
+    // change ALL-mode behavior.
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_allMode_markedStdoutFrameWithOutputsKey_doesNotLeakIntoOutputs() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "echo '::{\"outputs\": {\"outputs\": {\"foo\": \"bar\"}, \"playbooks\": [], "
+                            + "\"_kestra_outputs_fallback\": true}}::'"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        // ALL mode rebuilds "outputs" from the (empty) playbooks list; the frame's nested
+        // "outputs" map must not leak through, and the marker must not surface as a var either
+        Object outputs = runOutput.getVars().get("outputs");
+        assertThat(outputs, is(instanceOf(List.class)));
+        assertThat((List<?>) outputs, is(empty()));
+        assertThat(runOutput.getVars().containsKey("_kestra_outputs_fallback"), is(false));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_allMode_unmarkedStdoutFrameWithOutputsKey_doesNotLeakIntoOutputs() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "echo '::{\"outputs\": {\"outputs\": {\"foo\": \"bar\"}, \"playbooks\": []}}::'"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        // ALL mode rebuilds "outputs" from the (empty) playbooks list; the frame's nested
+        // "outputs" map must not leak through
+        Object outputs = runOutput.getVars().get("outputs");
+        assertThat(outputs, is(instanceOf(List.class)));
+        assertThat((List<?>) outputs, is(empty()));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void run_withStructuredOutputs() throws Exception {
