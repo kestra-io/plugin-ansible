@@ -294,10 +294,11 @@ class AnsibleCLIOutputsBehaviorTest {
     }
 
     @Test
-    void createOutputsFilePlaceholder_createsWorldWritableFile(@TempDir Path tempDir) throws Exception {
+    void createOutputsFilePlaceholder_createsWorldWritableFile() throws Exception {
         AnsibleCLI task = newTask();
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
-        Path outputsFile = tempDir.resolve("kestra-outputs-0.json");
+        // createOutputsFilePlaceholder goes through runContext.workingDir(), same as AnsibleCLI.run()
+        Path outputsFile = runContext.workingDir().path().resolve("kestra-outputs-0.json");
 
         AnsibleCLI.createOutputsFilePlaceholder(runContext, outputsFile);
 

@@ -9,7 +9,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -46,6 +45,7 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
+import io.kestra.core.utils.UnixModeToPosixFilePermissions;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -923,8 +923,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      */
     static void createOutputsFilePlaceholder(RunContext runContext, Path outputsFile) {
         try {
-            Files.createFile(outputsFile);
-            Files.setPosixFilePermissions(outputsFile, PosixFilePermissions.fromString("rw-rw-rw-"));
+            Path created = runContext.workingDir().createFile(outputsFile.getFileName().toString());
+            Files.setPosixFilePermissions(created, UnixModeToPosixFilePermissions.toPosixPermissions(0666));
         } catch (UnsupportedOperationException | IOException e) {
             runContext.logger().debug("Unable to pre-create the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
         }
