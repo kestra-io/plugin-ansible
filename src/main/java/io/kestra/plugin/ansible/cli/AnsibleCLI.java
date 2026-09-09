@@ -573,10 +573,22 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     mergedPlaybooks.addAll(pbs);
                 }
 
-                // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below
+                // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below.
+                // In EXPLICIT mode the stdout fallback frame (see kestra_logger.py
+                // _log_kestra_outputs) is the only carrier of the declared outputs map: the
+                // outputs-file read below is empty precisely when that fallback fired, so recover
+                // it here instead of silently dropping every value the kestra module declared.
+                // ALL mode never puts an "outputs" key in the callback payload, so this is a no-op
+                // there; a user-authored "::{...}::" frame with an "outputs" key stays skipped.
                 for (Map.Entry<String, Object> e : vars.entrySet()) {
                     String key = e.getKey();
-                    if ("outputs".equals(key) || "playbooks".equals(key)) {
+                    if ("outputs".equals(key)) {
+                        if (rOutputsModeEnum == OutputsMode.EXPLICIT && e.getValue() instanceof Map<?, ?> explicit) {
+                            explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                        }
+                        continue;
+                    }
+                    if ("playbooks".equals(key)) {
                         continue;
                     }
                     mergedVars.put(key, e.getValue());
