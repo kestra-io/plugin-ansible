@@ -149,7 +149,7 @@ class CallbackModule(CallbackBase):
                 "Unable to write Kestra outputs file '%s': %s. This usually means the working "
                 "directory is not writable by the container user; falling back to sending the "
                 "payload over stdout instead, which can stall the log pipeline on very large "
-                "outputs (see issue #126). Set `taskRunner: {type: "
+                "outputs. Set `taskRunner: {type: "
                 "io.kestra.plugin.scripts.runner.docker.Docker, user: \"0\"}` to avoid it."
                 % (self._outputs_file_path, e)
             )
