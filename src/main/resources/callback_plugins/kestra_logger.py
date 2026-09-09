@@ -146,8 +146,16 @@ class CallbackModule(CallbackBase):
                 json.dump(payload, fh, default=str)
         except Exception as e:
             self._display.warning(
-                "Unable to write Kestra outputs file '%s': %s" % (self._outputs_file_path, e)
+                "Unable to write Kestra outputs file '%s': %s. Falling back to printing the "
+                "payload to stdout, which loses per-task logs and can stall on very large "
+                "outputs (see issue #126). This usually means the working directory is not "
+                "writable by the container user; set `taskRunner: {type: "
+                "io.kestra.plugin.scripts.runner.docker.Docker, user: \"0\"}` to avoid it."
+                % (self._outputs_file_path, e)
             )
+            # pre-v1.6.6 fallback shape: AnsibleCLI unwraps the outer "outputs" key from a
+            # "::{...}::" stdout frame into ScriptOutput.getVars(), same as the file payload
+            print("::" + json.dumps({"outputs": payload}, default=str) + "::")
 
     def _is_kestra_output_task(self, result):
         action = getattr(result._task, "action", None)

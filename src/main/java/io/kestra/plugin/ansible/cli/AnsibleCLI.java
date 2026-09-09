@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -513,6 +514,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             // multi-command task overwrite an earlier one's payload before we read it back.
             Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
             envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
+            // the container may run as a non-root user while the working dir stays root-owned, so
+            // it can't create a new file there; pre-create one it can open with O_TRUNC instead
+            createOutputsFilePlaceholder(runContext, outputsFile);
 
             // If multiple commands and outputLogFile enabled,
             // override ANSIBLE_LOG_PATH so each run writes a different file.
@@ -856,8 +860,33 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      *        do not look like an ansible-playbook invocation, to avoid spurious
      *        warnings on every auto-install/before-command in a multi-command task.
      */
+    /**
+     * Pre-creates the outputs file the kestra_logger callback writes to. The container the command
+     * runs in may run as a non-root user while the working directory stays root-owned (Docker's
+     * VOLUME file-handling strategy copies it in as root and never chowns it), which blocks the
+     * callback from creating the file itself but not from opening an existing, world-writable one
+     * with O_TRUNC. Best-effort only: a failure here just means the callback is back to needing to
+     * create the file itself, which readOutputsFile already tolerates.
+     */
+    static void createOutputsFilePlaceholder(RunContext runContext, Path outputsFile) {
+        try {
+            Files.createFile(outputsFile);
+            Files.setPosixFilePermissions(outputsFile, PosixFilePermissions.fromString("rw-rw-rw-"));
+        } catch (UnsupportedOperationException | IOException e) {
+            runContext.logger().debug("Unable to pre-create the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
+        }
+    }
+
     OutputsFileRead readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing, long maxOutputsSize) {
-        if (!Files.isRegularFile(outputsFile)) {
+        // a zero-byte file is the pre-created placeholder (see createOutputsFilePlaceholder) left
+        // untouched because the callback never ran or failed before writing; treat it as missing
+        boolean isMissingOrEmpty;
+        try {
+            isMissingOrEmpty = !Files.isRegularFile(outputsFile) || Files.size(outputsFile) == 0;
+        } catch (IOException e) {
+            isMissingOrEmpty = true;
+        }
+        if (isMissingOrEmpty) {
             if (warnIfMissing) {
                 runContext.logger().warn(
                     "Ansible outputs file '{}' was not found after running an ansible-playbook command; its "

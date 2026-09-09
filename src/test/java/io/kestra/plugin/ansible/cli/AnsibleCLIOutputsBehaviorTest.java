@@ -2,6 +2,7 @@ package io.kestra.plugin.ansible.cli;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,10 +61,12 @@ class AnsibleCLIOutputsBehaviorTest {
     void flattenHostResults_preservesPlaybookPlayTaskHostOrder() {
         var task1 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .name("task1")
-            .hosts(List.of(
-                host("h1", "ok", Map.of("k", "t1h1")),
-                host("h2", "ok", Map.of("k", "t1h2"))
-            ))
+            .hosts(
+                List.of(
+                    host("h1", "ok", Map.of("k", "t1h1")),
+                    host("h2", "ok", Map.of("k", "t1h2"))
+                )
+            )
             .build();
         var task2 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .name("task2")
@@ -271,5 +274,41 @@ class AnsibleCLIOutputsBehaviorTest {
     @Test
     void failOnOversizedOutputsFile_nothingOversized_doesNotThrow() {
         assertDoesNotThrow(() -> AnsibleCLI.failOnOversizedOutputsFile(0L, 1_000L));
+    }
+
+    // -------------------------------------------------------------------------
+    // readOutputsFile / createOutputsFilePlaceholder: issue #131, non-root container users
+    // -------------------------------------------------------------------------
+
+    @Test
+    void readOutputsFile_emptyFile_isTreatedAsMissingWithoutThrowing(@TempDir Path tempDir) throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        Path empty = tempDir.resolve("kestra-outputs-0.json");
+        Files.createFile(empty);
+
+        AnsibleCLI.OutputsFileRead result = task.readOutputsFile(runContext, empty, true, 10_000_000L);
+
+        assertThat(result.payload().isEmpty(), is(true));
+        assertThat(result.oversizedBytes(), is(0L));
+    }
+
+    @Test
+    void createOutputsFilePlaceholder_createsWorldWritableFile(@TempDir Path tempDir) throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        Path outputsFile = tempDir.resolve("kestra-outputs-0.json");
+
+        AnsibleCLI.createOutputsFilePlaceholder(runContext, outputsFile);
+
+        assertThat(Files.exists(outputsFile), is(true));
+
+        // POSIX permissions only apply on filesystems that support them (e.g. not Windows)
+        if (outputsFile.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+            assertThat(
+                Files.getPosixFilePermissions(outputsFile),
+                hasItem(PosixFilePermission.OTHERS_WRITE)
+            );
+        }
     }
 }
