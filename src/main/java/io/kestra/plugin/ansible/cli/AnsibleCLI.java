@@ -239,6 +239,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
     public static final String STREAM_LOGS_ENV = "KESTRA_STREAM_LOGS";
+    // kept in sync with the marker key kestra_logger.py's _log_kestra_outputs adds to its stdout fallback frame
+    private static final String EXPLICIT_OUTPUTS_FALLBACK_MARKER = "_kestra_outputs_fallback";
     private static final String INVENTORY_FILE = "inventory.ini";
     private static final String VM_ASSET_TYPE = "io.kestra.plugin.ee.assets.VM";
     private static final Pattern ASSET_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
@@ -574,21 +576,27 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 }
 
                 // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below.
-                // In EXPLICIT mode the stdout fallback frame (see kestra_logger.py
-                // _log_kestra_outputs) is the only carrier of the declared outputs map: the
-                // outputs-file read below is empty precisely when that fallback fired, so recover
-                // it here instead of silently dropping every value the kestra module declared.
-                // ALL mode never puts an "outputs" key in the callback payload, so this is a no-op
-                // there; a user-authored "::{...}::" frame with an "outputs" key stays skipped.
+                // An unmarked "outputs" key stays skipped in both modes, exactly as before
+                // commit cd79bfb: it may be a user-authored "::{...}::" stdout line, which is
+                // indistinguishable from the callback's own frame without the marker below.
+                // Only the callback's stdout fallback frame (see kestra_logger.py
+                // _log_kestra_outputs) carries EXPLICIT_OUTPUTS_FALLBACK_MARKER, so in EXPLICIT
+                // mode that marked frame is the sole trusted carrier of the declared outputs map,
+                // recovered here because the outputs-file read below is empty precisely when
+                // that fallback fired.
+                boolean isTrustedFallbackFrame = Boolean.TRUE.equals(vars.get(EXPLICIT_OUTPUTS_FALLBACK_MARKER));
                 for (Map.Entry<String, Object> e : vars.entrySet()) {
                     String key = e.getKey();
                     if ("outputs".equals(key)) {
-                        if (rOutputsModeEnum == OutputsMode.EXPLICIT && e.getValue() instanceof Map<?, ?> explicit) {
+                        if (
+                            rOutputsModeEnum == OutputsMode.EXPLICIT && isTrustedFallbackFrame
+                                && e.getValue() instanceof Map<?, ?> explicit
+                        ) {
                             explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
                         }
                         continue;
                     }
-                    if ("playbooks".equals(key)) {
+                    if ("playbooks".equals(key) || EXPLICIT_OUTPUTS_FALLBACK_MARKER.equals(key)) {
                         continue;
                     }
                     mergedVars.put(key, e.getValue());
