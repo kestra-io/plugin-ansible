@@ -942,8 +942,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * kestra_logger callback writes to, and the log file Ansible's log_path setting targets. The
      * container the command runs in may run as a non-root user while the working directory stays
      * root-owned (Docker's VOLUME file-handling strategy copies it in as root and never chowns it),
-     * which blocks it from creating a new file there but not from opening an existing,
-     * world-writable one with O_TRUNC. Best-effort only: a failure here just means whichever
+     * which blocks it from creating a new file there but not from opening an existing file with
+     * O_TRUNC. 0622 (owner read-write, others write-only) rather than 0666: both consumers, the
+     * kestra_logger callback's outputs file and Ansible's log_path, only ever open these files
+     * write-only, and the outputs file in particular can hold secrets a playbook fetched, so it
+     * must not be left world-readable. Best-effort only: a failure here just means whichever
      * consumer needed the file is back to needing to create it itself.
      * Idempotent: a no-op if the file already exists, since "log" resolves to the same path on
      * every command in a multi-command task.
@@ -954,7 +957,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
         try {
             Path created = runContext.workingDir().createFile(file.getFileName().toString());
-            Files.setPosixFilePermissions(created, UnixModeToPosixFilePermissions.toPosixPermissions(0666));
+            Files.setPosixFilePermissions(created, UnixModeToPosixFilePermissions.toPosixPermissions(0622));
         } catch (UnsupportedOperationException | IOException e) {
             runContext.logger().debug("Unable to pre-create the file '{}': {}", file, e.getMessage());
         }

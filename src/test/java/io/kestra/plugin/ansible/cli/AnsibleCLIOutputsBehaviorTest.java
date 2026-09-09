@@ -298,7 +298,7 @@ class AnsibleCLIOutputsBehaviorTest {
     }
 
     @Test
-    void createContainerWritableFile_createsWorldWritableFile() throws Exception {
+    void createContainerWritableFile_createsFileWritableButNotReadableByOthers() throws Exception {
         AnsibleCLI task = newTask();
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
         // createContainerWritableFile goes through runContext.workingDir(), same as AnsibleCLI.run()
@@ -310,9 +310,15 @@ class AnsibleCLIOutputsBehaviorTest {
 
         // POSIX permissions only apply on filesystems that support them (e.g. not Windows)
         if (outputsFile.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+            // 0622: others can write (non-root container user opens with O_TRUNC) but not read,
+            // since the file may end up holding secrets a playbook fetched
             assertThat(
                 Files.getPosixFilePermissions(outputsFile),
                 hasItem(PosixFilePermission.OTHERS_WRITE)
+            );
+            assertThat(
+                Files.getPosixFilePermissions(outputsFile),
+                not(hasItem(PosixFilePermission.OTHERS_READ))
             );
         }
     }
