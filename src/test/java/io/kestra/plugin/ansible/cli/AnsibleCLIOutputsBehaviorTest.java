@@ -291,6 +291,10 @@ class AnsibleCLIOutputsBehaviorTest {
 
         assertThat(result.payload().isEmpty(), is(true));
         assertThat(result.oversizedBytes(), is(0L));
+        // the placeholder is never written to by the callback on this path (crash, or a non-playbook
+        // command); it must not linger in the working directory, e.g. to be swept up by an
+        // outputFiles glob such as "*.json"
+        assertThat(Files.exists(empty), is(false));
     }
 
     @Test

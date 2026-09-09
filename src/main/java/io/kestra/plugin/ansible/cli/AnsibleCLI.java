@@ -896,6 +896,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     outputsFile
                 );
             }
+            // the placeholder itself is zero-byte and otherwise never cleaned up on this branch,
+            // contradicting the "deleted once consumed" contract and risking an upload via outputFiles globs
+            try {
+                Files.deleteIfExists(outputsFile);
+            } catch (IOException e) {
+                runContext.logger().debug("Unable to delete the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
+            }
             return OutputsFileRead.EMPTY;
         }
 
