@@ -860,23 +860,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      *        do not look like an ansible-playbook invocation, to avoid spurious
      *        warnings on every auto-install/before-command in a multi-command task.
      */
-    /**
-     * Pre-creates the outputs file the kestra_logger callback writes to. The container the command
-     * runs in may run as a non-root user while the working directory stays root-owned (Docker's
-     * VOLUME file-handling strategy copies it in as root and never chowns it), which blocks the
-     * callback from creating the file itself but not from opening an existing, world-writable one
-     * with O_TRUNC. Best-effort only: a failure here just means the callback is back to needing to
-     * create the file itself, which readOutputsFile already tolerates.
-     */
-    static void createOutputsFilePlaceholder(RunContext runContext, Path outputsFile) {
-        try {
-            Files.createFile(outputsFile);
-            Files.setPosixFilePermissions(outputsFile, PosixFilePermissions.fromString("rw-rw-rw-"));
-        } catch (UnsupportedOperationException | IOException e) {
-            runContext.logger().debug("Unable to pre-create the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
-        }
-    }
-
     OutputsFileRead readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing, long maxOutputsSize) {
         // a zero-byte file is the pre-created placeholder (see createOutputsFilePlaceholder) left
         // untouched because the callback never ran or failed before writing; treat it as missing
@@ -927,6 +910,23 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             } catch (IOException e) {
                 runContext.logger().debug("Unable to delete the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Pre-creates the outputs file the kestra_logger callback writes to. The container the command
+     * runs in may run as a non-root user while the working directory stays root-owned (Docker's
+     * VOLUME file-handling strategy copies it in as root and never chowns it), which blocks the
+     * callback from creating the file itself but not from opening an existing, world-writable one
+     * with O_TRUNC. Best-effort only: a failure here just means the callback is back to needing to
+     * create the file itself, which readOutputsFile already tolerates.
+     */
+    static void createOutputsFilePlaceholder(RunContext runContext, Path outputsFile) {
+        try {
+            Files.createFile(outputsFile);
+            Files.setPosixFilePermissions(outputsFile, PosixFilePermissions.fromString("rw-rw-rw-"));
+        } catch (UnsupportedOperationException | IOException e) {
+            runContext.logger().debug("Unable to pre-create the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
         }
     }
 
