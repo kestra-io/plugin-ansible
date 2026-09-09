@@ -516,14 +516,19 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
             // the container may run as a non-root user while the working dir stays root-owned, so
             // it can't create a new file there; pre-create one it can open with O_TRUNC instead
-            createOutputsFilePlaceholder(runContext, outputsFile);
+            createContainerWritableFile(runContext, outputsFile);
 
             // If multiple commands and outputLogFile enabled,
             // override ANSIBLE_LOG_PATH so each run writes a different file.
+            // The default ansibleConfig always sets log_path, so pre-create whichever file
+            // is actually targeted this run, otherwise Ansible warns on every non-root run.
             if (wantLogFile && multiCmd) {
                 Path logPath = workingDir.resolve("log-" + idx);
                 envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
                 perCommandLogs.add(logPath);
+                createContainerWritableFile(runContext, logPath);
+            } else {
+                createContainerWritableFile(runContext, workingDir.resolve("log"));
             }
 
             // First (before any user `cd`, so $PWD is the working-dir root) and on every command
@@ -861,7 +866,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      *        warnings on every auto-install/before-command in a multi-command task.
      */
     OutputsFileRead readOutputsFile(RunContext runContext, Path outputsFile, boolean warnIfMissing, long maxOutputsSize) {
-        // a zero-byte file is the pre-created placeholder (see createOutputsFilePlaceholder) left
+        // a zero-byte file is the pre-created placeholder (see createContainerWritableFile) left
         // untouched because the callback never ran or failed before writing; treat it as missing
         boolean isMissingOrEmpty;
         try {
@@ -914,19 +919,25 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     /**
-     * Pre-creates the outputs file the kestra_logger callback writes to. The container the command
-     * runs in may run as a non-root user while the working directory stays root-owned (Docker's
-     * VOLUME file-handling strategy copies it in as root and never chowns it), which blocks the
-     * callback from creating the file itself but not from opening an existing, world-writable one
-     * with O_TRUNC. Best-effort only: a failure here just means the callback is back to needing to
-     * create the file itself, which readOutputsFile already tolerates.
+     * Pre-creates a file the container needs to open rather than create: the outputs file the
+     * kestra_logger callback writes to, and the log file Ansible's log_path setting targets. The
+     * container the command runs in may run as a non-root user while the working directory stays
+     * root-owned (Docker's VOLUME file-handling strategy copies it in as root and never chowns it),
+     * which blocks it from creating a new file there but not from opening an existing,
+     * world-writable one with O_TRUNC. Best-effort only: a failure here just means whichever
+     * consumer needed the file is back to needing to create it itself.
+     * Idempotent: a no-op if the file already exists, since "log" resolves to the same path on
+     * every command in a multi-command task.
      */
-    static void createOutputsFilePlaceholder(RunContext runContext, Path outputsFile) {
+    static void createContainerWritableFile(RunContext runContext, Path file) {
+        if (Files.exists(file)) {
+            return;
+        }
         try {
-            Path created = runContext.workingDir().createFile(outputsFile.getFileName().toString());
+            Path created = runContext.workingDir().createFile(file.getFileName().toString());
             Files.setPosixFilePermissions(created, UnixModeToPosixFilePermissions.toPosixPermissions(0666));
         } catch (UnsupportedOperationException | IOException e) {
-            runContext.logger().debug("Unable to pre-create the Ansible outputs file '{}': {}", outputsFile, e.getMessage());
+            runContext.logger().debug("Unable to pre-create the file '{}': {}", file, e.getMessage());
         }
     }
 

@@ -277,7 +277,7 @@ class AnsibleCLIOutputsBehaviorTest {
     }
 
     // -------------------------------------------------------------------------
-    // readOutputsFile / createOutputsFilePlaceholder: issue #131, non-root container users
+    // readOutputsFile / createContainerWritableFile: issue #131, non-root container users
     // -------------------------------------------------------------------------
 
     @Test
@@ -294,13 +294,13 @@ class AnsibleCLIOutputsBehaviorTest {
     }
 
     @Test
-    void createOutputsFilePlaceholder_createsWorldWritableFile() throws Exception {
+    void createContainerWritableFile_createsWorldWritableFile() throws Exception {
         AnsibleCLI task = newTask();
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
-        // createOutputsFilePlaceholder goes through runContext.workingDir(), same as AnsibleCLI.run()
+        // createContainerWritableFile goes through runContext.workingDir(), same as AnsibleCLI.run()
         Path outputsFile = runContext.workingDir().path().resolve("kestra-outputs-0.json");
 
-        AnsibleCLI.createOutputsFilePlaceholder(runContext, outputsFile);
+        AnsibleCLI.createContainerWritableFile(runContext, outputsFile);
 
         assertThat(Files.exists(outputsFile), is(true));
 
@@ -311,5 +311,18 @@ class AnsibleCLIOutputsBehaviorTest {
                 hasItem(PosixFilePermission.OTHERS_WRITE)
             );
         }
+    }
+
+    @Test
+    void createContainerWritableFile_calledTwice_isIdempotent() throws Exception {
+        AnsibleCLI task = newTask();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        // "log" resolves to the same path on every command of a multi-command task
+        Path logFile = runContext.workingDir().path().resolve("log");
+
+        AnsibleCLI.createContainerWritableFile(runContext, logFile);
+        assertDoesNotThrow(() -> AnsibleCLI.createContainerWritableFile(runContext, logFile));
+
+        assertThat(Files.exists(logFile), is(true));
     }
 }
