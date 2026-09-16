@@ -209,7 +209,7 @@ import lombok.experimental.SuperBuilder;
                       log_path          = {{ workingDir }}/log
                       callback_plugins  = ./callback_plugins
                       callbacks_enabled = kestra_logger
-                      stdout_callback   = ansible.builtin.null
+                      stdout_callback   = null
                       result_format     = json
                       pretty_results    = true
                       library           = ./library
@@ -331,7 +331,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         log_path          = {{ workingDir }}/log
         callback_plugins  = ./callback_plugins
         callbacks_enabled = kestra_logger
-        stdout_callback   = ansible.builtin.null
+        stdout_callback   = null
         result_format     = json
         pretty_results    = true
         library           = ./library
@@ -342,7 +342,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             ALL (default) captures every per-host result of every playbook task; `outputs` is a list of per-host result maps.
             EXPLICIT captures only values declared in the playbook via the bundled `kestra` module, redacting per-host payloads to `{"changed": <bool>}` while keeping task names, timings, and statuses; `outputs` is then a map, not a list, so switching modes changes its shape for downstream references.
-            A custom `ansibleConfig` must keep `library = ./library` for the bundled module to resolve. In EXPLICIT mode it must also keep `stdout_callback = ansible.builtin.null`: another stdout callback renders per-host payloads itself (a failed host, or any host with `-v`), which the redaction cannot reach. In ALL mode the setting makes no difference to what is logged, since per-host results are logged from the captured outputs anyway.
+            A custom `ansibleConfig` must keep `library = ./library` for the bundled module to resolve. In EXPLICIT mode it must also keep `stdout_callback = null` (the plugin bundled at `callback_plugins/null.py`): another stdout callback renders per-host payloads itself (a failed host, or any host with `-v`), which the redaction cannot reach. In ALL mode the setting makes no difference to what is logged, since per-host results are logged from the captured outputs anyway.
             """
     )
     @Builder.Default
