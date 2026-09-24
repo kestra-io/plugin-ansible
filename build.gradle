@@ -53,6 +53,9 @@ dependencies {
 
     // Logs
     compileOnly'org.slf4j:slf4j-api'
+
+    // Dependency cache tar/gzip (AnsibleDependencyCache)
+    implementation "org.apache.commons:commons-compress"
 }
 
 
