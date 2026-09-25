@@ -14,6 +14,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.compress.archivers.tar.TarConstants;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
@@ -34,28 +35,35 @@ class AnsibleDependencyCacheTest {
     @Inject
     private RunContextFactory runContextFactory;
 
+    @TempDir
+    Path tempDir;
+
+    private Path file(String content) throws IOException {
+        return Files.writeString(Files.createTempFile(tempDir, "requirements", ".txt"), content);
+    }
+
     @Test
-    void computeHash_isStableForSameInputs() {
-        String h1 = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a", "b"), List.of("c"), "y".getBytes(StandardCharsets.UTF_8), "t".getBytes(StandardCharsets.UTF_8));
-        String h2 = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a", "b"), List.of("c"), "y".getBytes(StandardCharsets.UTF_8), "t".getBytes(StandardCharsets.UTF_8));
+    void computeHash_isStableForSameInputs() throws IOException {
+        String h1 = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a", "b"), List.of("c"), file("y"), file("t"));
+        String h2 = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a", "b"), List.of("c"), file("y"), file("t"));
 
         assertThat(h1, is(h2));
     }
 
     @Test
-    void computeHash_changesWithEachInput() {
+    void computeHash_changesWithEachInput() throws IOException {
         String base = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of(), null, null);
 
         assertThat(AnsibleDependencyCache.computeHash("Docker", "other-img", List.of("a"), List.of(), null, null), is(not(base)));
         assertThat(AnsibleDependencyCache.computeHash("Process", "img", List.of("a"), List.of(), null, null), is(not(base)));
         assertThat(AnsibleDependencyCache.computeHash("Docker", "img", List.of("b"), List.of(), null, null), is(not(base)));
         assertThat(AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of("c"), null, null), is(not(base)));
-        assertThat(AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of(), "y".getBytes(StandardCharsets.UTF_8), null), is(not(base)));
-        assertThat(AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of(), null, "t".getBytes(StandardCharsets.UTF_8)), is(not(base)));
+        assertThat(AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of(), file("y"), null), is(not(base)));
+        assertThat(AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of(), null, file("t")), is(not(base)));
     }
 
     @Test
-    void computeHash_doesNotCollideAcrossDependencyListBoundary() {
+    void computeHash_doesNotCollideAcrossDependencyListBoundary() throws IOException {
         // ["a","b"] galaxy / [] python must not hash the same as ["a"] galaxy / ["b"] python
         String h1 = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a", "b"), List.of(), null, null);
         String h2 = AnsibleDependencyCache.computeHash("Docker", "img", List.of("a"), List.of("b"), null, null);

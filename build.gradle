@@ -56,6 +56,7 @@ dependencies {
 
     // Dependency cache tar/gzip (AnsibleDependencyCache)
     implementation "org.apache.commons:commons-compress"
+    implementation "commons-io:commons-io"
 }
 
 

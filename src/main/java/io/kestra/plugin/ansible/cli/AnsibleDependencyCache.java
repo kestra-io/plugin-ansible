@@ -11,10 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
@@ -26,65 +26,66 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.compress.archivers.tar.TarConstants;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
+import org.apache.commons.io.FileUtils;
 
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.UnixModeToPosixFilePermissions;
 
-/**
- * Caches the {@code .kestra_ansible} working-directory subtree that {@link AnsibleCLI} installs
- * Galaxy collections/roles and Python packages into (issue #135): key computation, and tar/gzip
- * packing and unpacking against Kestra's storage cache API.
- */
+/** Caches the working-dir tree {@link AnsibleCLI} installs Galaxy and Python dependencies into. */
 final class AnsibleDependencyCache {
-    // Bump when the layout of what gets tarred changes, to avoid restoring an incompatible cache.
+    // bump when the archive layout changes
     private static final int CACHE_FORMAT_VERSION = 0;
     static final String CACHE_ID = "ansible-dependencies-v" + CACHE_FORMAT_VERSION;
 
-    // Working-directory subtree that Galaxy collections/roles and pip packages install into, kept
-    // out of the image's default locations so it is shared by every command in a task and cacheable.
     static final String DEPENDENCY_ROOT = ".kestra_ansible";
-    // Touched only once the whole install chain succeeds; absence tells a failed install from one that never ran.
+    // written only when the whole install chain succeeded
     static final String COMPLETE_MARKER = DEPENDENCY_ROOT + "/.complete";
 
     private AnsibleDependencyCache() {
     }
 
-    /**
-     * SHA-256 hash of everything that determines what gets installed, so a change to any of it
-     * invalidates the cache. Every field is length-prefixed so adjacent values (e.g. two dependency
-     * entries, or the boundary between the two dependency lists) can never collide by concatenation.
-     */
+    /** SHA-256 over every install input, each field length-prefixed so adjacent values cannot collide. */
     static String computeHash(
         String taskRunnerType,
         String containerImage,
         List<String> galaxyDependencies,
         List<String> pythonDependencies,
-        byte[] requirementsYml,
-        byte[] requirementsTxt) {
+        Path requirementsYml,
+        Path requirementsTxt) throws IOException {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             updateField(digest, String.valueOf(CACHE_FORMAT_VERSION));
             updateField(digest, taskRunnerType);
             updateField(digest, containerImage == null ? "" : containerImage);
-            updateField(digest, String.valueOf(galaxyDependencies.size()));
-            for (String dependency : galaxyDependencies) {
-                updateField(digest, dependency);
-            }
-            updateField(digest, String.valueOf(pythonDependencies.size()));
-            for (String dependency : pythonDependencies) {
-                updateField(digest, dependency);
-            }
-            updateField(digest, requirementsYml == null ? new byte[0] : requirementsYml);
-            updateField(digest, requirementsTxt == null ? new byte[0] : requirementsTxt);
+            updateField(digest, galaxyDependencies);
+            updateField(digest, pythonDependencies);
+            updateField(digest, requirementsYml);
+            updateField(digest, requirementsTxt);
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException e) {
-            // SHA-256 is a JDK-mandatory algorithm
             throw new IllegalStateException(e);
         }
     }
 
+    private static void updateField(MessageDigest digest, List<String> values) {
+        updateField(digest, String.valueOf(values.size()));
+        values.forEach(value -> updateField(digest, value));
+    }
+
     private static void updateField(MessageDigest digest, String value) {
         updateField(digest, value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    // streamed, so a large user-supplied file never lands whole in the worker heap
+    private static void updateField(MessageDigest digest, Path file) throws IOException {
+        if (file == null) {
+            updateField(digest, new byte[0]);
+            return;
+        }
+        digest.update(ByteBuffer.allocate(Long.BYTES).putLong(Files.size(file)).array());
+        try (InputStream in = new DigestInputStream(Files.newInputStream(file), digest)) {
+            in.transferTo(OutputStream.nullOutputStream());
+        }
     }
 
     private static void updateField(MessageDigest digest, byte[] value) {
@@ -92,10 +93,7 @@ final class AnsibleDependencyCache {
         digest.update(value);
     }
 
-    /**
-     * Single-quotes a dependency string for safe use in a shell command line, rejecting characters
-     * that cannot be escaped this way.
-     */
+    /** Single-quotes a value for a shell command line, rejecting what single quotes cannot hold. */
     static String quote(String propertyName, String value) {
         if (value.indexOf('\0') >= 0 || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
             throw new IllegalArgumentException(
@@ -111,12 +109,7 @@ final class AnsibleDependencyCache {
             .collect(Collectors.joining(" "));
     }
 
-    /**
-     * Restores a previously cached {@code .kestra_ansible} tree into the working directory.
-     * Returns {@code false} on a cache miss, and also on any I/O or validation failure (corrupt
-     * archive, tar-slip attempt): callers fall back to a normal install either way, so a cache
-     * problem never fails the task.
-     */
+    /** Returns false on a miss or any failure, so a broken cache only means a normal install. */
     static boolean restore(RunContext runContext, Path workingDir, String hash, Duration ttl) {
         Path root = workingDir.resolve(DEPENDENCY_ROOT).normalize();
         try {
@@ -138,15 +131,14 @@ final class AnsibleDependencyCache {
             return true;
         } catch (IOException e) {
             runContext.logger().warn("Unable to restore the Ansible dependency cache, falling back to a normal install: {}", e.getMessage());
-            deleteRecursively(root);
+            FileUtils.deleteQuietly(root.toFile());
             return false;
         }
     }
 
     private static void extractEntry(TarArchiveInputStream tais, TarArchiveEntry entry, Path root) throws IOException {
         Path outputPath = root.resolve(entry.getName()).normalize();
-        // The restored tree ends up on ANSIBLE_COLLECTIONS_PATH/PYTHONPATH, i.e. it is executable
-        // code: an entry name containing "../" must never be allowed to write outside the cache root.
+        // the restored tree is executable code, nothing may land outside the root
         if (!outputPath.startsWith(root)) {
             throw new IOException("cache entry escapes the cache root: " + entry.getName());
         }
@@ -169,38 +161,24 @@ final class AnsibleDependencyCache {
             Files.createLink(outputPath, target);
         } else if (entry.isDirectory()) {
             Files.createDirectories(outputPath);
+            restoreMode(outputPath, entry);
         } else {
             Files.createDirectories(outputPath.getParent());
             try (OutputStream os = Files.newOutputStream(outputPath)) {
                 tais.transferTo(os);
             }
-            try {
-                Files.setPosixFilePermissions(outputPath, UnixModeToPosixFilePermissions.toPosixPermissions(entry.getMode()));
-            } catch (UnsupportedOperationException | IOException e) {
-                // best effort: file system may not support POSIX permissions (e.g. Windows)
-            }
+            restoreMode(outputPath, entry);
         }
     }
 
-    private static void deleteRecursively(Path root) {
-        if (!Files.exists(root)) {
-            return;
-        }
-        try (var paths = Files.walk(root)) {
-            paths.sorted(Comparator.reverseOrder()).forEach(path ->
-            {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException ignored) {
-                    // best effort cleanup of a partially-restored, rejected cache
-                }
-            });
-        } catch (IOException ignored) {
-            // best effort cleanup
+    private static void restoreMode(Path path, TarArchiveEntry entry) {
+        try {
+            Files.setPosixFilePermissions(path, UnixModeToPosixFilePermissions.toPosixPermissions(entry.getMode()));
+        } catch (UnsupportedOperationException | IOException ignored) {
+            // no POSIX permissions on this file system
         }
     }
 
-    /** Tars and gzips the {@code .kestra_ansible} tree and uploads it to Kestra's storage cache. */
     static void upload(RunContext runContext, Path workingDir, String hash) throws IOException {
         Path root = workingDir.resolve(DEPENDENCY_ROOT).normalize();
         Path tempFile = runContext.workingDir().createTempFile(".tar.gz");
@@ -241,8 +219,8 @@ final class AnsibleDependencyCache {
                     TarArchiveEntry entry = new TarArchiveEntry(path.toFile(), entryName);
                     try {
                         entry.setMode(UnixModeToPosixFilePermissions.fromPosixFilePermissions(Files.getPosixFilePermissions(path)));
-                    } catch (UnsupportedOperationException | IOException e) {
-                        // best effort: file system may not support POSIX permissions (e.g. Windows)
+                    } catch (UnsupportedOperationException | IOException ignored) {
+                        // no POSIX permissions on this file system
                     }
                     taos.putArchiveEntry(entry);
                     if (!Files.isDirectory(path)) {

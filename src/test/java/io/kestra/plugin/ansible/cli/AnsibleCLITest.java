@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
@@ -1860,8 +1861,8 @@ class AnsibleCLITest {
 
         ScriptOutput out1 = firstRun.run(firstContext);
         assertThat(out1.getExitCode(), is(0));
-        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.upload.duration")), is(true));
-        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.download.duration")), is(false));
+        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
 
         AnsibleCLI secondRun = AnsibleCLI.builder()
             .id(IdUtils.create())
@@ -1874,8 +1875,8 @@ class AnsibleCLITest {
 
         ScriptOutput out2 = secondRun.run(secondContext);
         assertThat(out2.getExitCode(), is(0));
-        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.download.duration")), is(true));
-        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.upload.duration")), is(false));
+        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(true));
+        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
     }
 
     // issue #135: a requirements.yml coming from namespace files must be loaded onto the worker
@@ -1905,13 +1906,13 @@ class AnsibleCLITest {
 
         String expectedHash = AnsibleDependencyCache.computeHash(
             firstRun.getTaskRunner().getType(), ANSIBLE_IMAGE, List.of(), List.of(),
-            requirementsYml.getBytes(StandardCharsets.UTF_8), null
+            Files.writeString(Files.createTempFile("requirements", ".yml"), requirementsYml), null
         );
         firstContext.storage().deleteCacheFile(AnsibleDependencyCache.CACHE_ID, expectedHash);
 
         ScriptOutput out1 = firstRun.run(firstContext);
         assertThat(out1.getExitCode(), is(0));
-        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.upload.duration")), is(true));
+        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
 
         AnsibleCLI secondRun = AnsibleCLI.builder()
             .id(IdUtils.create())
@@ -1924,7 +1925,7 @@ class AnsibleCLITest {
 
         ScriptOutput out2 = secondRun.run(secondContext);
         assertThat(out2.getExitCode(), is(0));
-        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.download.duration")), is(true));
+        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(true));
     }
 
     // issue #135: before this fix, each command ran in its own container and auto-install only ran
@@ -1971,8 +1972,39 @@ class AnsibleCLITest {
         ScriptOutput runOutput = execute.run(runContext);
 
         assertThat(runOutput.getExitCode(), is(0));
-        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.download.duration")), is(false));
-        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.upload.duration")), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
+    }
+
+    @Test
+    void run_withPythonDependencies_installsAndCachesOnSecondRun() throws Exception {
+        List<String> pythonDependencies = List.of("proxmoxer==2.2.0");
+        // the path proves it resolved from the scoped tree, not the image's venv
+        List<String> verify = List.of("python3 -c 'import proxmoxer; print(proxmoxer.__file__)' | grep -q .kestra_ansible/python");
+
+        for (int run = 1; run <= 2; run++) {
+            AnsibleCLI task = AnsibleCLI.builder()
+                .id(IdUtils.create())
+                .type(AnsibleCLI.class.getName())
+                .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+                .pythonDependencies(Property.ofValue(pythonDependencies))
+                .commands(Property.ofValue(verify))
+                .build();
+            RunContext context = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+            if (run == 1) {
+                // storage-local persists across test runs, so purge to make the first run a miss
+                context.storage().deleteCacheFile(
+                    AnsibleDependencyCache.CACHE_ID,
+                    AnsibleDependencyCache.computeHash(task.getTaskRunner().getType(), ANSIBLE_IMAGE, List.of(), pythonDependencies, null, null)
+                );
+            }
+
+            assertThat(task.run(context).getExitCode(), is(0));
+            boolean uploaded = context.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD));
+            boolean restored = context.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD));
+            assertThat("run " + run + " uploaded", uploaded, is(run == 1));
+            assertThat("run " + run + " restored", restored, is(run == 2));
+        }
     }
 
     @Test
@@ -1993,8 +2025,8 @@ class AnsibleCLITest {
             // Expected: ansible-galaxy collection install fails on a nonexistent collection.
         }
 
-        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.download.duration")), is(false));
-        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.upload.duration")), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
     }
 
     @Test
@@ -2027,7 +2059,7 @@ class AnsibleCLITest {
         }
 
         // a successful pip step after the failed galaxy step must not reach the completion marker
-        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.download.duration")), is(false));
-        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals("deps.cache.upload.duration")), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
     }
 }
