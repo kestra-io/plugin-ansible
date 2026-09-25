@@ -315,17 +315,20 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     private static final String REQUIREMENTS_YML = "requirements.yml";
     private static final String REQUIREMENTS_TXT = "requirements.txt";
-    private static final String DEPS_DIR = AnsibleDependencyCache.DEPENDENCY_ROOT;
+    // working-dir root, exported before user beforeCommands run, so a `cd` there cannot redirect installs or the marker
+    private static final String ROOT = "$KESTRA_ANSIBLE_ROOT";
+    private static final String DEPS = ROOT + "/" + AnsibleDependencyCache.DEPENDENCY_ROOT;
     private static final String GALAXY_REQUIREMENTS_INSTALL = "ansible-galaxy install -r " + REQUIREMENTS_YML;
-    private static final String SCOPED_PIP_INSTALL = "pip install --no-cache-dir --target " + DEPS_DIR + "/python";
+    private static final String SCOPED_PIP_INSTALL = "pip install --no-cache-dir --target \"" + DEPS + "/python\"";
     static final String METRIC_CACHE_DOWNLOAD = "deps.cache.download.duration";
     static final String METRIC_CACHE_UPLOAD = "deps.cache.upload.duration";
 
     // Prepended so installed dependencies win, while image-bundled ones stay as a fallback.
     private static final List<String> DEPENDENCY_PATH_EXPORTS = List.of(
-        "export ANSIBLE_COLLECTIONS_PATH=\"$PWD/" + DEPS_DIR + "/collections:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}\"",
-        "export ANSIBLE_ROLES_PATH=\"$PWD/" + DEPS_DIR + "/roles:${ANSIBLE_ROLES_PATH:-$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles}\"",
-        "export PYTHONPATH=\"$PWD/" + DEPS_DIR + "/python${PYTHONPATH:+:$PYTHONPATH}\""
+        "export KESTRA_ANSIBLE_ROOT=\"$PWD\"",
+        "export ANSIBLE_COLLECTIONS_PATH=\"" + DEPS + "/collections:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}\"",
+        "export ANSIBLE_ROLES_PATH=\"" + DEPS + "/roles:${ANSIBLE_ROLES_PATH:-$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles}\"",
+        "export PYTHONPATH=\"" + DEPS + "/python${PYTHONPATH:+:$PYTHONPATH}\""
     );
 
     @Schema(
@@ -514,12 +517,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Dependency cache time-to-live",
         description = """
-            How long a cached dependency install stays valid before it is rebuilt from scratch. Unset by default, meaning the cache never expires on its own.
-            Set this when relying on an unpinned dependency version or a floating image tag (the default `containerImage` uses `latest`), since the cache key does not track the image digest and would otherwise keep serving collections/packages built against an older image indefinitely.
+            How long a cached dependency install stays valid before it is rebuilt from scratch. Default 7 days.
+            The cache key does not track the image digest or new releases of unpinned dependencies, so the TTL bounds how long a floating tag (the default `containerImage` uses `latest`) or an unpinned version can stay stale. Pin versions and image tags to cache for longer.
             """
     )
+    @Builder.Default
     @PluginProperty(group = "execution")
-    protected Property<Duration> dependencyCacheTtl;
+    protected Property<Duration> dependencyCacheTtl = Property.ofValue(Duration.ofDays(7));
 
     @PluginProperty(group = "source")
     private NamespaceFiles namespaceFiles;
@@ -802,19 +806,19 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * {@link AnsibleDependencyCache#DEPENDENCY_ROOT}. With nothing to install, keeps the legacy unscoped commands.
      */
     private DependencyInstall planDependencyInstall(RunContext runContext, Path workingDir) throws IllegalVariableEvaluationException, IOException {
-        List<String> rGalaxyDependencies = runContext.render(this.galaxyDependencies).asList(String.class);
-        List<String> rPythonDependencies = runContext.render(this.pythonDependencies).asList(String.class);
-        boolean rAutoInstallGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElseThrow();
-        boolean rAutoInstallPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElseThrow();
+        var rGalaxyDependencies = runContext.render(this.galaxyDependencies).asList(String.class);
+        var rPythonDependencies = runContext.render(this.pythonDependencies).asList(String.class);
+        var rAutoInstallGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
+        var rAutoInstallPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElse(true);
 
         // only files present now are part of the key, one created by beforeCommands installs uncached
-        Path requirementsYml = workingDir.resolve(REQUIREMENTS_YML);
-        Path requirementsTxt = workingDir.resolve(REQUIREMENTS_TXT);
-        boolean hasRequirementsYml = rAutoInstallGalaxy && Files.isRegularFile(requirementsYml);
-        boolean hasRequirementsTxt = rAutoInstallPython && Files.isRegularFile(requirementsTxt);
+        var requirementsYml = workingDir.resolve(REQUIREMENTS_YML);
+        var requirementsTxt = workingDir.resolve(REQUIREMENTS_TXT);
+        var hasRequirementsYml = rAutoInstallGalaxy && Files.isRegularFile(requirementsYml);
+        var hasRequirementsTxt = rAutoInstallPython && Files.isRegularFile(requirementsTxt);
 
         if (rGalaxyDependencies.isEmpty() && rPythonDependencies.isEmpty() && !hasRequirementsYml && !hasRequirementsTxt) {
-            List<String> legacyCommands = new ArrayList<>();
+            var legacyCommands = new ArrayList<String>();
             if (rAutoInstallPython) {
                 legacyCommands.add(ifFilePresent(REQUIREMENTS_TXT, "pip install --no-cache-dir -r " + REQUIREMENTS_TXT));
             }
@@ -824,7 +828,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             return new DependencyInstall(List.of(), legacyCommands, null);
         }
 
-        String hash = AnsibleDependencyCache.computeHash(
+        var hash = AnsibleDependencyCache.computeHash(
             this.taskRunner.getType(),
             // a non-container runner never reads containerImage
             this.taskRunner instanceof Process ? null : runContext.render(this.containerImage).as(String.class).orElse(null),
@@ -833,26 +837,26 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             hasRequirementsYml ? requirementsYml : null,
             hasRequirementsTxt ? requirementsTxt : null
         );
-        boolean rCacheEnabled = runContext.render(this.dependencyCacheEnabled).as(Boolean.class).orElse(true);
-        boolean restored = rCacheEnabled && restoreDependencyCache(runContext, workingDir, hash);
+        var rCacheEnabled = runContext.render(this.dependencyCacheEnabled).as(Boolean.class).orElse(true);
+        var restored = rCacheEnabled && restoreDependencyCache(runContext, workingDir, hash);
 
-        List<String> commands = new ArrayList<>();
+        var commands = new ArrayList<String>();
         if (!restored) {
             // one &&-chain with no `[ ! -f ]` guard: a guard's || would let a failed step still reach the marker
-            List<String> steps = new ArrayList<>();
+            var steps = new ArrayList<String>();
             if (!rGalaxyDependencies.isEmpty()) {
                 steps.add("ansible-galaxy collection install " + AnsibleDependencyCache.quoteAll("galaxyDependencies", rGalaxyDependencies));
             }
             if (hasRequirementsYml) {
-                steps.add(GALAXY_REQUIREMENTS_INSTALL);
+                steps.add("ansible-galaxy install -r " + rooted(REQUIREMENTS_YML));
             }
             if (!rPythonDependencies.isEmpty()) {
                 steps.add(SCOPED_PIP_INSTALL + " " + AnsibleDependencyCache.quoteAll("pythonDependencies", rPythonDependencies));
             }
             if (hasRequirementsTxt) {
-                steps.add(SCOPED_PIP_INSTALL + " -r " + REQUIREMENTS_TXT);
+                steps.add(SCOPED_PIP_INSTALL + " -r " + rooted(REQUIREMENTS_TXT));
             }
-            steps.add("touch " + AnsibleDependencyCache.COMPLETE_MARKER);
+            steps.add("touch " + rooted(AnsibleDependencyCache.COMPLETE_MARKER));
             commands.add(String.join(" && ", steps));
         }
         if (rAutoInstallGalaxy && !hasRequirementsYml) {
@@ -869,9 +873,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return "[ ! -f " + file + " ] || " + command;
     }
 
+    private static String rooted(String path) {
+        return "\"" + ROOT + "/" + path + "\"";
+    }
+
     private boolean restoreDependencyCache(RunContext runContext, Path workingDir, String hash) throws IllegalVariableEvaluationException {
-        Duration rTtl = runContext.render(this.dependencyCacheTtl).as(Duration.class).orElse(null);
-        Instant start = Instant.now();
+        var rTtl = runContext.render(this.dependencyCacheTtl).as(Duration.class).orElse(null);
+        var start = Instant.now();
         if (!AnsibleDependencyCache.restore(runContext, workingDir, hash, rTtl)) {
             return false;
         }
@@ -885,12 +893,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             runContext.logger().warn("Ansible dependency cache not saved: the dependency install failed, or the task runner did not return the working directory.");
             return;
         }
-        Instant start = Instant.now();
+        var start = Instant.now();
         try {
             AnsibleDependencyCache.upload(runContext, workingDir, hash);
             runContext.metric(Timer.of(METRIC_CACHE_UPLOAD, Duration.between(start, Instant.now())));
         } catch (IOException e) {
-            runContext.logger().warn("Unable to save the Ansible dependency cache: {}", e.getMessage());
+            runContext.logger().warn("Unable to save the Ansible dependency cache, the next run installs again.");
+            runContext.logger().debug("Ansible dependency cache upload failed", e);
         }
     }
 

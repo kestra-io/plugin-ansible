@@ -6,6 +6,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -1950,10 +1951,82 @@ class AnsibleCLITest {
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        // shares its key with the galaxy cache test: purge so command 1 installs instead of restoring
+        runContext.storage().deleteCacheFile(
+            AnsibleDependencyCache.CACHE_ID,
+            AnsibleDependencyCache.computeHash(execute.getTaskRunner().getType(), ANSIBLE_IMAGE, List.of("community.general:10.7.0"), List.of(), null, null)
+        );
 
         ScriptOutput runOutput = execute.run(runContext);
 
         assertThat(runOutput.getExitCode(), is(0));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+    }
+
+    @Test
+    void run_beforeCommandsCd_stillInstallsIntoTheWorkingDirTree() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .pythonDependencies(Property.ofValue(List.of("proxmoxer==2.2.0")))
+            // unique key per run, and a root-relative file the install must still find after the cd
+            .inputFiles(Map.of("requirements.txt", "# cd " + IdUtils.create() + "\n"))
+            .beforeCommands(Property.ofValue(List.of("mkdir -p sub && cd sub")))
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "test ! -d .kestra_ansible && python3 -c 'import proxmoxer; print(proxmoxer.__file__)' | grep -q '/.kestra_ansible/python/'"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        ScriptOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+        // the marker landed in the root tree, not under sub/, so the install was cached
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+    }
+
+    @Test
+    void run_dependencyCacheTtl_expiredEntryIsRebuilt() throws Exception {
+        // comment-only requirements.txt: pip succeeds offline, and the id gives this test its own key
+        var requirements = Map.of("requirements.txt", "# ttl " + IdUtils.create() + "\n");
+
+        var seed = runWithRequirements(requirements, Duration.ofSeconds(1));
+        assertThat(cacheMetrics(seed), is(List.of(AnsibleCLI.METRIC_CACHE_UPLOAD)));
+
+        Thread.sleep(2_000);
+
+        var expired = runWithRequirements(requirements, Duration.ofSeconds(1));
+        assertThat(cacheMetrics(expired), is(List.of(AnsibleCLI.METRIC_CACHE_UPLOAD)));
+
+        // same key under the default TTL: the entry the expired run just rebuilt is restored
+        var withinDefaultTtl = runWithRequirements(requirements, null);
+        assertThat(cacheMetrics(withinDefaultTtl), is(List.of(AnsibleCLI.METRIC_CACHE_DOWNLOAD)));
+    }
+
+    private RunContext runWithRequirements(Map<String, String> inputFiles, Duration ttl) throws Exception {
+        var builder = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .inputFiles(inputFiles)
+            .commands(Property.ofValue(List.of("true")));
+        if (ttl != null) {
+            builder.dependencyCacheTtl(Property.ofValue(ttl));
+        }
+        var task = builder.build();
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        assertThat(task.run(runContext).getExitCode(), is(0));
+        return runContext;
+    }
+
+    private static List<String> cacheMetrics(RunContext runContext) {
+        return runContext.metrics().stream().map(m -> m.getName()).filter(n -> n.startsWith("deps.cache.")).toList();
     }
 
     @Test

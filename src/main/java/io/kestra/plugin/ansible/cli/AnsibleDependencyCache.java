@@ -130,7 +130,8 @@ final class AnsibleDependencyCache {
             }
             return true;
         } catch (IOException e) {
-            runContext.logger().warn("Unable to restore the Ansible dependency cache, falling back to a normal install: {}", e.getMessage());
+            runContext.logger().warn("Unable to restore the Ansible dependency cache, falling back to a normal install.");
+            runContext.logger().debug("Ansible dependency cache restore failed", e);
             FileUtils.deleteQuietly(root.toFile());
             return false;
         }
