@@ -1,7 +1,12 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -19,11 +24,13 @@ import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.tasks.NamespaceFiles;
 import io.kestra.core.queues.QueueFactoryInterface;
 import io.kestra.core.queues.QueueInterface;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.storages.NamespaceFactory;
 import io.kestra.core.storages.StorageInterface;
 import io.kestra.core.tenant.TenantService;
 import io.kestra.core.utils.IdUtils;
@@ -41,12 +48,16 @@ import static org.hamcrest.Matchers.*;
 
 @KestraTest
 class AnsibleCLITest {
+    private static final String ANSIBLE_IMAGE = "cytopia/ansible:latest-tools";
 
     @Inject
     private RunContextFactory runContextFactory;
 
     @Inject
     private StorageInterface storage;
+
+    @Inject
+    private NamespaceFactory namespaceFactory;
 
     @Inject
     private TestAssetManagerFactory assetManagerFactory;
@@ -1821,5 +1832,307 @@ class AnsibleCLITest {
 
         // the failure reason is kept on purpose in EXPLICIT mode, so a redacted run stays debuggable
         assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("module failed on purpose")), is(true));
+    }
+
+    // issue #135: galaxyDependencies/pythonDependencies install into a working-directory subtree
+    // and are cached across runs, instead of the image's default (and per-command-ephemeral)
+    // ~/.ansible/collections and virtual environment.
+    @Test
+    void run_withGalaxyDependencies_installsAndCachesOnSecondRun() throws Exception {
+        List<String> galaxyDependencies = List.of("community.general:10.7.0");
+        // 10.7.0 is older than the image-bundled 13.3.0: a match here proves the pinned version
+        // was actually installed and resolved ahead of the bundled one, not just "already satisfied".
+        List<String> verify = List.of("ansible-galaxy collection list community.general | grep -q 10.7.0");
+
+        AnsibleCLI firstRun = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .galaxyDependencies(Property.ofValue(galaxyDependencies))
+            .commands(Property.ofValue(verify))
+            .build();
+        RunContext firstContext = TestsUtils.mockRunContext(runContextFactory, firstRun, Map.of());
+
+        // storage-local persists across test runs on the same machine: purge any cache entry a
+        // previous run of this same test may have left, so "first run" is reliably a miss.
+        String expectedHash = AnsibleDependencyCache.computeHash(
+            firstRun.getTaskRunner().getType(), ANSIBLE_IMAGE, galaxyDependencies, List.of(), null, null
+        );
+        firstContext.storage().deleteCacheFile(AnsibleDependencyCache.CACHE_ID, expectedHash);
+
+        ScriptOutput out1 = firstRun.run(firstContext);
+        assertThat(out1.getExitCode(), is(0));
+        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+
+        AnsibleCLI secondRun = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .galaxyDependencies(Property.ofValue(galaxyDependencies))
+            .commands(Property.ofValue(verify))
+            .build();
+        RunContext secondContext = TestsUtils.mockRunContext(runContextFactory, secondRun, Map.of());
+
+        ScriptOutput out2 = secondRun.run(secondContext);
+        assertThat(out2.getExitCode(), is(0));
+        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(true));
+        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
+    }
+
+    // issue #135: a requirements.yml coming from namespace files must be loaded onto the worker
+    // before the cache key is computed (namespace files used to load lazily, per command).
+    @Test
+    void run_requirementsYmlFromNamespaceFiles_hitsCacheOnSecondRun() throws Exception {
+        String requirementsYml = """
+            ---
+            roles:
+              - name: geerlingguy.docker
+            """;
+        // Use a role rather than a collection: roles are never bundled with Ansible, so a
+        // successful `ansible-galaxy role list` for it proves the install actually ran.
+        List<String> verify = List.of("ansible-galaxy role list geerlingguy.docker");
+
+        AnsibleCLI firstRun = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .namespaceFiles(NamespaceFiles.builder().build())
+            .commands(Property.ofValue(verify))
+            .build();
+        RunContext firstContext = TestsUtils.mockRunContext(runContextFactory, firstRun, Map.of());
+
+        namespaceFactory.of(TenantService.MAIN_TENANT, firstContext.flowInfo().namespace(), storage)
+            .putFile(Path.of("/requirements.yml"), new ByteArrayInputStream(requirementsYml.getBytes(StandardCharsets.UTF_8)));
+
+        String expectedHash = AnsibleDependencyCache.computeHash(
+            firstRun.getTaskRunner().getType(), ANSIBLE_IMAGE, List.of(), List.of(),
+            Files.writeString(Files.createTempFile("requirements", ".yml"), requirementsYml), null
+        );
+        firstContext.storage().deleteCacheFile(AnsibleDependencyCache.CACHE_ID, expectedHash);
+
+        ScriptOutput out1 = firstRun.run(firstContext);
+        assertThat(out1.getExitCode(), is(0));
+        assertThat(firstContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+
+        AnsibleCLI secondRun = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .namespaceFiles(NamespaceFiles.builder().build())
+            .commands(Property.ofValue(verify))
+            .build();
+        RunContext secondContext = TestsUtils.mockRunContext(runContextFactory, secondRun, Map.of());
+
+        ScriptOutput out2 = secondRun.run(secondContext);
+        assertThat(out2.getExitCode(), is(0));
+        assertThat(secondContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(true));
+    }
+
+    // issue #135: before this fix, each command ran in its own container and auto-install only ran
+    // before the first, so a second command never saw what the first one installed.
+    @Test
+    void run_multiCommand_secondCommandSeesCollectionInstalledByFirst() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .galaxyDependencies(Property.ofValue(List.of("community.general:10.7.0")))
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "true",
+                        // Runs in a brand-new container: fails unless the first command's install
+                        // landed somewhere this one still resolves.
+                        "ansible-galaxy collection list community.general | grep -q 10.7.0"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        // shares its key with the galaxy cache test: purge so command 1 installs instead of restoring
+        runContext.storage().deleteCacheFile(
+            AnsibleDependencyCache.CACHE_ID,
+            AnsibleDependencyCache.computeHash(execute.getTaskRunner().getType(), ANSIBLE_IMAGE, List.of("community.general:10.7.0"), List.of(), null, null)
+        );
+
+        ScriptOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+    }
+
+    @Test
+    void run_beforeCommandsCd_stillInstallsIntoTheWorkingDirTree() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .pythonDependencies(Property.ofValue(List.of("proxmoxer==2.2.0")))
+            // unique key per run, and a root-relative file the install must still find after the cd
+            .inputFiles(Map.of("requirements.txt", "# cd " + IdUtils.create() + "\n"))
+            .beforeCommands(Property.ofValue(List.of("mkdir -p sub && cd sub")))
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "test ! -d .kestra_ansible && python3 -c 'import proxmoxer; print(proxmoxer.__file__)' | grep -q '/.kestra_ansible/python/'"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        ScriptOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+        // the marker landed in the root tree, not under sub/, so the install was cached
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(true));
+    }
+
+    @Test
+    void run_dependencyCacheTtl_expiredEntryIsRebuilt() throws Exception {
+        // comment-only requirements.txt: pip succeeds offline, and the id gives this test its own key
+        var requirements = Map.of("requirements.txt", "# ttl " + IdUtils.create() + "\n");
+
+        var seed = runWithRequirements(requirements, Duration.ofSeconds(1));
+        assertThat(cacheMetrics(seed), is(List.of(AnsibleCLI.METRIC_CACHE_UPLOAD)));
+
+        Thread.sleep(2_000);
+
+        var expired = runWithRequirements(requirements, Duration.ofSeconds(1));
+        assertThat(cacheMetrics(expired), is(List.of(AnsibleCLI.METRIC_CACHE_UPLOAD)));
+
+        // same key under the default TTL: the entry the expired run just rebuilt is restored
+        var withinDefaultTtl = runWithRequirements(requirements, null);
+        assertThat(cacheMetrics(withinDefaultTtl), is(List.of(AnsibleCLI.METRIC_CACHE_DOWNLOAD)));
+    }
+
+    private RunContext runWithRequirements(Map<String, String> inputFiles, Duration ttl) throws Exception {
+        var builder = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .inputFiles(inputFiles)
+            .commands(Property.ofValue(List.of("true")));
+        if (ttl != null) {
+            builder.dependencyCacheTtl(Property.ofValue(ttl));
+        }
+        var task = builder.build();
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        assertThat(task.run(runContext).getExitCode(), is(0));
+        return runContext;
+    }
+
+    private static List<String> cacheMetrics(RunContext runContext) {
+        return runContext.metrics().stream().map(m -> m.getName()).filter(n -> n.startsWith("deps.cache.")).toList();
+    }
+
+    @Test
+    void run_dependencyCacheDisabled_neverTouchesCache() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .galaxyDependencies(Property.ofValue(List.of("community.general:10.7.0")))
+            .dependencyCacheEnabled(Property.ofValue(false))
+            .commands(Property.ofValue(List.of("ansible-galaxy collection list community.general | grep -q 10.7.0")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        ScriptOutput runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
+    }
+
+    @Test
+    void run_withPythonDependencies_installsAndCachesOnSecondRun() throws Exception {
+        List<String> pythonDependencies = List.of("proxmoxer==2.2.0");
+        // the path proves it resolved from the scoped tree, not the image's venv
+        List<String> verify = List.of("python3 -c 'import proxmoxer; print(proxmoxer.__file__)' | grep -q .kestra_ansible/python");
+
+        for (int run = 1; run <= 2; run++) {
+            AnsibleCLI task = AnsibleCLI.builder()
+                .id(IdUtils.create())
+                .type(AnsibleCLI.class.getName())
+                .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+                .pythonDependencies(Property.ofValue(pythonDependencies))
+                .commands(Property.ofValue(verify))
+                .build();
+            RunContext context = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+            if (run == 1) {
+                // storage-local persists across test runs, so purge to make the first run a miss
+                context.storage().deleteCacheFile(
+                    AnsibleDependencyCache.CACHE_ID,
+                    AnsibleDependencyCache.computeHash(task.getTaskRunner().getType(), ANSIBLE_IMAGE, List.of(), pythonDependencies, null, null)
+                );
+            }
+
+            assertThat(task.run(context).getExitCode(), is(0));
+            boolean uploaded = context.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD));
+            boolean restored = context.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD));
+            assertThat("run " + run + " uploaded", uploaded, is(run == 1));
+            assertThat("run " + run + " restored", restored, is(run == 2));
+        }
+    }
+
+    @Test
+    void run_failedGalaxyInstall_writesNoCache() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .galaxyDependencies(Property.ofValue(List.of("definitely_not_a_namespace.definitely_not_a_collection")))
+            .commands(Property.ofValue(List.of("true")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        try {
+            execute.run(runContext);
+        } catch (Exception e) {
+            // Expected: ansible-galaxy collection install fails on a nonexistent collection.
+        }
+
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
+    }
+
+    @Test
+    void run_failedRequirementsYmlInstallFollowedByValidRequirementsTxt_writesNoCache() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .inputFiles(
+                Map.of(
+                    "requirements.yml", """
+                        collections:
+                          - name: definitely_not_a_namespace.definitely_not_a_collection
+                        """,
+                    // comment-only: pip exits 0 without touching the network, so the step after the failed one
+                    // always succeeds. The random id gives each run its own cache key: storage-local persists
+                    // across runs, and a poisoned entry left by a regressed run would otherwise turn this into a hit.
+                    "requirements.txt", "# no packages " + IdUtils.create() + "\n"
+                )
+            )
+            .commands(Property.ofValue(List.of("true")))
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        try {
+            execute.run(runContext);
+        } catch (Exception e) {
+            // the main command does not depend on the failed install, only the cache outcome matters
+        }
+
+        // a successful pip step after the failed galaxy step must not reach the completion marker
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_DOWNLOAD)), is(false));
+        assertThat(runContext.metrics().stream().anyMatch(m -> m.getName().equals(AnsibleCLI.METRIC_CACHE_UPLOAD)), is(false));
     }
 }

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,11 +28,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
+import io.kestra.core.models.annotations.Metric;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.executions.TaskRun;
 import io.kestra.core.models.executions.TaskRunAttempt;
+import io.kestra.core.models.executions.metrics.Timer;
 import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
@@ -45,7 +48,9 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
+import io.kestra.core.utils.NamespaceFilesUtils;
 import io.kestra.core.utils.UnixModeToPosixFilePermissions;
+import io.kestra.plugin.core.runner.Process;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
@@ -69,6 +74,7 @@ import lombok.experimental.SuperBuilder;
     description = """
         Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one, and merges outputs across multiple commands.
         A `requirements.txt` or `requirements.yml` present in the working directory is installed before commands run; see `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
+        Declared `galaxyDependencies`/`pythonDependencies`, and any auto-installed requirements file, install into a working-directory subtree shared by every command and cached across runs; see `dependencyCacheEnabled`.
         """
 )
 @Plugin(
@@ -228,7 +234,48 @@ import lombok.experimental.SuperBuilder;
                     commands:
                       - ansible-playbook -i localhost -c local playbook.yml
                 """
+        ),
+        @Example(
+            title = "Install a Galaxy collection and a Python package before running the playbook. Both install into a working-directory subtree shared by every command in the task and are cached across runs; see `dependencyCacheEnabled`.",
+            full = true,
+            code = """
+                id: ansible_proxmox
+                namespace: company.team
+
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    galaxyDependencies:
+                      - community.proxmox
+                    pythonDependencies:
+                      - proxmoxer
+                    inputFiles:
+                      inventory.ini: |
+                        localhost ansible_connection=local
+                      list_vms.yml: |
+                        ---
+                        - hosts: localhost
+                          gather_facts: false
+                          tasks:
+                            - name: List Proxmox VMs
+                              community.proxmox.proxmox_vm_info:
+                                api_host: "{{ secret('PROXMOX_HOST') }}"
+                                api_user: "{{ secret('PROXMOX_USER') }}"
+                                api_password: "{{ secret('PROXMOX_PASSWORD') }}"
+                              register: vms
+
+                            - name: Print VM count
+                              ansible.builtin.debug:
+                                msg: "Found {{ vms.proxmox_vms | length }} VMs"
+                    containerImage: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i inventory.ini list_vms.yml
+                """
         )
+    },
+    metrics = {
+        @Metric(name = AnsibleCLI.METRIC_CACHE_DOWNLOAD, type = Timer.TYPE, description = "Time spent restoring the Ansible dependency cache."),
+        @Metric(name = AnsibleCLI.METRIC_CACHE_UPLOAD, type = Timer.TYPE, description = "Time spent uploading the Ansible dependency cache.")
     }
 )
 public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleOutput>, NamespaceFilesInterface, InputFilesInterface, OutputFilesInterface {
@@ -264,6 +311,24 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final List<String> CALLBACK_PATH_EXPORTS = List.of(
         "export ANSIBLE_CALLBACK_PLUGINS=\"$PWD/callback_plugins${ANSIBLE_CALLBACK_PLUGINS:+:$ANSIBLE_CALLBACK_PLUGINS}\"",
         "export ANSIBLE_LIBRARY=\"$PWD/library${ANSIBLE_LIBRARY:+:$ANSIBLE_LIBRARY}\""
+    );
+
+    private static final String REQUIREMENTS_YML = "requirements.yml";
+    private static final String REQUIREMENTS_TXT = "requirements.txt";
+    // working-dir root, exported before user beforeCommands run, so a `cd` there cannot redirect installs or the marker
+    private static final String ROOT = "$KESTRA_ANSIBLE_ROOT";
+    private static final String DEPS = ROOT + "/" + AnsibleDependencyCache.DEPENDENCY_ROOT;
+    private static final String GALAXY_REQUIREMENTS_INSTALL = "ansible-galaxy install -r " + REQUIREMENTS_YML;
+    private static final String SCOPED_PIP_INSTALL = "pip install --no-cache-dir --target \"" + DEPS + "/python\"";
+    static final String METRIC_CACHE_DOWNLOAD = "deps.cache.download.duration";
+    static final String METRIC_CACHE_UPLOAD = "deps.cache.upload.duration";
+
+    // Prepended so installed dependencies win, while image-bundled ones stay as a fallback.
+    private static final List<String> DEPENDENCY_PATH_EXPORTS = List.of(
+        "export KESTRA_ANSIBLE_ROOT=\"$PWD\"",
+        "export ANSIBLE_COLLECTIONS_PATH=\"" + DEPS + "/collections:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}\"",
+        "export ANSIBLE_ROLES_PATH=\"" + DEPS + "/roles:${ANSIBLE_ROLES_PATH:-$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles}\"",
+        "export PYTHONPATH=\"" + DEPS + "/python${PYTHONPATH:+:$PYTHONPATH}\""
     );
 
     @Schema(
@@ -322,6 +387,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             If omitted, a generated ansible.cfg in the working directory enables the Kestra callback plugin and logs to `log`.
             Provide custom content to override defaults; include the callback settings above if you still want structured outputs.
             The bundled callback and module directories are also pinned via `ANSIBLE_CALLBACK_PLUGINS` and `ANSIBLE_LIBRARY`, which supersede a custom `ansible.cfg`: declare your own callback or module paths through the task's `env` instead.
+            The same applies to `ANSIBLE_COLLECTIONS_PATH`/`ANSIBLE_ROLES_PATH` whenever `galaxyDependencies`/`pythonDependencies` or an auto-installed requirements file has something to install: they take precedence over a `collections_path`/`roles_path` set here, so add extra paths through `env` instead.
             """
     )
     @Builder.Default
@@ -397,6 +463,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             If true (default), runs `pip install --no-cache-dir -r requirements.txt` before commands when a `requirements.txt` file is present in the working directory.
             The check is performed at runtime in the runner shell, so the file may come from `inputFiles`, `namespaceFiles`, or any other source materialized into the working directory.
+            Alongside `galaxyDependencies`/`pythonDependencies`, or when this requirements.txt is already present before commands run, the install lands in a working-directory subtree instead of the image's default virtual environment, and is cached; see `dependencyCacheEnabled`.
             """
     )
     @Builder.Default
@@ -408,11 +475,55 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         description = """
             If true (default), runs `ansible-galaxy install -r requirements.yml` before commands when a `requirements.yml` file is present in the working directory.
             Since Ansible 2.10, `ansible-galaxy install` handles both the `collections:` and `roles:` keys defined in `requirements.yml`.
+            Alongside `galaxyDependencies`/`pythonDependencies`, or when this requirements.yml is already present before commands run, the install lands in a working-directory subtree instead of the image's default `~/.ansible`, and is cached; see `dependencyCacheEnabled`.
             """
     )
     @Builder.Default
     @PluginProperty(group = "execution")
     protected Property<Boolean> autoInstallGalaxyRequirements = Property.ofValue(true);
+
+    @Schema(
+        title = "Ansible Galaxy collections to install",
+        description = """
+            Collection specifiers passed as arguments to `ansible-galaxy collection install`, e.g. `community.general`, `community.general:>=10.0.0`, or a git/tarball URL.
+            Installed into a working-directory subtree shared by every command in the task, instead of the image's default `~/.ansible/collections`, and cached across runs; see `dependencyCacheEnabled`.
+            Roles are still declared through `requirements.yml`, not through this property.
+            """
+    )
+    @PluginProperty(group = "execution")
+    protected Property<List<String>> galaxyDependencies;
+
+    @Schema(
+        title = "Python packages to install",
+        description = """
+            Pip specifiers passed to `pip install`, e.g. `proxmoxer`, `proxmoxer==2.2.0`.
+            Installed into a working-directory subtree shared by every command in the task, instead of the image's default virtual environment, and cached across runs; see `dependencyCacheEnabled`.
+            """
+    )
+    @PluginProperty(group = "execution")
+    protected Property<List<String>> pythonDependencies;
+
+    @Schema(
+        title = "Cache installed Galaxy/Python dependencies",
+        description = """
+            If true (default), the collections, roles and Python packages installed from `galaxyDependencies`, `pythonDependencies`, `requirements.yml` and `requirements.txt` are cached and restored on the next run instead of being reinstalled, keyed on those inputs plus the task runner and container image.
+            Only applies when there is something to install: a flow using none of these properties behaves exactly as before.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Boolean> dependencyCacheEnabled = Property.ofValue(true);
+
+    @Schema(
+        title = "Dependency cache time-to-live",
+        description = """
+            How long a cached dependency install stays valid before it is rebuilt from scratch. Default 7 days.
+            The cache key does not track the image digest or new releases of unpinned dependencies, so the TTL bounds how long a floating tag (the default `containerImage` uses `latest`) or an unpinned version can stay stale. Pin versions and image tags to cache for longer.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Duration> dependencyCacheTtl = Property.ofValue(Duration.ofDays(7));
 
     @PluginProperty(group = "source")
     private NamespaceFiles namespaceFiles;
@@ -454,7 +565,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
             .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
             .withEnv(rEnv.isEmpty() ? new HashMap<>() : rEnv)
-            .withNamespaceFiles(namespaceFiles)
             .withEnableOutputDirectory(true)
             .withOutputFiles(outputFilesList);
 
@@ -470,18 +580,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             workingDir,
             this.finalInputFiles(runContext, workingDir)
         );
+        // loaded once up front, not by the wrapper on every command, so requirements files are hashable below.
+        // The guard mirrors CommandsWrapper.run(), recheck it on core bumps.
+        if (namespaceFiles != null && !Boolean.FALSE.equals(runContext.render(namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
+            NamespaceFilesUtils.loadNamespaceFiles(runContext, namespaceFiles);
+        }
         emitInventoryAssets(runContext, workingDir);
 
-        // Auto-install requirement files when present in the working directory.
-        // Shell-level conditionals so detection happens after working dir is materialized by the task runner.
-        // `[ ! -f X ] || cmd` — file absent: exits 0; file present: runs cmd and propagates its exit code.
-        List<String> autoInstallCommands = new ArrayList<>();
-        if (runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElseThrow()) {
-            autoInstallCommands.add("[ ! -f requirements.txt ] || pip install --no-cache-dir -r requirements.txt");
-        }
-        if (runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElseThrow()) {
-            autoInstallCommands.add("[ ! -f requirements.yml ] || ansible-galaxy install -r requirements.yml");
-        }
+        DependencyInstall dependencyInstall = planDependencyInstall(runContext, workingDir);
 
         List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
 
@@ -535,12 +641,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             // First (before any user `cd`, so $PWD is the working-dir root) and on every command
             // (each runs in its own container).
+            boolean isFirstCommand = !beforeDone;
             List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
-            if (!beforeDone) {
+            beforeForRun.addAll(dependencyInstall.pathExports());
+            if (isFirstCommand) {
                 // User beforeCommands can configure the environment
                 // (e.g. private pip index, proxy, auth) before auto-install fires.
                 beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
-                beforeForRun.addAll(autoInstallCommands);
+                beforeForRun.addAll(dependencyInstall.commands());
             }
             Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
 
@@ -556,7 +664,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             // left by the previous one before its successor's stderr starts arriving
             logConsumer.reset();
 
-            ScriptOutput out = commandWrapper.run();
+            ScriptOutput out;
+            try {
+                out = commandWrapper.run();
+            } finally {
+                // the install ran in the first command, even a failing one leaves a cacheable tree
+                if (isFirstCommand && dependencyInstall.uploadHash() != null) {
+                    saveDependencyCache(runContext, workingDir, dependencyInstall.uploadHash());
+                }
+            }
 
             mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
             mergedStdOutCount += out.getStdOutLineCount();
@@ -683,6 +799,114 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .taskRunner(lastTaskRunner)
             .playbooks(mergedPlaybooks)
             .build();
+    }
+
+    /**
+     * Restores or schedules the install of declared dependencies and requirements files into
+     * {@link AnsibleDependencyCache#DEPENDENCY_ROOT}. With nothing to install, keeps the legacy unscoped commands.
+     */
+    private DependencyInstall planDependencyInstall(RunContext runContext, Path workingDir) throws IllegalVariableEvaluationException, IOException {
+        var rGalaxyDependencies = runContext.render(this.galaxyDependencies).asList(String.class);
+        var rPythonDependencies = runContext.render(this.pythonDependencies).asList(String.class);
+        var rAutoInstallGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
+        var rAutoInstallPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElse(true);
+
+        // only files present now are part of the key, one created by beforeCommands installs uncached
+        var requirementsYml = workingDir.resolve(REQUIREMENTS_YML);
+        var requirementsTxt = workingDir.resolve(REQUIREMENTS_TXT);
+        var hasRequirementsYml = rAutoInstallGalaxy && Files.isRegularFile(requirementsYml);
+        var hasRequirementsTxt = rAutoInstallPython && Files.isRegularFile(requirementsTxt);
+
+        if (rGalaxyDependencies.isEmpty() && rPythonDependencies.isEmpty() && !hasRequirementsYml && !hasRequirementsTxt) {
+            var legacyCommands = new ArrayList<String>();
+            if (rAutoInstallPython) {
+                legacyCommands.add(ifFilePresent(REQUIREMENTS_TXT, "pip install --no-cache-dir -r " + REQUIREMENTS_TXT));
+            }
+            if (rAutoInstallGalaxy) {
+                legacyCommands.add(ifFilePresent(REQUIREMENTS_YML, GALAXY_REQUIREMENTS_INSTALL));
+            }
+            return new DependencyInstall(List.of(), legacyCommands, null);
+        }
+
+        var hash = AnsibleDependencyCache.computeHash(
+            this.taskRunner.getType(),
+            // a non-container runner never reads containerImage
+            this.taskRunner instanceof Process ? null : runContext.render(this.containerImage).as(String.class).orElse(null),
+            rGalaxyDependencies,
+            rPythonDependencies,
+            hasRequirementsYml ? requirementsYml : null,
+            hasRequirementsTxt ? requirementsTxt : null
+        );
+        var rCacheEnabled = runContext.render(this.dependencyCacheEnabled).as(Boolean.class).orElse(true);
+        var restored = rCacheEnabled && restoreDependencyCache(runContext, workingDir, hash);
+
+        var commands = new ArrayList<String>();
+        if (!restored) {
+            // one &&-chain with no `[ ! -f ]` guard: a guard's || would let a failed step still reach the marker
+            var steps = new ArrayList<String>();
+            if (!rGalaxyDependencies.isEmpty()) {
+                steps.add("ansible-galaxy collection install " + AnsibleDependencyCache.quoteAll("galaxyDependencies", rGalaxyDependencies));
+            }
+            if (hasRequirementsYml) {
+                steps.add("ansible-galaxy install -r " + rooted(REQUIREMENTS_YML));
+            }
+            if (!rPythonDependencies.isEmpty()) {
+                steps.add(SCOPED_PIP_INSTALL + " " + AnsibleDependencyCache.quoteAll("pythonDependencies", rPythonDependencies));
+            }
+            if (hasRequirementsTxt) {
+                steps.add(SCOPED_PIP_INSTALL + " -r " + rooted(REQUIREMENTS_TXT));
+            }
+            steps.add("touch " + rooted(AnsibleDependencyCache.COMPLETE_MARKER));
+            commands.add(String.join(" && ", steps));
+        }
+        if (rAutoInstallGalaxy && !hasRequirementsYml) {
+            commands.add(ifFilePresent(REQUIREMENTS_YML, GALAXY_REQUIREMENTS_INSTALL));
+        }
+        if (rAutoInstallPython && !hasRequirementsTxt) {
+            commands.add(ifFilePresent(REQUIREMENTS_TXT, SCOPED_PIP_INSTALL + " -r " + REQUIREMENTS_TXT));
+        }
+
+        return new DependencyInstall(DEPENDENCY_PATH_EXPORTS, commands, rCacheEnabled && !restored ? hash : null);
+    }
+
+    private static String ifFilePresent(String file, String command) {
+        return "[ ! -f " + file + " ] || " + command;
+    }
+
+    private static String rooted(String path) {
+        return "\"" + ROOT + "/" + path + "\"";
+    }
+
+    private boolean restoreDependencyCache(RunContext runContext, Path workingDir, String hash) throws IllegalVariableEvaluationException {
+        var rTtl = runContext.render(this.dependencyCacheTtl).as(Duration.class).orElse(null);
+        var start = Instant.now();
+        if (!AnsibleDependencyCache.restore(runContext, workingDir, hash, rTtl)) {
+            return false;
+        }
+        runContext.metric(Timer.of(METRIC_CACHE_DOWNLOAD, Duration.between(start, Instant.now())));
+        runContext.logger().info("Restored Ansible dependencies from cache");
+        return true;
+    }
+
+    private static void saveDependencyCache(RunContext runContext, Path workingDir, String hash) {
+        if (!Files.exists(workingDir.resolve(AnsibleDependencyCache.COMPLETE_MARKER))) {
+            runContext.logger().warn("Ansible dependency cache not saved: the dependency install failed, or the task runner did not return the working directory.");
+            return;
+        }
+        var start = Instant.now();
+        try {
+            AnsibleDependencyCache.upload(runContext, workingDir, hash);
+            runContext.metric(Timer.of(METRIC_CACHE_UPLOAD, Duration.between(start, Instant.now())));
+        } catch (IOException e) {
+            runContext.logger().warn("Unable to save the Ansible dependency cache, the next run installs again.");
+            runContext.logger().debug("Ansible dependency cache upload failed", e);
+        }
+    }
+
+    /**
+     * @param uploadHash cache key to save after the first command, null when nothing is to be saved
+     */
+    private record DependencyInstall(List<String> pathExports, List<String> commands, String uploadHash) {
     }
 
     protected Map<String, String> finalInputFiles(RunContext runContext, Path workingDir) throws IOException, IllegalVariableEvaluationException {
