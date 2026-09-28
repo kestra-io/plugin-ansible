@@ -45,6 +45,7 @@ import reactor.core.publisher.Flux;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @KestraTest
 class AnsibleCLITest {
@@ -2007,6 +2008,46 @@ class AnsibleCLITest {
         // same key under the default TTL: the entry the expired run just rebuilt is restored
         var withinDefaultTtl = runWithRequirements(requirements, null);
         assertThat(cacheMetrics(withinDefaultTtl), is(List.of(AnsibleCLI.METRIC_CACHE_DOWNLOAD)));
+    }
+
+    @Test
+    void run_dependencyCacheTtlOutOfRange_failsWithActionableMessage() throws Exception {
+        var task = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .inputFiles(Map.of("requirements.txt", "# ttl bounds " + IdUtils.create() + "\n"))
+            .dependencyCacheTtl(Property.ofValue(Duration.ZERO))
+            .commands(Property.ofValue(List.of("true")))
+            .build();
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+
+        var e = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+
+        assertThat(e.getMessage(), containsString("`dependencyCacheTtl` must be between"));
+    }
+
+    @Test
+    void run_namespaceFilesGuard_matchesCommandsWrapperContract() throws Exception {
+        // mirrors CommandsWrapper.run(): loaded when namespaceFiles is set and not explicitly disabled
+        var disabled = namespaceFilesTask(NamespaceFiles.builder().enabled(Property.ofValue(false)).build(), "test ! -f ns-guard.txt");
+        var enabledByDefault = namespaceFilesTask(NamespaceFiles.builder().build(), "test -f ns-guard.txt");
+        var disabledContext = TestsUtils.mockRunContext(runContextFactory, disabled, Map.of());
+        namespaceFactory.of(TenantService.MAIN_TENANT, disabledContext.flowInfo().namespace(), storage)
+            .putFile(Path.of("/ns-guard.txt"), new ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(disabled.run(disabledContext).getExitCode(), is(0));
+        assertThat(enabledByDefault.run(TestsUtils.mockRunContext(runContextFactory, enabledByDefault, Map.of())).getExitCode(), is(0));
+    }
+
+    private static AnsibleCLI namespaceFilesTask(NamespaceFiles namespaceFiles, String command) {
+        return AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .namespaceFiles(namespaceFiles)
+            .commands(Property.ofValue(List.of(command)))
+            .build();
     }
 
     private RunContext runWithRequirements(Map<String, String> inputFiles, Duration ttl) throws Exception {

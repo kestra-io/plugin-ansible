@@ -74,7 +74,7 @@ import lombok.experimental.SuperBuilder;
     description = """
         Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one, and merges outputs across multiple commands.
         A `requirements.txt` or `requirements.yml` present in the working directory is installed before commands run; see `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
-        Declared `galaxyDependencies`/`pythonDependencies`, and any auto-installed requirements file, install into a working-directory subtree shared by every command and cached across runs; see `dependencyCacheEnabled`.
+        Declared `galaxyDependencies`/`pythonDependencies`, and requirements files already present before commands run, install into a working-directory subtree shared by every command and cached across runs; see `dependencyCacheEnabled`.
         """
 )
 @Plugin(
@@ -322,6 +322,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final String SCOPED_PIP_INSTALL = "pip install --no-cache-dir --target \"" + DEPS + "/python\"";
     static final String METRIC_CACHE_DOWNLOAD = "deps.cache.download.duration";
     static final String METRIC_CACHE_UPLOAD = "deps.cache.upload.duration";
+    private static final Duration DEFAULT_CACHE_TTL = Duration.ofDays(7);
+    private static final Duration MIN_CACHE_TTL = Duration.ofSeconds(1);
+    private static final Duration MAX_CACHE_TTL = Duration.ofDays(365);
 
     // Prepended so installed dependencies win, while image-bundled ones stay as a fallback.
     private static final List<String> DEPENDENCY_PATH_EXPORTS = List.of(
@@ -517,13 +520,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Dependency cache time-to-live",
         description = """
-            How long a cached dependency install stays valid before it is rebuilt from scratch. Default 7 days.
+            How long a cached dependency install stays valid before it is rebuilt from scratch. Default 7 days, allowed range 1 second to 365 days.
             The cache key does not track the image digest or new releases of unpinned dependencies, so the TTL bounds how long a floating tag (the default `containerImage` uses `latest`) or an unpinned version can stay stale. Pin versions and image tags to cache for longer.
             """
     )
     @Builder.Default
     @PluginProperty(group = "execution")
-    protected Property<Duration> dependencyCacheTtl = Property.ofValue(Duration.ofDays(7));
+    protected Property<Duration> dependencyCacheTtl = Property.ofValue(DEFAULT_CACHE_TTL);
 
     @PluginProperty(group = "source")
     private NamespaceFiles namespaceFiles;
@@ -878,7 +881,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     private boolean restoreDependencyCache(RunContext runContext, Path workingDir, String hash) throws IllegalVariableEvaluationException {
-        var rTtl = runContext.render(this.dependencyCacheTtl).as(Duration.class).orElse(null);
+        var rTtl = runContext.render(this.dependencyCacheTtl).as(Duration.class).orElse(DEFAULT_CACHE_TTL);
+        if (rTtl.compareTo(MIN_CACHE_TTL) < 0 || rTtl.compareTo(MAX_CACHE_TTL) > 0) {
+            throw new IllegalArgumentException("`dependencyCacheTtl` must be between " + MIN_CACHE_TTL + " and " + MAX_CACHE_TTL + ", got " + rTtl + ".");
+        }
         var start = Instant.now();
         if (!AnsibleDependencyCache.restore(runContext, workingDir, hash, rTtl)) {
             return false;
@@ -893,10 +899,16 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             runContext.logger().warn("Ansible dependency cache not saved: the dependency install failed, or the task runner did not return the working directory.");
             return;
         }
+        var treeBytes = AnsibleDependencyCache.treeSize(workingDir);
+        if (treeBytes > AnsibleDependencyCache.MAX_TREE_BYTES) {
+            runContext.logger().warn("Ansible dependency cache not saved: the installed tree is {} bytes, over the {} byte limit.", treeBytes, AnsibleDependencyCache.MAX_TREE_BYTES);
+            return;
+        }
         var start = Instant.now();
         try {
-            AnsibleDependencyCache.upload(runContext, workingDir, hash);
+            var archiveBytes = AnsibleDependencyCache.upload(runContext, workingDir, hash);
             runContext.metric(Timer.of(METRIC_CACHE_UPLOAD, Duration.between(start, Instant.now())));
+            runContext.logger().info("Saved Ansible dependency cache ({} KB compressed)", archiveBytes / 1024);
         } catch (IOException e) {
             runContext.logger().warn("Unable to save the Ansible dependency cache, the next run installs again.");
             runContext.logger().debug("Ansible dependency cache upload failed", e);

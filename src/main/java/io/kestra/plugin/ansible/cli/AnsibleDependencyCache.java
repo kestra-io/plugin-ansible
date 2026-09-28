@@ -40,6 +40,8 @@ final class AnsibleDependencyCache {
     static final String DEPENDENCY_ROOT = ".kestra_ansible";
     // written only when the whole install chain succeeded
     static final String COMPLETE_MARKER = DEPENDENCY_ROOT + "/.complete";
+    // uncompressed ceiling for both saving and restoring a tree, keeps a runaway install or a crafted archive off the disk
+    static final long MAX_TREE_BYTES = 2L * 1024 * 1024 * 1024;
 
     private AnsibleDependencyCache() {
     }
@@ -56,6 +58,8 @@ final class AnsibleDependencyCache {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             updateField(digest, String.valueOf(CACHE_FORMAT_VERSION));
             updateField(digest, taskRunnerType);
+            // native wheels and binaries only run where they were built: the worker platform stands in for the container's
+            updateField(digest, System.getProperty("os.name") + "/" + System.getProperty("os.arch"));
             updateField(digest, containerImage == null ? "" : containerImage);
             updateField(digest, galaxyDependencies);
             updateField(digest, pythonDependencies);
@@ -111,6 +115,10 @@ final class AnsibleDependencyCache {
 
     /** Returns false on a miss or any failure, so a broken cache only means a normal install. */
     static boolean restore(RunContext runContext, Path workingDir, String hash, Duration ttl) {
+        return restore(runContext, workingDir, hash, ttl, MAX_TREE_BYTES);
+    }
+
+    static boolean restore(RunContext runContext, Path workingDir, String hash, Duration ttl, long maxBytes) {
         Path root = workingDir.resolve(DEPENDENCY_ROOT).normalize();
         try {
             Optional<InputStream> cacheFile = runContext.storage().getCacheFile(CACHE_ID, hash, ttl);
@@ -124,11 +132,21 @@ final class AnsibleDependencyCache {
                 TarArchiveInputStream tais = new TarArchiveInputStream(gzis)
             ) {
                 TarArchiveEntry entry;
+                long total = 0;
                 while ((entry = tais.getNextEntry()) != null) {
+                    // the stream never reads past an entry's declared size, so summing those bounds what gets written
+                    total += entry.getSize();
+                    if (total > maxBytes) {
+                        throw new IOException("cache archive expands past " + maxBytes + " bytes");
+                    }
                     extractEntry(tais, entry, root);
                 }
             }
             return true;
+        } catch (CacheEscapeException e) {
+            runContext.logger().warn("Rejected the Ansible dependency cache, possible tampering: {}", e.getMessage());
+            FileUtils.deleteQuietly(root.toFile());
+            return false;
         } catch (IOException e) {
             runContext.logger().warn("Unable to restore the Ansible dependency cache, falling back to a normal install.");
             runContext.logger().debug("Ansible dependency cache restore failed", e);
@@ -141,13 +159,13 @@ final class AnsibleDependencyCache {
         Path outputPath = root.resolve(entry.getName()).normalize();
         // the restored tree is executable code, nothing may land outside the root
         if (!outputPath.startsWith(root)) {
-            throw new IOException("cache entry escapes the cache root: " + entry.getName());
+            throw new CacheEscapeException("entry escapes the cache root: " + entry.getName());
         }
 
         if (entry.isSymbolicLink()) {
             Path target = outputPath.getParent().resolve(entry.getLinkName()).normalize();
             if (!target.startsWith(root)) {
-                throw new IOException("cache symlink escapes the cache root: " + entry.getName() + " -> " + entry.getLinkName());
+                throw new CacheEscapeException("symlink escapes the cache root: " + entry.getName() + " -> " + entry.getLinkName());
             }
             Files.createDirectories(outputPath.getParent());
             Files.deleteIfExists(outputPath);
@@ -155,7 +173,7 @@ final class AnsibleDependencyCache {
         } else if (entry.isLink()) {
             Path target = root.resolve(entry.getLinkName()).normalize();
             if (!target.startsWith(root)) {
-                throw new IOException("cache hardlink escapes the cache root: " + entry.getName() + " -> " + entry.getLinkName());
+                throw new CacheEscapeException("hardlink escapes the cache root: " + entry.getName() + " -> " + entry.getLinkName());
             }
             Files.createDirectories(outputPath.getParent());
             Files.deleteIfExists(outputPath);
@@ -180,7 +198,12 @@ final class AnsibleDependencyCache {
         }
     }
 
-    static void upload(RunContext runContext, Path workingDir, String hash) throws IOException {
+    static long treeSize(Path workingDir) {
+        return FileUtils.sizeOfDirectory(workingDir.resolve(DEPENDENCY_ROOT).toFile());
+    }
+
+    /** Returns the compressed archive size. */
+    static long upload(RunContext runContext, Path workingDir, String hash) throws IOException {
         Path root = workingDir.resolve(DEPENDENCY_ROOT).normalize();
         Path tempFile = runContext.workingDir().createTempFile(".tar.gz");
 
@@ -232,6 +255,15 @@ final class AnsibleDependencyCache {
             });
         }
 
+        long archiveBytes = Files.size(tempFile);
         runContext.storage().putCacheFile(tempFile.toFile(), CACHE_ID, hash);
+        return archiveBytes;
+    }
+
+    /** An archive entry that would land outside the cache root: tampering, not ordinary corruption. */
+    static final class CacheEscapeException extends IOException {
+        CacheEscapeException(String message) {
+            super(message);
+        }
     }
 }

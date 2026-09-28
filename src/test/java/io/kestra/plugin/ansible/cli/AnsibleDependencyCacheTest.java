@@ -162,6 +162,27 @@ class AnsibleDependencyCacheTest {
     }
 
     @Test
+    void restore_rejectsArchiveExpandingPastTheSizeCap() throws Exception {
+        RunContext runContext = newRunContext();
+        Path workingDir = runContext.workingDir().path();
+        String hash = IdUtils.create();
+
+        putMaliciousCache(runContext, hash, tar ->
+        {
+            TarArchiveEntry entry = new TarArchiveEntry("big.bin");
+            entry.setSize(100);
+            tar.putArchiveEntry(entry);
+            tar.write(new byte[100]);
+            tar.closeArchiveEntry();
+        });
+
+        boolean hit = AnsibleDependencyCache.restore(runContext, workingDir, hash, null, 10);
+
+        assertThat(hit, is(false));
+        assertThat(Files.exists(workingDir.resolve(AnsibleDependencyCache.DEPENDENCY_ROOT)), is(false));
+    }
+
+    @Test
     void restore_rejectsSymlinkEscapingRoot() throws Exception {
         RunContext runContext = newRunContext();
         Path workingDir = runContext.workingDir().path();
