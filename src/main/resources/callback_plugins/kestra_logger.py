@@ -46,6 +46,8 @@ class CallbackModule(CallbackBase):
     # always-use-FQCN lint rule invoke the module as ansible.legacy.kestra.
     KESTRA_OUTPUT_ACTIONS = frozenset({'kestra', 'ansible.legacy.kestra'})
 
+    DEBUG_ACTIONS = frozenset({'debug', 'ansible.builtin.debug', 'ansible.legacy.debug'})
+
     # Characters of msg / stderr kept inline per result in store mode.
     LIGHT_RESULT_LIMIT = 1024
 
@@ -216,42 +218,61 @@ class CallbackModule(CallbackBase):
             )
 
     @staticmethod
-    def _without_lines(result):
+    def _without_lines(value):
         """
-        Copy of a result without the line-split duplicates of stdout/stderr, loop items included.
+        Copy of a value without the line-split duplicates of stdout/stderr at every nesting level:
+        loop items, registered results nested in a debug `var`, and so on.
         """
-        trimmed = {k: v for k, v in result.items() if k not in ("stdout_lines", "stderr_lines")}
-        items = trimmed.get("results")
-        if isinstance(items, list):
-            trimmed["results"] = [
-                CallbackModule._without_lines(item) if isinstance(item, dict) else item
-                for item in items
-            ]
-        return trimmed
+        if isinstance(value, dict):
+            return {
+                k: CallbackModule._without_lines(v)
+                for k, v in value.items()
+                if k not in ("stdout_lines", "stderr_lines")
+            }
+        if isinstance(value, list):
+            return [CallbackModule._without_lines(v) for v in value]
+        return value
 
     @staticmethod
-    def _light_result(result, failed):
+    def _light_msg(msg):
+        """
+        A string msg is cut to LIGHT_RESULT_LIMIT characters; any other type keeps its JSON type
+        unless its serialization is over the limit, in which case the start of that serialization
+        stands in for it.
+        """
+        limit = CallbackModule.LIGHT_RESULT_LIMIT
+        if isinstance(msg, str):
+            return msg[:limit]
+        serialized = json.dumps(msg, default=str)
+        if len(serialized) <= limit:
+            return msg
+        return serialized[:limit] + "... (truncated)"
+
+    @staticmethod
+    def _light_result(result, failed, is_debug=False):
         """
         Subset of a result kept inline in store mode: status flags, return code and a bounded
         reason. For command/shell, msg is just "non-zero return code", so a failed result also
-        keeps the tail of stderr.
+        keeps the tail of stderr. The debug module's output is the point of the task, so it is
+        kept whole, minus Ansible's internal keys; maxOutputsSize still bounds the total.
         """
-        light = {k: result[k] for k in ("changed", "failed", "skipped", "unreachable", "rc") if k in result}
+        if is_debug:
+            light = {k: v for k, v in result.items() if not k.startswith("_ansible_")}
+        else:
+            light = {k: result[k] for k in ("changed", "failed", "skipped", "unreachable", "rc") if k in result}
 
-        msg = result.get("msg")
-        if msg is not None:
-            msg = msg if isinstance(msg, str) else str(msg)
-            light["msg"] = msg[:CallbackModule.LIGHT_RESULT_LIMIT]
+            if result.get("msg") is not None:
+                light["msg"] = CallbackModule._light_msg(result["msg"])
 
-        stderr = result.get("stderr")
-        if failed and isinstance(stderr, str) and stderr:
-            light["stderr"] = stderr[-CallbackModule.LIGHT_RESULT_LIMIT:]
+            stderr = result.get("stderr")
+            if failed and isinstance(stderr, str) and stderr:
+                light["stderr"] = stderr[-CallbackModule.LIGHT_RESULT_LIMIT:]
 
         items = result.get("results")
         if isinstance(items, list):
             light["results"] = [
                 CallbackModule._light_result(
-                    item, bool(item.get("failed") or item.get("unreachable"))
+                    item, bool(item.get("failed") or item.get("unreachable")), is_debug
                 ) if isinstance(item, dict) else item
                 for item in items
             ]
@@ -484,7 +505,10 @@ class CallbackModule(CallbackBase):
             "result": result_payload
         }
         if self._results_store:
-            host_result["result"] = self._light_result(result_payload, status in ("failed", "unreachable"))
+            is_debug = getattr(result._task, "action", None) in self.DEBUG_ACTIONS
+            host_result["result"] = self._light_result(
+                result_payload, status in ("failed", "unreachable"), is_debug
+            )
             self._full_results[id(host_result)] = result_payload
         self._current_task["hosts"].append(host_result)
 

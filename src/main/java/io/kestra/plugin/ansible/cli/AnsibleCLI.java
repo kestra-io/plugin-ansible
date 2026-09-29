@@ -467,9 +467,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Where full per-host results are kept",
         description = """
-            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB and, for failed or unreachable hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
+            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed or unreachable hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`. The output of `debug` tasks (`msg` or `var`) is kept whole, since printing it is the purpose of the task; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
             INLINE keeps the full per-host results in `playbooks`, bounded by `maxOutputsSize`; choose it when you template `stdout` or other result fields directly and the outputs are small.
-            In both modes `stdout_lines` and `stderr_lines` are dropped from captured results; split `stdout`/`stderr` on newlines downstream instead.
+            In both modes `stdout_lines` and `stderr_lines` are dropped from captured results at every nesting level; split `stdout`/`stderr` on newlines downstream instead.
             """
     )
     @Builder.Default
@@ -1787,7 +1787,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 title = "Ansible result payload for this host",
                 description = """
                     Structure directly from Ansible, without `stdout_lines`/`stderr_lines`.
-                    With `resultsStorage: STORE` (default) this is the light result: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB and, for failed or unreachable hosts, the last 1 KB of `stderr`; the full result is in the file at `resultsUri`.
+                    With `resultsStorage: STORE` (default) this is the light result: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB and, for failed or unreachable hosts, the last 1 KB of `stderr`, plus the whole output of `debug` tasks; the full result is in the file at `resultsUri`.
                     If the task uses loops, Ansible returns the per-item results under `results` in this object.
                     """
             )

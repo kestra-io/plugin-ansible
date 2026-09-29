@@ -305,6 +305,48 @@ class AnsibleCLITest {
         }
     }
 
+    private static void assertNoLinesAtAnyDepth(JsonNode node) {
+        if (node.isObject()) {
+            assertThat(node.has("stdout_lines"), is(false));
+            assertThat(node.has("stderr_lines"), is(false));
+        }
+        node.forEach(AnsibleCLITest::assertNoLinesAtAnyDepth);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_storeMode_keepsDebugOutputInlineOnce_withoutLines() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-debug-outputs.yml");
+
+        var tasks = runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks();
+
+        var varResult = (Map<String, Object>) tasks.get(1).getHosts().getFirst().getResult();
+        var myOutput = (Map<String, Object>) varResult.get("myOutput");
+        assertThat(myOutput.get("stdout"), is("Test output"));
+        assertThat(myOutput.containsKey("stdout_lines"), is(false));
+        assertThat(myOutput.containsKey("stderr_lines"), is(false));
+        assertThat(varResult.keySet().stream().noneMatch(k -> k.startsWith("_ansible_")), is(true));
+
+        var listResult = (Map<String, Object>) tasks.get(2).getHosts().getFirst().getResult();
+        assertThat(listResult.get("msg"), is(List.of("line 1", "line 2")));
+
+        assertNoLinesAtAnyDepth(readResults(runOutput.getResultsUri()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_storeMode_truncatesLargeNonStringMsgOfNonDebugTasksAsJson() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-debug-outputs.yml");
+
+        var failed = (Map<String, Object>) runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks().get(3)
+            .getHosts().getFirst().getResult();
+
+        var msg = (String) failed.get("msg");
+        assertThat(msg, startsWith("[0, 1, 2, 3"));
+        assertThat(msg, endsWith("... (truncated)"));
+        assertThat(msg.length(), lessThan(1100));
+    }
+
     @Test
     void run_inlineMode_keepsFullResultsInline_withoutLines() throws Exception {
         var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.INLINE, "playbook-large-loop.yml");
