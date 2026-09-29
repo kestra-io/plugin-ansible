@@ -12,6 +12,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -20,6 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.slf4j.event.Level;
@@ -326,13 +328,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final Duration MIN_CACHE_TTL = Duration.ofSeconds(1);
     private static final Duration MAX_CACHE_TTL = Duration.ofDays(365);
 
-    // Prepended so installed dependencies win, while image-bundled ones stay as a fallback.
-    private static final List<String> DEPENDENCY_PATH_EXPORTS = List.of(
-        "export KESTRA_ANSIBLE_ROOT=\"$PWD\"",
-        "export ANSIBLE_COLLECTIONS_PATH=\"" + DEPS + "/collections:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}\"",
-        "export ANSIBLE_ROLES_PATH=\"" + DEPS + "/roles:${ANSIBLE_ROLES_PATH:-$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles}\"",
-        "export PYTHONPATH=\"" + DEPS + "/python${PYTHONPATH:+:$PYTHONPATH}\""
-    );
+    private static final String DEFAULT_COLLECTIONS_PATH = "$HOME/.ansible/collections:/usr/share/ansible/collections";
+    private static final String DEFAULT_ROLES_PATH = "$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles";
 
     @Schema(
         title = "Run once before commands",
@@ -390,7 +387,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             If omitted, a generated ansible.cfg in the working directory enables the Kestra callback plugin and logs to `log`.
             Provide custom content to override defaults; include the callback settings above if you still want structured outputs.
             The bundled callback and module directories are also pinned via `ANSIBLE_CALLBACK_PLUGINS` and `ANSIBLE_LIBRARY`, which supersede a custom `ansible.cfg`: declare your own callback or module paths through the task's `env` instead.
-            The same applies to `ANSIBLE_COLLECTIONS_PATH`/`ANSIBLE_ROLES_PATH` whenever `galaxyDependencies`/`pythonDependencies` or an auto-installed requirements file has something to install: they take precedence over a `collections_path`/`roles_path` set here, so add extra paths through `env` instead.
+            Whenever `galaxyDependencies`/`pythonDependencies` or a requirements file has something to install, `ANSIBLE_COLLECTIONS_PATH`/`ANSIBLE_ROLES_PATH` are exported with the installed tree first, followed by the `collections_path`/`roles_path` set here (Ansible's defaults when unset), so paths configured here keep resolving.
             """
     )
     @Builder.Default
@@ -568,6 +565,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
             .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
             .withEnv(rEnv.isEmpty() ? new HashMap<>() : rEnv)
+            .withNamespaceFiles(namespaceFiles)
             .withEnableOutputDirectory(true)
             .withOutputFiles(outputFilesList);
 
@@ -583,7 +581,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             workingDir,
             this.finalInputFiles(runContext, workingDir)
         );
-        // loaded once up front, not by the wrapper on every command, so requirements files are hashable below.
+        // also loaded up front so requirements files are hashable below, the wrapper still reloads them before every command.
         // The guard mirrors CommandsWrapper.run(), recheck it on core bumps.
         if (namespaceFiles != null && !Boolean.FALSE.equals(runContext.render(namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
             NamespaceFilesUtils.loadNamespaceFiles(runContext, namespaceFiles);
@@ -869,7 +867,60 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             commands.add(ifFilePresent(REQUIREMENTS_TXT, SCOPED_PIP_INSTALL + " -r " + REQUIREMENTS_TXT));
         }
 
-        return new DependencyInstall(DEPENDENCY_PATH_EXPORTS, commands, rCacheEnabled && !restored ? hash : null);
+        return new DependencyInstall(dependencyPathExports(workingDir), commands, rCacheEnabled && !restored ? hash : null);
+    }
+
+    /**
+     * Prepends the installed tree to the search paths. The fallback is what the working-dir ansible.cfg configures, the only
+     * config file Ansible reads here since the task always writes one, so the env vars never hide a path the user set there.
+     */
+    static List<String> dependencyPathExports(Path workingDir) throws IOException {
+        var config = readDefaultsSection(workingDir.resolve(ANSIBLE_CFG));
+        var collections = Optional.ofNullable(config.getOrDefault("collections_path", config.get("collections_paths")))
+            .map(AnsibleCLI::rootedPathList)
+            .orElse(DEFAULT_COLLECTIONS_PATH);
+        var roles = Optional.ofNullable(config.get("roles_path")).map(AnsibleCLI::rootedPathList).orElse(DEFAULT_ROLES_PATH);
+        return List.of(
+            "export KESTRA_ANSIBLE_ROOT=\"$PWD\"",
+            "export ANSIBLE_COLLECTIONS_PATH=\"" + DEPS + "/collections:${ANSIBLE_COLLECTIONS_PATH:-" + collections + "}\"",
+            "export ANSIBLE_ROLES_PATH=\"" + DEPS + "/roles:${ANSIBLE_ROLES_PATH:-" + roles + "}\"",
+            "export PYTHONPATH=\"" + DEPS + "/python${PYTHONPATH:+:$PYTHONPATH}\""
+        );
+    }
+
+    /** Keys of the [defaults] section, lower-cased, parsed like configparser: first `=` or `:` splits, `#`/`;` comment lines. */
+    static Map<String, String> readDefaultsSection(Path cfg) throws IOException {
+        var values = new HashMap<String, String>();
+        if (!Files.isRegularFile(cfg)) {
+            return values;
+        }
+        var inDefaults = false;
+        for (var raw : Files.readAllLines(cfg, StandardCharsets.UTF_8)) {
+            var line = raw.strip();
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+                continue;
+            }
+            if (line.startsWith("[")) {
+                inDefaults = line.equalsIgnoreCase("[defaults]");
+                continue;
+            }
+            var eq = line.indexOf('=');
+            var colon = line.indexOf(':');
+            var sep = eq < 0 ? colon : colon < 0 ? eq : Math.min(eq, colon);
+            if (inDefaults && sep > 0) {
+                values.put(line.substring(0, sep).strip().toLowerCase(Locale.ROOT), line.substring(sep + 1).strip());
+            }
+        }
+        return values;
+    }
+
+    // Ansible resolves relative cfg paths against the cfg's directory, the working-dir root. Values are escaped for a double-quoted shell string.
+    private static String rootedPathList(String paths) {
+        return Arrays.stream(paths.split(":"))
+            .map(String::strip)
+            .filter(p -> !p.isEmpty())
+            .map(p -> (p.startsWith("/") || p.startsWith("~") ? "" : ROOT + "/") + p.replaceAll("([\\\\\"$`])", "\\\\$1"))
+            .collect(Collectors.joining(":"));
     }
 
     private static String ifFilePresent(String file, String command) {

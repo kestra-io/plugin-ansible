@@ -15,6 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.event.Level;
 
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -2038,6 +2039,87 @@ class AnsibleCLITest {
 
         assertThat(disabled.run(disabledContext).getExitCode(), is(0));
         assertThat(enabledByDefault.run(TestsUtils.mockRunContext(runContextFactory, enabledByDefault, Map.of())).getExitCode(), is(0));
+    }
+
+    @Test
+    void run_multiCommand_namespaceFilesAreFreshForEveryCommand() throws Exception {
+        var task = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .namespaceFiles(NamespaceFiles.builder().build())
+            // command 2 must see the namespace copy again, not command 1's edit, as it did before the up-front load
+            .commands(Property.ofValue(List.of("echo changed > ns-fresh.txt", "grep -q original ns-fresh.txt")))
+            .build();
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        namespaceFactory.of(TenantService.MAIN_TENANT, runContext.flowInfo().namespace(), storage)
+            .putFile(Path.of("/ns-fresh.txt"), new ByteArrayInputStream("original".getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(task.run(runContext).getExitCode(), is(0));
+    }
+
+    @Test
+    void run_customAnsibleConfigCollectionsPath_staysOnTheSearchPath() throws Exception {
+        var task = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .ansibleConfig(Property.ofValue("""
+                [defaults]
+                callback_plugins  = ./callback_plugins
+                callbacks_enabled = kestra_logger
+                library           = ./library
+                collections_path  = ./mycols
+                roles_path        = ./myroles
+                """))
+            // something to install, so the dependency path exports apply
+            .inputFiles(Map.of("requirements.txt", "# cfg paths " + IdUtils.create() + "\n"))
+            .beforeCommands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-galaxy collection init acme.demo --init-path mycols/ansible_collections >/dev/null",
+                        "ansible-galaxy role init myroles/acme_role >/dev/null"
+                    )
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-galaxy collection list acme.demo | grep -q acme.demo && ansible-galaxy role list | grep -q acme_role"
+                    )
+                )
+            )
+            .build();
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+
+        assertThat(task.run(runContext).getExitCode(), is(0));
+    }
+
+    @Test
+    void dependencyPathExports_fallBackToTheAnsibleCfgPaths(@TempDir Path workingDir) throws Exception {
+        Files.writeString(workingDir.resolve(AnsibleCLI.ANSIBLE_CFG), """
+            # comment
+            [defaults]
+            collections_paths: ./mycols:/opt/shared:~/cols
+            roles_path = roles$(touch x)
+            [galaxy]
+            roles_path = ./ignored
+            """);
+
+        var exports = String.join("\n", AnsibleCLI.dependencyPathExports(workingDir));
+
+        // deprecated plural key, `:` separator, relative entries anchored, absolute and ~ kept, other sections ignored
+        assertThat(exports, containsString("${ANSIBLE_COLLECTIONS_PATH:-$KESTRA_ANSIBLE_ROOT/./mycols:/opt/shared:~/cols}"));
+        // shell metacharacters from the cfg are escaped, never expanded
+        assertThat(exports, containsString("${ANSIBLE_ROLES_PATH:-$KESTRA_ANSIBLE_ROOT/roles\\$(touch x)}"));
+    }
+
+    @Test
+    void dependencyPathExports_useAnsibleDefaultsWithoutCfgPaths(@TempDir Path workingDir) throws Exception {
+        var exports = String.join("\n", AnsibleCLI.dependencyPathExports(workingDir));
+
+        assertThat(exports, containsString("${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}"));
+        assertThat(exports, containsString("${ANSIBLE_ROLES_PATH:-$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles}"));
     }
 
     private static AnsibleCLI namespaceFilesTask(NamespaceFiles namespaceFiles, String command) {
