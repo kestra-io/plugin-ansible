@@ -330,6 +330,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     private static final String DEFAULT_COLLECTIONS_PATH = "$HOME/.ansible/collections:/usr/share/ansible/collections";
     private static final String DEFAULT_ROLES_PATH = "$HOME/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles";
+    // a `key = value` or `key: value` line, split at the first `=` or `:` like configparser. The possessive key never
+    // backtracks, so a long separator-less line in a user-supplied cfg stays linear (a lazy key plus \s* went quadratic).
+    private static final Pattern CFG_ENTRY = Pattern.compile("([^=:]++)[=:](.*)");
 
     @Schema(
         title = "Run once before commands",
@@ -875,11 +878,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * config file Ansible reads here since the task always writes one, so the env vars never hide a path the user set there.
      */
     static List<String> dependencyPathExports(Path workingDir) throws IOException {
-        var config = readDefaultsSection(workingDir.resolve(ANSIBLE_CFG));
-        var collections = Optional.ofNullable(config.getOrDefault("collections_path", config.get("collections_paths")))
-            .map(AnsibleCLI::rootedPathList)
-            .orElse(DEFAULT_COLLECTIONS_PATH);
-        var roles = Optional.ofNullable(config.get("roles_path")).map(AnsibleCLI::rootedPathList).orElse(DEFAULT_ROLES_PATH);
+        var cfg = workingDir.resolve(ANSIBLE_CFG);
+        var collections = configuredPath(cfg, "collections_path", "collections_paths").orElse(DEFAULT_COLLECTIONS_PATH);
+        var roles = configuredPath(cfg, "roles_path").orElse(DEFAULT_ROLES_PATH);
         return List.of(
             "export KESTRA_ANSIBLE_ROOT=\"$PWD\"",
             "export ANSIBLE_COLLECTIONS_PATH=\"" + DEPS + "/collections:${ANSIBLE_COLLECTIONS_PATH:-" + collections + "}\"",
@@ -888,39 +889,40 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         );
     }
 
-    /** Keys of the [defaults] section, lower-cased, parsed like configparser: first `=` or `:` splits, `#`/`;` comment lines. */
-    static Map<String, String> readDefaultsSection(Path cfg) throws IOException {
-        var values = new HashMap<String, String>();
+    /**
+     * First of {@code keys} set in the [defaults] section of an ansible.cfg (a repeated key keeps its last value, as in
+     * configparser), as a shell-safe path list with relative entries anchored to the working-dir root.
+     */
+    static Optional<String> configuredPath(Path cfg, String... keys) throws IOException {
         if (!Files.isRegularFile(cfg)) {
-            return values;
+            return Optional.empty();
         }
+        var defaults = new HashMap<String, String>();
         var inDefaults = false;
         for (var raw : Files.readAllLines(cfg, StandardCharsets.UTF_8)) {
             var line = raw.strip();
-            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
-                continue;
-            }
+            var entry = CFG_ENTRY.matcher(line);
             if (line.startsWith("[")) {
                 inDefaults = line.equalsIgnoreCase("[defaults]");
-                continue;
-            }
-            var eq = line.indexOf('=');
-            var colon = line.indexOf(':');
-            var sep = eq < 0 ? colon : colon < 0 ? eq : Math.min(eq, colon);
-            if (inDefaults && sep > 0) {
-                values.put(line.substring(0, sep).strip().toLowerCase(Locale.ROOT), line.substring(sep + 1).strip());
+            } else if (inDefaults && !line.startsWith("#") && !line.startsWith(";") && entry.matches()) {
+                defaults.put(entry.group(1).strip().toLowerCase(Locale.ROOT), entry.group(2).strip());
             }
         }
-        return values;
+        return Arrays.stream(keys).map(defaults::get).filter(Objects::nonNull).findFirst().map(AnsibleCLI::rootedPathList);
     }
 
-    // Ansible resolves relative cfg paths against the cfg's directory, the working-dir root. Values are escaped for a double-quoted shell string.
+    // relative cfg paths resolve against the cfg's directory, the working-dir root
     private static String rootedPathList(String paths) {
         return Arrays.stream(paths.split(":"))
             .map(String::strip)
-            .filter(p -> !p.isEmpty())
-            .map(p -> (p.startsWith("/") || p.startsWith("~") ? "" : ROOT + "/") + p.replaceAll("([\\\\\"$`])", "\\\\$1"))
+            .filter(path -> !path.isEmpty())
+            .map(path -> (path.startsWith("/") || path.startsWith("~") ? "" : ROOT + "/") + escapeForDoubleQuotes(path))
             .collect(Collectors.joining(":"));
+    }
+
+    // backslash-escapes what a double-quoted shell string would otherwise expand
+    private static String escapeForDoubleQuotes(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`");
     }
 
     private static String ifFilePresent(String file, String command) {

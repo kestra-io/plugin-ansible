@@ -47,6 +47,7 @@ import reactor.core.publisher.Flux;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 @KestraTest
 class AnsibleCLITest {
@@ -2112,6 +2113,16 @@ class AnsibleCLITest {
         assertThat(exports, containsString("${ANSIBLE_COLLECTIONS_PATH:-$KESTRA_ANSIBLE_ROOT/./mycols:/opt/shared:~/cols}"));
         // shell metacharacters from the cfg are escaped, never expanded
         assertThat(exports, containsString("${ANSIBLE_ROLES_PATH:-$KESTRA_ANSIBLE_ROOT/roles\\$(touch x)}"));
+    }
+
+    @Test
+    void dependencyPathExports_stayLinearOnAPathologicalCfgLine(@TempDir Path workingDir) throws Exception {
+        // 200k chars, no separator: a backtracking key pattern took ~100s on this
+        Files.writeString(workingDir.resolve(AnsibleCLI.ANSIBLE_CFG), "[defaults]\nk" + " ".repeat(200_000) + "v\nroles_path = ./r\n");
+
+        var exports = assertTimeoutPreemptively(Duration.ofSeconds(2), () -> String.join("\n", AnsibleCLI.dependencyPathExports(workingDir)));
+
+        assertThat(exports, containsString("${ANSIBLE_ROLES_PATH:-$KESTRA_ANSIBLE_ROOT/./r}"));
     }
 
     @Test
