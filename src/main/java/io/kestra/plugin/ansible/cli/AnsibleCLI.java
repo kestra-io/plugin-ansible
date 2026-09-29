@@ -665,191 +665,204 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         boolean multiCmd = rCommands.size() > 1;
         List<Path> perCommandLogs = new ArrayList<>();
 
-        int idx = 0;
-        for (String cmd : rCommands) {
-            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
-            envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
-            envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
+        URI resultsUri;
+        try {
+            int idx = 0;
+            for (String cmd : rCommands) {
+                Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
+                envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
+                envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
 
-            // Each command gets its own outputs file: the callback writes it once per
-            // ansible-playbook run, and a shared name would let a later command in a
-            // multi-command task overwrite an earlier one's payload before we read it back.
-            Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
-            envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
-            // the container may run as a non-root user while the working dir stays root-owned, so
-            // it can't create a new file there; pre-create one it can open with O_TRUNC instead
-            createContainerWritableFile(runContext, outputsFile);
+                // Each command gets its own outputs file: the callback writes it once per
+                // ansible-playbook run, and a shared name would let a later command in a
+                // multi-command task overwrite an earlier one's payload before we read it back.
+                Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
+                envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
+                // the container may run as a non-root user while the working dir stays root-owned, so
+                // it can't create a new file there; pre-create one it can open with O_TRUNC instead
+                createContainerWritableFile(runContext, outputsFile);
 
-            envForRun.put(RESULTS_STORAGE_ENV, rResultsStorage.name().toLowerCase(Locale.ROOT));
-            if (rResultsStorage == ResultsStorage.STORE) {
-                Path resultsFile = workingDir.resolve("kestra-results-" + idx + ".json");
-                envForRun.put(RESULTS_FILE_ENV, resultsFile.toString());
-                createContainerWritableFile(runContext, resultsFile);
-                resultsFiles.add(resultsFile);
-            }
-
-            // If multiple commands and outputLogFile enabled,
-            // override ANSIBLE_LOG_PATH so each run writes a different file.
-            // The default ansibleConfig always sets log_path, so pre-create whichever file
-            // is actually targeted this run, otherwise Ansible warns on every non-root run.
-            if (wantLogFile && multiCmd) {
-                Path logPath = workingDir.resolve("log-" + idx);
-                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
-                perCommandLogs.add(logPath);
-                createContainerWritableFile(runContext, logPath);
-            } else {
-                createContainerWritableFile(runContext, workingDir.resolve("log"));
-            }
-
-            // First (before any user `cd`, so $PWD is the working-dir root) and on every command
-            // (each runs in its own container).
-            boolean isFirstCommand = !beforeDone;
-            List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
-            beforeForRun.addAll(dependencyInstall.pathExports());
-            if (isFirstCommand) {
-                // User beforeCommands can configure the environment
-                // (e.g. private pip index, proxy, auth) before auto-install fires.
-                beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
-                beforeForRun.addAll(dependencyInstall.commands());
-            }
-            Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
-
-            CommandsWrapper commandWrapper = baseWrapper
-                .withEnv(envForRun)
-                // user beforeCommands + auto-install run once before the first command; the callback
-                // path exports are re-applied before every command (each runs in its own container)
-                .withBeforeCommands(mergedBeforeCommands)
-                // single command per run so Kestra doesn't overwrite outputs
-                .withCommands(Property.ofValue(List.of(cmd)));
-
-            // the consumer is shared across commands, so drop any half-wrapped warning state
-            // left by the previous one before its successor's stderr starts arriving
-            logConsumer.reset();
-
-            ScriptOutput out;
-            try {
-                out = commandWrapper.run();
-            } catch (RunnableTaskException e) {
-                // a non-zero exit still leaves the callback's payload behind: keep going to read it
-                // back so the failed attempt carries its outputs, see the end of run()
-                if (!(e.getOutput() instanceof ScriptOutput failedOutput)) {
-                    deleteQuietly(runContext, resultsFiles);
-                    throw e;
-                }
-                failure = e;
-                out = failedOutput;
-            } finally {
-                // the install ran in the first command, even a failing one leaves a cacheable tree
-                if (isFirstCommand && dependencyInstall.uploadHash() != null) {
-                    saveDependencyCache(runContext, workingDir, dependencyInstall.uploadHash());
-                }
-            }
-
-            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
-            mergedStdOutCount += out.getStdOutLineCount();
-            mergedStdErrCount += out.getStdErrLineCount();
-
-            lastOutputFiles = out.getOutputFiles();
-            lastTaskRunner = out.getTaskRunner();
-
-            Map<String, Object> vars = out.getVars();
-            if (vars != null) {
-                // merge structured playbooks, in case a command's own stdout emits them
-                // directly (e.g. a user-authored "::{...}::" line); ansible-playbook runs no
-                // longer go through this path (see the outputs file read below, issue #126)
-                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
-                if (pbs != null && !pbs.isEmpty()) {
-                    mergedPlaybooks.addAll(pbs);
+                envForRun.put(RESULTS_STORAGE_ENV, rResultsStorage.name().toLowerCase(Locale.ROOT));
+                if (rResultsStorage == ResultsStorage.STORE) {
+                    Path resultsFile = workingDir.resolve("kestra-results-" + idx + ".json");
+                    envForRun.put(RESULTS_FILE_ENV, resultsFile.toString());
+                    createContainerWritableFile(runContext, resultsFile);
+                    resultsFiles.add(resultsFile);
                 }
 
-                // merge remaining vars (last-wins); "outputs" is rebuilt from the declared values below.
-                // An unmarked "outputs" key stays skipped, exactly as before commit cd79bfb:
-                // it may be a user-authored "::{...}::" stdout line, which is
-                // indistinguishable from the callback's own frame without the marker below.
-                // Only the callback's stdout fallback frame (see kestra_logger.py
-                // _log_kestra_outputs) carries EXPLICIT_OUTPUTS_FALLBACK_MARKER, so that marked
-                // frame is the sole trusted carrier of the declared outputs map,
-                // recovered here because the outputs-file read below is empty precisely when
-                // that fallback fired.
-                boolean isTrustedFallbackFrame = Boolean.TRUE.equals(vars.get(EXPLICIT_OUTPUTS_FALLBACK_MARKER));
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    String key = e.getKey();
-                    if ("outputs".equals(key)) {
-                        if (isTrustedFallbackFrame && e.getValue() instanceof Map<?, ?> explicit) {
-                            explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                // If multiple commands and outputLogFile enabled,
+                // override ANSIBLE_LOG_PATH so each run writes a different file.
+                // The default ansibleConfig always sets log_path, so pre-create whichever file
+                // is actually targeted this run, otherwise Ansible warns on every non-root run.
+                if (wantLogFile && multiCmd) {
+                    Path logPath = workingDir.resolve("log-" + idx);
+                    envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
+                    perCommandLogs.add(logPath);
+                    createContainerWritableFile(runContext, logPath);
+                } else {
+                    createContainerWritableFile(runContext, workingDir.resolve("log"));
+                }
+
+                // First (before any user `cd`, so $PWD is the working-dir root) and on every command
+                // (each runs in its own container).
+                boolean isFirstCommand = !beforeDone;
+                List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
+                beforeForRun.addAll(dependencyInstall.pathExports());
+                if (isFirstCommand) {
+                    // User beforeCommands can configure the environment
+                    // (e.g. private pip index, proxy, auth) before auto-install fires.
+                    beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
+                    beforeForRun.addAll(dependencyInstall.commands());
+                }
+                Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
+
+                CommandsWrapper commandWrapper = baseWrapper
+                    .withEnv(envForRun)
+                    // user beforeCommands + auto-install run once before the first command; the callback
+                    // path exports are re-applied before every command (each runs in its own container)
+                    .withBeforeCommands(mergedBeforeCommands)
+                    // single command per run so Kestra doesn't overwrite outputs
+                    .withCommands(Property.ofValue(List.of(cmd)));
+
+                // the consumer is shared across commands, so drop any half-wrapped warning state
+                // left by the previous one before its successor's stderr starts arriving
+                logConsumer.reset();
+
+                ScriptOutput out;
+                try {
+                    out = commandWrapper.run();
+                } catch (RunnableTaskException e) {
+                    // a non-zero exit still leaves the callback's payload behind: keep going to read it
+                    // back so the failed attempt carries its outputs, see the end of run()
+                    if (!(e.getOutput() instanceof ScriptOutput failedOutput)) {
+                        deleteQuietly(runContext, resultsFiles);
+                        throw e;
+                    }
+                    failure = e;
+                    out = failedOutput;
+                } finally {
+                    // the install ran in the first command, even a failing one leaves a cacheable tree
+                    if (isFirstCommand && dependencyInstall.uploadHash() != null) {
+                        saveDependencyCache(runContext, workingDir, dependencyInstall.uploadHash());
+                    }
+                }
+
+                mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
+                mergedStdOutCount += out.getStdOutLineCount();
+                mergedStdErrCount += out.getStdErrLineCount();
+
+                lastOutputFiles = out.getOutputFiles();
+                lastTaskRunner = out.getTaskRunner();
+
+                Map<String, Object> vars = out.getVars();
+                if (vars != null) {
+                    // merge structured playbooks, in case a command's own stdout emits them
+                    // directly (e.g. a user-authored "::{...}::" line); ansible-playbook runs no
+                    // longer go through this path (see the outputs file read below, issue #126)
+                    List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
+                    if (pbs != null && !pbs.isEmpty()) {
+                        mergedPlaybooks.addAll(pbs);
+                    }
+
+                    // merge remaining vars (last-wins); "outputs" is rebuilt from the declared values below.
+                    // An unmarked "outputs" key stays skipped, exactly as before commit cd79bfb:
+                    // it may be a user-authored "::{...}::" stdout line, which is
+                    // indistinguishable from the callback's own frame without the marker below.
+                    // Only the callback's stdout fallback frame (see kestra_logger.py
+                    // _log_kestra_outputs) carries EXPLICIT_OUTPUTS_FALLBACK_MARKER, so that marked
+                    // frame is the sole trusted carrier of the declared outputs map,
+                    // recovered here because the outputs-file read below is empty precisely when
+                    // that fallback fired.
+                    boolean isTrustedFallbackFrame = Boolean.TRUE.equals(vars.get(EXPLICIT_OUTPUTS_FALLBACK_MARKER));
+                    for (Map.Entry<String, Object> e : vars.entrySet()) {
+                        String key = e.getKey();
+                        if ("outputs".equals(key)) {
+                            if (isTrustedFallbackFrame && e.getValue() instanceof Map<?, ?> explicit) {
+                                explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                            }
+                            continue;
                         }
-                        continue;
+                        if ("playbooks".equals(key) || EXPLICIT_OUTPUTS_FALLBACK_MARKER.equals(key)) {
+                            continue;
+                        }
+                        mergedVars.put(key, e.getValue());
                     }
-                    if ("playbooks".equals(key) || EXPLICIT_OUTPUTS_FALLBACK_MARKER.equals(key)) {
-                        continue;
-                    }
-                    mergedVars.put(key, e.getValue());
                 }
+
+                // Read back the outputs/playbooks payload the kestra_logger callback wrote to a
+                // file instead of printing to stdout: a single, potentially multi-MB stdout line
+                // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
+                boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
+                OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
+                oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
+                outputsRead.payload().ifPresent(payload ->
+                {
+                    if (payload.get("outputs") instanceof Map<?, ?> explicit) {
+                        explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                    }
+
+                    List<AnsibleOutput.PlaybookOutput> filePlaybooks = extractPlaybooks(payload);
+                    if (!filePlaybooks.isEmpty()) {
+                        mergedPlaybooks.addAll(filePlaybooks);
+                    }
+                });
+
+                if (failure != null) {
+                    break;
+                }
+
+                beforeDone = true;
+                idx++;
             }
 
-            // Read back the outputs/playbooks payload the kestra_logger callback wrote to a
-            // file instead of printing to stdout: a single, potentially multi-MB stdout line
-            // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
-            boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
-            OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
-            oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
-            outputsRead.payload().ifPresent(payload ->
-            {
-                if (payload.get("outputs") instanceof Map<?, ?> explicit) {
-                    explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
-                }
+            // If we produced per-command logs, concatenate into final "log"
+            if (wantLogFile && multiCmd && !perCommandLogs.isEmpty()) {
+                Path finalLog = workingDir.resolve("log");
+                // truncate/create
+                Files.writeString(
+                    finalLog, "", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
+                );
 
-                List<AnsibleOutput.PlaybookOutput> filePlaybooks = extractPlaybooks(payload);
-                if (!filePlaybooks.isEmpty()) {
-                    mergedPlaybooks.addAll(filePlaybooks);
-                }
-            });
-
-            if (failure != null) {
-                break;
-            }
-
-            beforeDone = true;
-            idx++;
-        }
-
-        // If we produced per-command logs, concatenate into final "log"
-        if (wantLogFile && multiCmd && !perCommandLogs.isEmpty()) {
-            Path finalLog = workingDir.resolve("log");
-            // truncate/create
-            Files.writeString(
-                finalLog, "", StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
-            );
-
-            for (Path p : perCommandLogs) {
-                if (Files.exists(p)) {
-                    String content = Files.readString(p, StandardCharsets.UTF_8);
-                    if (!content.isEmpty()) {
-                        Files.writeString(
-                            finalLog, content, StandardCharsets.UTF_8,
-                            StandardOpenOption.CREATE, StandardOpenOption.APPEND
-                        );
-                        if (!content.endsWith("\n")) {
+                for (Path p : perCommandLogs) {
+                    if (Files.exists(p)) {
+                        String content = Files.readString(p, StandardCharsets.UTF_8);
+                        if (!content.isEmpty()) {
                             Files.writeString(
-                                finalLog, "\n", StandardCharsets.UTF_8,
+                                finalLog, content, StandardCharsets.UTF_8,
                                 StandardOpenOption.CREATE, StandardOpenOption.APPEND
                             );
+                            if (!content.endsWith("\n")) {
+                                Files.writeString(
+                                    finalLog, "\n", StandardCharsets.UTF_8,
+                                    StandardOpenOption.CREATE, StandardOpenOption.APPEND
+                                );
+                            }
                         }
                     }
                 }
+
+                // upload final log so outputs contains "log"
+                URI logUri = runContext.storage().putFile(finalLog.toFile());
+                Map<String, URI> patched = new HashMap<>(lastOutputFiles);
+                patched.put("log", logUri);
+                lastOutputFiles = patched;
             }
 
-            // upload final log so outputs contains "log"
-            URI logUri = runContext.storage().putFile(finalLog.toFile());
-            Map<String, URI> patched = new HashMap<>(lastOutputFiles);
-            patched.put("log", logUri);
-            lastOutputFiles = patched;
+            resultsUri = storeResults(runContext, workingDir, resultsFiles);
+        } finally {
+            deleteQuietly(runContext, resultsFiles);
         }
 
-        URI resultsUri = storeResults(runContext, workingDir, resultsFiles);
-
         mergedVars.put("outputs", mergedExplicitOutputs);
+
+        if (failure != null && oversizedOutputsFileBytes > 0) {
+            runContext.logger().error(
+                "The failing command's outputs file is {} bytes, over the `maxOutputsSize` of {} bytes, so its `playbooks` are left out of the failed attempt's outputs.{}",
+                oversizedOutputsFileBytes, rMaxOutputsSize,
+                resultsUri != null ? " The full per-host results are stored at " + resultsUri : " Raise `maxOutputsSize` or use `outputsMode: EXPLICIT` to keep them."
+            );
+        }
 
         if (failure == null) {
             // Emit before the size guard: these travel on the log queue, not the WorkerTaskResult the

@@ -233,6 +233,10 @@ class AnsibleCLITest {
     // -------------------------------------------------------------------------
 
     private AnsibleCLI.AnsibleOutput runPlaybooks(AnsibleCLI.ResultsStorage resultsStorage, String... playbooks) throws Exception {
+        return runPlaybooks(AnsibleCLI.OutputsMode.ALL, resultsStorage, playbooks);
+    }
+
+    private AnsibleCLI.AnsibleOutput runPlaybooks(AnsibleCLI.OutputsMode outputsMode, AnsibleCLI.ResultsStorage resultsStorage, String... playbooks) throws Exception {
         var inputFiles = new HashMap<String, String>();
         var commands = new ArrayList<String>();
         for (var playbook : playbooks) {
@@ -256,6 +260,7 @@ class AnsibleCLITest {
                     .entryPoint(Collections.emptyList())
                     .build()
             )
+            .outputsMode(Property.ofValue(outputsMode))
             .resultsStorage(Property.ofValue(resultsStorage))
             .inputFiles(inputFiles)
             .commands(Property.ofValue(commands))
@@ -345,6 +350,20 @@ class AnsibleCLITest {
         assertThat(msg, startsWith("[0, 1, 2, 3"));
         assertThat(msg, endsWith("... (truncated)"));
         assertThat(msg.length(), lessThan(1100));
+    }
+
+    @Test
+    void run_explicitModeWithStoreMode_neverExposesTheSecretInlineOrStored() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.OutputsMode.EXPLICIT, AnsibleCLI.ResultsStorage.STORE, "playbook-explicit-secret.yml");
+
+        assertThat(runOutput.getResultsUri(), is(notNullValue()));
+        var stored = JacksonMapper.ofJson().writeValueAsString(readResults(runOutput.getResultsUri()));
+        assertThat(stored, containsString("Print the registered secret"));
+        assertThat(stored, not(containsString("hunter2-secret-token")));
+
+        var inline = JacksonMapper.ofJson().writeValueAsString(runOutput.getPlaybooks());
+        assertThat(inline, not(containsString("hunter2-secret-token")));
+        assertThat(JacksonMapper.ofJson().writeValueAsString(runOutput.getVars()), not(containsString("hunter2-secret-token")));
     }
 
     @Test

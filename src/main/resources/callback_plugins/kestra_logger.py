@@ -5,6 +5,7 @@
 from __future__ import annotations
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 
 DOCUMENTATION = """
@@ -163,12 +164,26 @@ class CallbackModule(CallbackBase):
             print("::" + json.dumps({"outputs": fallback_vars}, default=str) + "::")
 
     def _write_private_json(self, path, content):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
         # 0600: these files hold raw per-host results (registered vars, stdout/msg, gathered
-        # facts) which may carry secrets a playbook fetched. Open with restrictive permissions
-        # and re-apply them on the descriptor, so an existing file created with a wider umask
-        # cannot leave the payload world-readable. AnsibleCLI deletes the file as soon as it has
-        # consumed it.
+        # facts) which may carry secrets a playbook fetched. AnsibleCLI deletes the file as soon
+        # as it has consumed it.
+        try:
+            existing = os.stat(path)
+        except OSError:
+            existing = None
+
+        # AnsibleCLI pre-creates the file, so it is owned by the worker user. Replacing it keeps
+        # that owner only if this process can restore it; otherwise (e.g. a non-root container
+        # user, who could not create a sibling file either) fall back to truncating it in place.
+        if existing is None or existing.st_uid == os.geteuid() or os.geteuid() == 0:
+            try:
+                self._write_atomically(path, directory, content, existing)
+                return
+            except OSError:
+                pass
+
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.fchmod(fd, 0o600)
@@ -177,6 +192,26 @@ class CallbackModule(CallbackBase):
             pass
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(content, fh, default=str, separators=(",", ":"))
+
+    @staticmethod
+    def _write_atomically(path, directory, content, existing):
+        """
+        Written to a temp file and renamed over the target, so a run killed mid-write never
+        leaves a truncated file for AnsibleCLI to read. mkstemp creates it 0600.
+        """
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".kestra-tmp-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(content, fh, default=str, separators=(",", ":"))
+            if existing is not None and existing.st_uid != os.geteuid():
+                os.chown(tmp_path, existing.st_uid, existing.st_gid)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _write_results_file(self):
         """
