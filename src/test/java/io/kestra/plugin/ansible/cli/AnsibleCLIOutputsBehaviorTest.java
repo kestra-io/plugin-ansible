@@ -3,7 +3,6 @@ package io.kestra.plugin.ansible.cli;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -26,10 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Fast, deterministic unit tests for the Java-side helpers introduced to fix issue #126: rebuilding
- * the flat "outputs" list from the structured playbooks (instead of the callback duplicating every
- * per-host result on stdout), the outputs-file size guard, the per-host log verbosity modes, and
- * graceful degradation when the outputs file the callback writes is missing or unreadable.
+ * Fast, deterministic unit tests for the Java-side output helpers: the outputs size guard, the
+ * byte-level merge of the stored results files, the per-host log verbosity modes, and graceful
+ * degradation when the outputs file the callback writes is missing or unreadable.
  * None of these exercise Docker/Ansible, so they run in milliseconds.
  */
 @KestraTest
@@ -54,83 +52,101 @@ class AnsibleCLIOutputsBehaviorTest {
     }
 
     // -------------------------------------------------------------------------
-    // flattenHostResults: ordering across playbooks -> plays -> tasks -> hosts
-    // -------------------------------------------------------------------------
-
-    @Test
-    void flattenHostResults_preservesPlaybookPlayTaskHostOrder() {
-        var task1 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
-            .name("task1")
-            .hosts(
-                List.of(
-                    host("h1", "ok", Map.of("k", "t1h1")),
-                    host("h2", "ok", Map.of("k", "t1h2"))
-                )
-            )
-            .build();
-        var task2 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
-            .name("task2")
-            .hosts(List.of(host("h1", "ok", Map.of("k", "t2h1"))))
-            .build();
-        var play1 = AnsibleCLI.AnsibleOutput.PlayOutput.builder().name("play1").tasks(List.of(task1, task2)).build();
-        var playbook1 = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder().plays(List.of(play1)).build();
-
-        var task3 = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
-            .name("task3")
-            .hosts(List.of(host("h1", "ok", Map.of("k", "t3h1"))))
-            .build();
-        var play2 = AnsibleCLI.AnsibleOutput.PlayOutput.builder().name("play2").tasks(List.of(task3)).build();
-        var playbook2 = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder().plays(List.of(play2)).build();
-
-        List<Object> flat = AnsibleCLI.flattenHostResults(List.of(playbook1, playbook2));
-
-        assertThat(
-            flat,
-            contains(Map.of("k", "t1h1"), Map.of("k", "t1h2"), Map.of("k", "t2h1"), Map.of("k", "t3h1"))
-        );
-    }
-
-    @Test
-    void flattenHostResults_nullOrEmptyPlaybooks_returnsEmptyList() {
-        assertThat(AnsibleCLI.flattenHostResults(null), is(empty()));
-        assertThat(AnsibleCLI.flattenHostResults(List.of()), is(empty()));
-    }
-
-    @Test
-    void flattenHostResults_skipsPlaysAndTasksWithoutHosts() {
-        var emptyTask = AnsibleCLI.AnsibleOutput.TaskOutput.builder().name("noop").hosts(null).build();
-        var play = AnsibleCLI.AnsibleOutput.PlayOutput.builder().name("play").tasks(List.of(emptyTask)).build();
-        var playbook = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder().plays(List.of(play)).build();
-
-        assertThat(AnsibleCLI.flattenHostResults(List.of(playbook)), is(empty()));
-    }
-
-    // -------------------------------------------------------------------------
     // checkOutputsSize: the queue/task-output guard (not the hang fix)
     // -------------------------------------------------------------------------
 
-    @Test
-    void checkOutputsSize_underLimit_doesNotThrow() {
-        AnsibleCLI task = newTask();
-        Map<String, Object> vars = new HashMap<>();
-        vars.put("outputs", List.of(Map.of("msg", "small")));
-        vars.put("playbooks", List.of());
-
-        assertDoesNotThrow(() -> task.checkOutputsSize(vars, 10_000_000L));
+    private static AnsibleCLI.AnsibleOutput outputWith(String stdout) {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "ok", Map.of("stdout", stdout))))
+            .build();
+        var play = AnsibleCLI.AnsibleOutput.PlayOutput.builder().tasks(List.of(task)).build();
+        var playbook = AnsibleCLI.AnsibleOutput.PlaybookOutput.builder().plays(List.of(play)).build();
+        return AnsibleCLI.AnsibleOutput.builder()
+            .vars(Map.of("outputs", Map.of()))
+            .playbooks(List.of(playbook))
+            .build();
     }
 
     @Test
-    void checkOutputsSize_overLimit_throwsActionableError() {
-        AnsibleCLI task = newTask();
-        Map<String, Object> vars = new HashMap<>();
-        vars.put("outputs", List.of(Map.of("msg", "x".repeat(1000))));
-        vars.put("playbooks", List.of());
+    void checkOutputsSize_underLimit_doesNotThrow() {
+        assertDoesNotThrow(
+            () -> newTask().checkOutputsSize(outputWith("small"), 10_000_000L, AnsibleCLI.ResultsStorage.STORE)
+        );
+    }
 
-        IllegalStateException e = assertThrows(IllegalStateException.class, () -> task.checkOutputsSize(vars, 100L));
+    // the typed `playbooks` field is what is emitted, so it is what the bound must measure
+    @Test
+    void checkOutputsSize_countsTypedPlaybooks_inInlineMode() {
+        var output = outputWith("x".repeat(1000));
 
-        // actionable: names the offending property and points at the escape hatch
+        IllegalStateException e = assertThrows(
+            IllegalStateException.class,
+            () -> newTask().checkOutputsSize(output, 100L, AnsibleCLI.ResultsStorage.INLINE)
+        );
+
         assertThat(e.getMessage(), containsString("maxOutputsSize"));
+        assertThat(e.getMessage(), containsString("resultsStorage: STORE"));
         assertThat(e.getMessage(), containsString("outputsMode: EXPLICIT"));
+        assertThat(e.getMessage().indexOf("resultsStorage: STORE"), lessThan(e.getMessage().indexOf("outputsMode: EXPLICIT")));
+    }
+
+    @Test
+    void checkOutputsSize_overLimit_inStoreMode_doesNotSuggestStoringResults() {
+        var output = outputWith("x".repeat(1000));
+
+        IllegalStateException e = assertThrows(
+            IllegalStateException.class,
+            () -> newTask().checkOutputsSize(output, 100L, AnsibleCLI.ResultsStorage.STORE)
+        );
+
+        assertThat(e.getMessage(), containsString("outputsMode: EXPLICIT"));
+        assertThat(e.getMessage(), not(containsString("resultsStorage: STORE")));
+    }
+
+    // -------------------------------------------------------------------------
+    // mergeResultsFiles: byte-level merge of the per-command results files
+    // -------------------------------------------------------------------------
+
+    private String merge(Path target, Path... sources) throws Exception {
+        var merged = AnsibleCLI.mergeResultsFiles(TestsUtils.mockRunContext(runContextFactory, newTask(), Map.of()), List.of(sources), target);
+        return merged ? Files.readString(target) : null;
+    }
+
+    @Test
+    void mergeResultsFiles_joinsSeveralPlaybooksAndCommands(@TempDir Path tempDir) throws Exception {
+        var first = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]},{\"plays\":[2]}]");
+        var second = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[3]}]");
+
+        var merged = merge(tempDir.resolve("merged.json"), first, second);
+
+        assertThat(merged, is("[{\"plays\":[1]},{\"plays\":[2]},{\"plays\":[3]}]"));
+    }
+
+    @Test
+    void mergeResultsFiles_skipsEmptyListsEmptyAndMissingFiles(@TempDir Path tempDir) throws Exception {
+        var emptyList = Files.writeString(tempDir.resolve("r0.json"), "[]");
+        var placeholder = Files.writeString(tempDir.resolve("r1.json"), "");
+        var missing = tempDir.resolve("r2.json");
+        var real = Files.writeString(tempDir.resolve("r3.json"), "[{\"plays\":[]}]");
+
+        var merged = merge(tempDir.resolve("merged.json"), emptyList, placeholder, missing, real);
+
+        assertThat(merged, is("[{\"plays\":[]}]"));
+    }
+
+    @Test
+    void mergeResultsFiles_nothingToMerge_reportsNoResults(@TempDir Path tempDir) throws Exception {
+        var emptyList = Files.writeString(tempDir.resolve("r0.json"), "[]");
+
+        assertThat(merge(tempDir.resolve("merged.json"), emptyList, tempDir.resolve("missing.json")), is(nullValue()));
+    }
+
+    @Test
+    void mergeResultsFiles_skipsFileThatIsNotAJsonArray(@TempDir Path tempDir) throws Exception {
+        var truncated = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]}");
+        var real = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[2]}]");
+
+        assertThat(merge(tempDir.resolve("merged.json"), truncated, real), is("[{\"plays\":[2]}]"));
     }
 
     // -------------------------------------------------------------------------
@@ -143,7 +159,7 @@ class AnsibleCLIOutputsBehaviorTest {
             .hosts(List.of(host("h1", "ok", Map.of("stdout", "lots of sensitive detail"))))
             .build();
 
-        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.ResultsStorage.INLINE);
 
         assertThat(logs.size(), is(1));
         assertThat(logs.getFirst().message(), is("[h1] ok"));
@@ -156,7 +172,7 @@ class AnsibleCLIOutputsBehaviorTest {
             .hosts(List.of(host("h1", "failed", Map.of("msg", "boom", "stdout", "lots of detail"))))
             .build();
 
-        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.ResultsStorage.INLINE);
 
         assertThat(logs.getFirst().message(), is("[h1] failed => boom"));
         assertThat(logs.getFirst().level(), is(Level.ERROR));
@@ -169,23 +185,34 @@ class AnsibleCLIOutputsBehaviorTest {
             .hosts(List.of(host("h1", "ok", Map.of("stdout", "full detail here"))))
             .build();
 
-        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.FULL);
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.FULL, AnsibleCLI.ResultsStorage.INLINE);
 
         assertThat(logs.getFirst().message(), containsString("full detail here"));
     }
 
     @Test
-    void taskLogs_truncatesOverlyLongLines_andPointsAtOutputs() {
+    void taskLogs_truncatesOverlyLongLines_andPointsAtPlaybooks() {
         String longMsg = "x".repeat(10_000);
         var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
             .hosts(List.of(host("h1", "failed", Map.of("msg", longMsg))))
             .build();
 
-        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY);
+        List<DynamicTaskRunLog> logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.ResultsStorage.INLINE);
 
         assertThat(logs.getFirst().message().length(), lessThan(longMsg.length()));
         assertThat(logs.getFirst().message(), containsString("truncated"));
-        assertThat(logs.getFirst().message(), containsString("outputs"));
+        assertThat(logs.getFirst().message(), containsString("`playbooks`"));
+    }
+
+    @Test
+    void taskLogs_truncatedLine_inStoreMode_pointsAtResultsUri() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "failed", Map.of("msg", "x".repeat(10_000)))))
+            .build();
+
+        var logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.ResultsStorage.STORE);
+
+        assertThat(logs.getFirst().message(), containsString("`resultsUri`"));
     }
 
     // -------------------------------------------------------------------------
@@ -263,7 +290,7 @@ class AnsibleCLIOutputsBehaviorTest {
     void failOnOversizedOutputsFile_throwsSameActionableError() {
         IllegalStateException e = assertThrows(
             IllegalStateException.class,
-            () -> AnsibleCLI.failOnOversizedOutputsFile(2_000L, 1_000L)
+            () -> AnsibleCLI.failOnOversizedOutputsFile(2_000L, 1_000L, AnsibleCLI.ResultsStorage.STORE)
         );
 
         assertThat(e.getMessage(), containsString("maxOutputsSize"));
@@ -273,7 +300,7 @@ class AnsibleCLIOutputsBehaviorTest {
 
     @Test
     void failOnOversizedOutputsFile_nothingOversized_doesNotThrow() {
-        assertDoesNotThrow(() -> AnsibleCLI.failOnOversizedOutputsFile(0L, 1_000L));
+        assertDoesNotThrow(() -> AnsibleCLI.failOnOversizedOutputsFile(0L, 1_000L, AnsibleCLI.ResultsStorage.STORE));
     }
 
     // -------------------------------------------------------------------------

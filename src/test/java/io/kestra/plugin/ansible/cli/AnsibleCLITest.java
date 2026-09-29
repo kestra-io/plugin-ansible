@@ -7,7 +7,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,6 +21,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.event.Level;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
@@ -26,6 +29,7 @@ import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.NamespaceFiles;
+import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.queues.QueueFactoryInterface;
 import io.kestra.core.queues.QueueInterface;
 import io.kestra.core.runners.RunContext;
@@ -185,19 +189,20 @@ class AnsibleCLITest {
                     )
                 )
             )
+            .resultsStorage(Property.ofValue(AnsibleCLI.ResultsStorage.INLINE))
             .outputLogFile(Property.ofValue(true))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
-        ScriptOutput runOutput = execute.run(runContext);
+        AnsibleCLI.AnsibleOutput runOutput = execute.run(runContext);
 
         assertThat(runOutput.getExitCode(), is(0));
         assertThat(runOutput.getOutputFiles().size(), is(1));
         assertThat(runOutput.getOutputFiles().get("log"), is(notNullValue()));
 
         // Get outputs for 6 tasks
-        List<Map<String, Object>> outputs = ((List<Map<String, Object>>) runOutput.getVars().get("outputs"));
+        List<Map<String, Object>> outputs = hostResults(runOutput);
         assertThat(outputs.size(), is(6));
 
         // Verify output via 'withItems' (First task)
@@ -223,9 +228,189 @@ class AnsibleCLITest {
         assertThat(additionalMessages, containsInAnyOrder("Multiline message : line 3", "Multiline message : line 4"));
     }
 
+    // -------------------------------------------------------------------------
+    // per-host results are stored once: light inline, full in internal storage (issue #138)
+    // -------------------------------------------------------------------------
+
+    private AnsibleCLI.AnsibleOutput runPlaybooks(AnsibleCLI.ResultsStorage resultsStorage, String... playbooks) throws Exception {
+        var inputFiles = new HashMap<String, String>();
+        var commands = new ArrayList<String>();
+        for (var playbook : playbooks) {
+            inputFiles.put(
+                "playbooks/" + playbook, storage.put(
+                    TenantService.MAIN_TENANT,
+                    null,
+                    URI.create("/" + IdUtils.create() + ".ion"),
+                    this.getClass().getClassLoader().getResourceAsStream("playbooks/" + playbook)
+                ).toString()
+            );
+            commands.add("ansible-playbook -i localhost -c local playbooks/" + playbook);
+        }
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .resultsStorage(Property.ofValue(resultsStorage))
+            .inputFiles(inputFiles)
+            .commands(Property.ofValue(commands))
+            .build();
+
+        return execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()));
+    }
+
+    private JsonNode readResults(URI resultsUri) throws Exception {
+        try (InputStream is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
+            return JacksonMapper.ofJson().readTree(is);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> loopItems(AnsibleCLI.AnsibleOutput.PlaybookOutput playbook) {
+        var result = (Map<String, Object>) playbook.getPlays().getFirst().getTasks().getFirst().getHosts().getFirst().getResult();
+        return (List<Map<String, Object>>) result.get("results");
+    }
+
+    private static JsonNode firstHostResult(JsonNode playbook) {
+        return playbook.get("plays").get(0).get("tasks").get(0).get("hosts").get(0).get("result");
+    }
+
+    @Test
+    void run_storeMode_keepsLightResultsInline_andFullResultsInStorage() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-large-loop.yml");
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        var inlineItems = loopItems(runOutput.getPlaybooks().getFirst());
+        assertThat(inlineItems.size(), is(50));
+        for (var item : inlineItems) {
+            assertThat(Set.of("changed", "failed", "skipped", "unreachable", "rc", "msg").containsAll(item.keySet()), is(true));
+        }
+        assertThat(runOutput.getVars().containsKey("playbooks"), is(false));
+
+        assertThat(runOutput.getResultsUri(), is(notNullValue()));
+        var stored = readResults(runOutput.getResultsUri());
+        assertThat(stored.size(), is(1));
+        var storedItems = firstHostResult(stored.get(0)).get("results");
+        assertThat(storedItems.size(), is(50));
+        for (var item : storedItems) {
+            assertThat(item.get("stdout").asText(), startsWith("1\n2\n3"));
+            assertThat(item.has("stdout_lines"), is(false));
+            assertThat(item.has("stderr_lines"), is(false));
+        }
+    }
+
+    @Test
+    void run_inlineMode_keepsFullResultsInline_withoutLines() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.INLINE, "playbook-large-loop.yml");
+
+        assertThat(runOutput.getExitCode(), is(0));
+        assertThat(runOutput.getResultsUri(), is(nullValue()));
+
+        var inlineItems = loopItems(runOutput.getPlaybooks().getFirst());
+        assertThat(inlineItems.size(), is(50));
+        for (var item : inlineItems) {
+            assertThat((String) item.get("stdout"), startsWith("1\n2\n3"));
+            assertThat(item.containsKey("stdout_lines"), is(false));
+            assertThat(item.containsKey("stderr_lines"), is(false));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_storeMode_failedResultCarriesTheStderrTail() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-command-failure.yml");
+
+        var task = runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks().getFirst();
+        var result = (Map<String, Object>) task.getHosts().getFirst().getResult();
+
+        assertThat(task.getHosts().getFirst().getStatus(), is("failed"));
+        assertThat(result.get("rc"), is(3));
+        assertThat((String) result.get("stderr"), containsString("disk quota exceeded"));
+        assertThat(result.containsKey("stdout"), is(false));
+        assertThat(result.containsKey("cmd"), is(false));
+    }
+
+    @Test
+    void run_storeMode_multipleCommandsShareOneResultsFile() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook.yml", "playbook-large-loop.yml");
+
+        assertThat(runOutput.getPlaybooks().size(), is(2));
+
+        var stored = readResults(runOutput.getResultsUri());
+        assertThat(stored.size(), is(2));
+        assertThat(stored.get(0).get("plays").get(0).get("tasks").size(), is(6));
+        assertThat(firstHostResult(stored.get(1)).get("results").size(), is(50));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_allMode_declaredOutputsLandInVarsOutputs() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-explicit-outputs.yml");
+
+        var declared = (Map<String, Object>) runOutput.getVars().get("outputs");
+        assertThat(declared.get("records_updated"), is(3));
+        assertThat(declared.get("skipped_status"), is("skipped"));
+        assertThat(runOutput.getPlaybooks().size(), is(1));
+    }
+
+    @Test
+    void run_failedCommand_exposesPlaybooksAndResultsUriOnTheFailedAttempt() throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .inputFiles(
+                Map.of(
+                    "playbook.yml",
+                    """
+                        ---
+                        - hosts: localhost
+                          gather_facts: false
+                          tasks:
+                            - name: Fail with a reason on stderr
+                              ansible.builtin.shell: echo "disk quota exceeded" >&2; exit 3
+                        """
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbook.yml")))
+            .build();
+
+        var e = assertThrows(
+            RunnableTaskException.class,
+            () -> execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()))
+        );
+
+        var output = (AnsibleCLI.AnsibleOutput) e.getOutput();
+        assertThat(output.getExitCode(), is(not(0)));
+        assertThat(output.getResultsUri(), is(notNullValue()));
+        assertThat(output.getPlaybooks().size(), is(1));
+        assertThat(readResults(output.getResultsUri()).get(0).get("plays").get(0).get("tasks").size(), is(1));
+    }
+
     // issue #126: the outputs/playbooks payload must transit through a file, never a single
     // stdout line (which stalls the task runner's line-oriented log pipeline for minutes on a
     // large host set), and per-host results must not be duplicated in that file.
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> hostResults(AnsibleCLI.AnsibleOutput output) {
+        return output.getPlaybooks().stream()
+            .flatMap(playbook -> playbook.getPlays().stream())
+            .flatMap(play -> play.getTasks().stream())
+            .flatMap(task -> task.getHosts().stream())
+            .map(host -> (Map<String, Object>) host.getResult())
+            .toList();
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void run_writesOutputsToFile_notStdout_andDoesNotDuplicatePerHostResults() throws Exception {
@@ -281,15 +466,15 @@ class AnsibleCLITest {
             });
         }
 
-        // ALL mode: per-host results live only under "playbooks" in the file; no separate flat
-        // "outputs" key is written there, since that would duplicate every host result. Java
-        // rebuilds the flat list itself from the structured playbooks.
-        assertThat(filePayload.containsKey("outputs"), is(false));
+        // per-host results live only under "playbooks" in the file; "outputs" only carries the values
+        // declared through the kestra module, so it never duplicates a host result
+        assertThat(filePayload.get("outputs"), is(Map.of()));
         assertThat(filePayload.get("playbooks"), is(instanceOf(List.class)));
 
-        // the Java-rebuilt flat "outputs" list still matches the 6 tasks x 1 host from the playbook
-        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
-        assertThat(outputs.size(), is(6));
+        // the typed playbooks hold the 6 tasks x 1 host from the playbook, and vars carries neither copy
+        assertThat(hostResults(runOutput).size(), is(6));
+        assertThat(runOutput.getVars().containsKey("playbooks"), is(false));
+        assertThat(runOutput.getVars().get("outputs"), is(Map.of()));
     }
 
     @Test
@@ -524,13 +709,11 @@ class AnsibleCLITest {
         assertThat(((Map<String, Object>) outputs).isEmpty(), is(true));
     }
 
-    // same frame shape as the marked case above, in ALL mode: the callback never puts an
-    // "outputs" key in its own payload in this mode, so a frame that happens to carry one (with
-    // or without the marker) must stay skipped, proving the EXPLICIT-only gating above does not
-    // change ALL-mode behavior.
+    // same marked frame in ALL mode: the callback declares outputs in both modes, so its fallback
+    // frame recovers them here too.
     @Test
     @SuppressWarnings("unchecked")
-    void run_allMode_markedStdoutFrameWithOutputsKey_doesNotLeakIntoOutputs() throws Exception {
+    void run_allMode_markedStdoutFrameWithOutputsKey_recoversDeclaredOutputs() throws Exception {
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
@@ -556,11 +739,9 @@ class AnsibleCLITest {
 
         assertThat(runOutput.getExitCode(), is(0));
 
-        // ALL mode rebuilds "outputs" from the (empty) playbooks list; the frame's nested
-        // "outputs" map must not leak through, and the marker must not surface as a var either
         Object outputs = runOutput.getVars().get("outputs");
-        assertThat(outputs, is(instanceOf(List.class)));
-        assertThat((List<?>) outputs, is(empty()));
+        assertThat(outputs, is(instanceOf(Map.class)));
+        assertThat(((Map<String, Object>) outputs).get("foo"), is("bar"));
         assertThat(runOutput.getVars().containsKey("_kestra_outputs_fallback"), is(false));
     }
 
@@ -591,11 +772,10 @@ class AnsibleCLITest {
 
         assertThat(runOutput.getExitCode(), is(0));
 
-        // ALL mode rebuilds "outputs" from the (empty) playbooks list; the frame's nested
-        // "outputs" map must not leak through
+        // an unmarked frame is indistinguishable from user output: its nested "outputs" must not leak through
         Object outputs = runOutput.getVars().get("outputs");
-        assertThat(outputs, is(instanceOf(List.class)));
-        assertThat((List<?>) outputs, is(empty()));
+        assertThat(outputs, is(instanceOf(Map.class)));
+        assertThat(((Map<?, ?>) outputs).isEmpty(), is(true));
     }
 
     @Test
@@ -627,6 +807,7 @@ class AnsibleCLITest {
                     )
                 )
             )
+            .resultsStorage(Property.ofValue(AnsibleCLI.ResultsStorage.INLINE))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -983,24 +1164,13 @@ class AnsibleCLITest {
 
         assertThat(runOutput.getExitCode(), is(0));
 
-        // ---------------------------
-        // Verify merged "playbooks" in vars
-        // ---------------------------
-        Object maybePlaybooksVar = runOutput.getVars().get("playbooks");
-        assertThat(maybePlaybooksVar, is(instanceOf(List.class)));
+        // per-host results are stored once, in the typed playbooks
+        assertThat(runOutput.getVars().containsKey("playbooks"), is(false));
 
-        List<Object> playbooksVar = (List<Object>) maybePlaybooksVar;
-        assertThat(playbooksVar.size(), is(2));
-
-        // ---------------------------
-        // Verify merged raw outputs (backward compatible)
-        // ---------------------------
-        // playbook.yml => 6 tasks * 1 host = 6 outputs
-        // playbook_with_multiple_hosts.yml => 2 tasks * 2 hosts = 4 outputs
+        // playbook.yml => 6 tasks * 1 host = 6 results
+        // playbook_with_multiple_hosts.yml => 2 tasks * 2 hosts = 4 results
         // total = 10
-        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
-        assertThat(outputs, is(notNullValue()));
-        assertThat(outputs.size(), is(10));
+        assertThat(hostResults(runOutput).size(), is(10));
 
         // ---------------------------
         // Verify merged structured playbooks
@@ -1471,6 +1641,7 @@ class AnsibleCLITest {
                     )
                 )
             )
+            .resultsStorage(Property.ofValue(AnsibleCLI.ResultsStorage.INLINE))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -1479,7 +1650,7 @@ class AnsibleCLITest {
 
         assertThat(runOutput.getExitCode(), is(0));
 
-        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        var outputs = hostResults(runOutput);
         assertThat(outputs, is(not(empty())));
 
         Map<String, Object> msg = (Map<String, Object>) outputs.getFirst().get("msg");
@@ -1523,6 +1694,7 @@ class AnsibleCLITest {
                 )
             )
             .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
+            .resultsStorage(Property.ofValue(AnsibleCLI.ResultsStorage.INLINE))
             .build();
 
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -1531,7 +1703,7 @@ class AnsibleCLITest {
 
         // outputs are captured even though assets are defined
         assertThat(runOutput.getExitCode(), is(0));
-        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
+        var outputs = hostResults(runOutput);
         assertThat(outputs, is(not(empty())));
         Map<String, Object> msg = (Map<String, Object>) outputs.getFirst().get("msg");
         assertThat(msg.get("serial_number"), is("SN-12345"));
@@ -1653,8 +1825,7 @@ class AnsibleCLITest {
         );
 
         // streaming must not change what the task captures
-        List<Map<String, Object>> outputs = (List<Map<String, Object>>) runOutput.getVars().get("outputs");
-        assertThat(outputs, is(not(empty())));
+        assertThat(hostResults(runOutput), is(not(empty())));
     }
 
     // streamLogs re-enables the callback's own rendering, which dumps a failed host's result. In
