@@ -340,6 +340,29 @@ class AnsibleCLITest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void run_storeMode_capsLargeDebugValueInline_andKeepsItWholeInStorage() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-debug-large-value.yml");
+
+        assertThat(runOutput.getExitCode(), is(0));
+
+        var tasks = runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks();
+
+        var inline = (String) ((Map<String, Object>) tasks.get(1).getHosts().getFirst().getResult()).get("big");
+        assertThat(inline, startsWith("x".repeat(64 * 1024)));
+        assertThat(inline, endsWith("... (truncated, full value in `resultsUri`)"));
+        assertThat(inline.length(), lessThan(64 * 1024 + 100));
+
+        // a small debug value keeps its value untouched
+        var small = (Map<String, Object>) tasks.get(2).getHosts().getFirst().getResult();
+        assertThat(small.get("msg"), is("small"));
+
+        var storedBig = readResults(runOutput.getResultsUri()).get(0).get("plays").get(0).get("tasks").get(1)
+            .get("hosts").get(0).get("result").get("big").asText();
+        assertThat(storedBig.length(), is(4 * 1024 * 1024));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void run_storeMode_truncatesLargeNonStringMsgOfNonDebugTasksAsJson() throws Exception {
         var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-debug-outputs.yml");
 

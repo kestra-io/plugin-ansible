@@ -52,6 +52,10 @@ class CallbackModule(CallbackBase):
     # Characters of msg / stderr kept inline per result in store mode.
     LIGHT_RESULT_LIMIT = 1024
 
+    # Characters kept inline per value of a debug task's result in store mode; the full value is in
+    # the results file (`resultsUri`).
+    DEBUG_VALUE_LIMIT = 64 * 1024
+
     def __init__(self):
         # --- explicit outputs (kestra module) ---
         # Mode is set by the AnsibleCLI task via env var:
@@ -286,15 +290,37 @@ class CallbackModule(CallbackBase):
         return serialized[:limit] + "... (truncated)"
 
     @staticmethod
+    def _cap_debug_value(value):
+        """
+        A debug value whose serialization is over DEBUG_VALUE_LIMIT is replaced by the start of
+        that serialization plus a pointer to `resultsUri`; smaller values keep their native type.
+        """
+        limit = CallbackModule.DEBUG_VALUE_LIMIT
+        if isinstance(value, str):
+            serialized = value
+        elif isinstance(value, (dict, list)):
+            serialized = json.dumps(value, default=str)
+        else:
+            return value
+        if len(serialized) <= limit:
+            return value
+        return serialized[:limit] + "... (truncated, full value in `resultsUri`)"
+
+    @staticmethod
     def _light_result(result, failed, is_debug=False):
         """
         Subset of a result kept inline in store mode: status flags, return code and a bounded
         reason. For command/shell, msg is just "non-zero return code", so a failed result also
         keeps the tail of stderr. The debug module's output is the point of the task, so it is
-        kept whole, minus Ansible's internal keys; maxOutputsSize still bounds the total.
+        kept minus Ansible's internal keys, with each value capped at DEBUG_VALUE_LIMIT characters
+        (the full value stays in the results file); maxOutputsSize still bounds the total.
         """
         if is_debug:
-            light = {k: v for k, v in result.items() if not k.startswith("_ansible_")}
+            light = {
+                k: CallbackModule._cap_debug_value(v)
+                for k, v in result.items()
+                if not k.startswith("_ansible_")
+            }
         else:
             light = {k: result[k] for k in ("changed", "failed", "skipped", "unreachable", "rc") if k in result}
 

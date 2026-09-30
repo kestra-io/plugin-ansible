@@ -1,0 +1,16 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Build a 4 MiB value
+      ansible.builtin.set_fact:
+        big: "{{ 'x' * 4194304 }}"
+
+    - name: Print the large value
+      ansible.builtin.debug:
+        var: big
+
+    - name: Print a small value
+      ansible.builtin.debug:
+        msg: "small"
