@@ -176,9 +176,7 @@ class CallbackModule(CallbackBase):
         except OSError:
             existing = None
 
-        # AnsibleCLI pre-creates the file, so it is owned by the worker user. Replacing it keeps
-        # that owner only if this process can restore it; otherwise (e.g. a non-root container
-        # user, who could not create a sibling file either) fall back to truncating it in place.
+        # Replacing the pre-created file keeps its owner only if we can restore it, else truncate in place.
         if existing is None or existing.st_uid == os.geteuid() or os.geteuid() == 0:
             try:
                 self._write_atomically(path, directory, content, existing)
@@ -221,25 +219,30 @@ class CallbackModule(CallbackBase):
             raise
 
     def _write_results_file(self):
-        """
-        Writes the full per-host results as a JSON array with no surrounding whitespace, as AnsibleCLI
-        merges files by copying bytes. Never printed to stdout on failure (issue #126).
-        """
-        # the full result rides on each host entry as "_full" and is popped here, so the light
-        # playbooks written to the outputs file afterwards never carry it
+        """Writes the full per-host results as a whitespace-free JSON array (merged by byte copy), never to stdout (issue #126)."""
         full_playbooks = []
-        for playbook in self._kestra_playbooks:
-            full_plays = []
-            for play in playbook["plays"]:
-                full_tasks = []
-                for task in play["tasks"]:
-                    full_hosts = []
-                    for host in task["hosts"]:
-                        full = host.pop("_full", host["result"])
-                        full_hosts.append(dict(host, result=full))
-                    full_tasks.append(dict(task, hosts=full_hosts))
-                full_plays.append(dict(play, tasks=full_tasks))
-            full_playbooks.append(dict(playbook, plays=full_plays))
+        try:
+            for playbook in self._kestra_playbooks:
+                full_plays = []
+                for play in playbook["plays"]:
+                    full_tasks = []
+                    for task in play["tasks"]:
+                        full_hosts = [
+                            {k: v for k, v in host.items() if k != "_full"}
+                            | {"result": host.get("_full", host["result"])}
+                            for host in task["hosts"]
+                        ]
+                        full_tasks.append(dict(task, hosts=full_hosts))
+                    full_plays.append(dict(play, tasks=full_tasks))
+                full_playbooks.append(dict(playbook, plays=full_plays))
+        finally:
+            # "_full" must never leak into the light playbooks written to the outputs file,
+            # even if building the copy above failed halfway
+            for playbook in self._kestra_playbooks:
+                for play in playbook["plays"]:
+                    for task in play["tasks"]:
+                        for host in task["hosts"]:
+                            host.pop("_full", None)
 
         if not self._results_file_path:
             self._display.warning(

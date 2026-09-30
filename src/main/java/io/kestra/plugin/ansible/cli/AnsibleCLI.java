@@ -793,7 +793,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 // Read back the outputs/playbooks payload the kestra_logger callback wrote to a
                 // file instead of printing to stdout: a single, potentially multi-MB stdout line
                 // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
-                boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
+                boolean looksLikePlaybookCommand = isPlaybookRun(cmd);
                 ranPlaybook |= looksLikePlaybookCommand;
                 OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
                 oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
@@ -844,29 +844,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     }
                 }
 
-                // upload final log so outputs contains "log"
-                try {
-                    URI logUri = runContext.storage().putFile(finalLog.toFile());
-                    Map<String, URI> patched = new HashMap<>(lastOutputFiles);
-                    patched.put("log", logUri);
-                    lastOutputFiles = patched;
-                } catch (IOException e) {
-                    if (failure == null) {
-                        throw e;
-                    }
-                    runContext.logger().error("Unable to upload the merged log of the failed run: {}", e.getMessage());
-                }
+                lastOutputFiles = uploadMergedLog(runContext, finalLog, lastOutputFiles, failure);
             }
 
-            resultsUri = storeResults(runContext, workingDir, resultsFiles, failure);
+            resultsUri = storeResults(runContext, workingDir, resultsFiles, failure, ranPlaybook);
         } finally {
             deleteQuietly(runContext, resultsFiles);
-        }
-
-        if (rResultsStorage == ResultsStorage.STORE && resultsUri == null && ranPlaybook) {
-            runContext.logger().warn(
-                "`resultsStorage: STORE` is set but no per-host results were stored, so `resultsUri` is empty and `playbooks` only hold light results. The callback may not have been able to write its results file, e.g. the working directory is not writable by the container user."
-            );
         }
 
         mergedVars.put("outputs", mergedExplicitOutputs);
@@ -926,14 +909,34 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return rebuilt;
     }
 
+    /** True for a real `ansible-playbook` run; informational flags such as `--version` or `--syntax-check` never write results. */
+    static boolean isPlaybookRun(String command) {
+        return command.contains("ansible-playbook") && !NON_RUN_FLAGS.matcher(command).find();
+    }
+
+    private static final Pattern NON_RUN_FLAGS = Pattern.compile("(^|\\s)(--version|--syntax-check|--list-hosts|--list-tasks|--list-tags|--help|-h)(\\s|$)");
+
+    /** Uploads the concatenated per-command log; after a failed command an upload error is logged instead of thrown so it cannot hide that failure. */
+    Map<String, URI> uploadMergedLog(RunContext runContext, Path finalLog, Map<String, URI> outputFiles, RunnableTaskException failure) throws IOException {
+        try {
+            var logUri = runContext.storage().putFile(finalLog.toFile());
+            var patched = new HashMap<>(outputFiles);
+            patched.put("log", logUri);
+            return patched;
+        } catch (IOException e) {
+            if (failure == null) {
+                throw e;
+            }
+            runContext.logger().error("Unable to upload the merged log of the failed run: {}", e.getMessage());
+            return outputFiles;
+        }
+    }
+
     /**
-     * Merges the per-command results files into one and uploads it. The local files are always
-     * deleted, as they may hold secrets. When a command already failed, a storage error is logged
-     * instead of thrown so it cannot hide that failure.
-     *
-     * @return the stored file, or null when no command wrote results or the upload failed after a failure
+     * Merges the per-command results files into one and uploads it; after a failed command a storage error is logged instead of thrown, and the local files are always deleted as they may hold
+     * secrets. Returns null when nothing was stored.
      */
-    URI storeResults(RunContext runContext, Path workingDir, List<Path> resultsFiles, RunnableTaskException failure) throws IOException {
+    URI storeResults(RunContext runContext, Path workingDir, List<Path> resultsFiles, RunnableTaskException failure, boolean ranPlaybook) throws IOException {
         if (resultsFiles.isEmpty()) {
             return null;
         }
@@ -941,6 +944,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Path merged = workingDir.resolve("kestra-results.json");
         try {
             if (!mergeResultsFiles(runContext, resultsFiles, merged)) {
+                if (failure == null && ranPlaybook) {
+                    runContext.logger().warn(
+                        "`resultsStorage: STORE` is set but no per-host results were stored, so `resultsUri` is empty and `playbooks` only hold light results. The callback may not have been able to write its results file, e.g. the working directory is not writable by the container user."
+                    );
+                }
                 return null;
             }
             return runContext.storage().putFile(merged.toFile(), "results.json");

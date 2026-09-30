@@ -1,6 +1,8 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -9,6 +11,7 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.Logger;
 import org.slf4j.event.Level;
 
 import io.kestra.core.junit.annotations.KestraTest;
@@ -16,6 +19,7 @@ import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
+import io.kestra.core.storages.Storage;
 import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 
@@ -25,6 +29,13 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Fast, deterministic unit tests for the Java-side output helpers: the outputs size guard, the
@@ -175,7 +186,7 @@ class AnsibleCLIOutputsBehaviorTest {
         // the target directory does not exist, so writing the merged file fails like a full disk would
         var missingDir = tempDir.resolve("missing");
 
-        var uri = newTask().storeResults(runContext, missingDir, List.of(results), failure());
+        var uri = newTask().storeResults(runContext, missingDir, List.of(results), failure(), true);
 
         assertThat(uri, is(nullValue()));
         assertThat(Files.exists(results), is(false));
@@ -188,8 +199,98 @@ class AnsibleCLIOutputsBehaviorTest {
 
         assertThrows(
             IOException.class,
-            () -> newTask().storeResults(runContext, tempDir.resolve("missing"), List.of(results), null)
+            () -> newTask().storeResults(runContext, tempDir.resolve("missing"), List.of(results), null, true)
         );
+    }
+
+    // a context whose storage rejects every upload, to reach the putFile error handling
+    private static RunContext contextWithFailingStorage(Logger logger) throws IOException {
+        var storage = mock(Storage.class);
+        when(storage.putFile(any(File.class))).thenThrow(new IOException("disk full"));
+        when(storage.putFile(any(File.class), anyString())).thenThrow(new IOException("disk full"));
+        var runContext = mock(RunContext.class);
+        when(runContext.storage()).thenReturn(storage);
+        when(runContext.logger()).thenReturn(logger);
+        return runContext;
+    }
+
+    @Test
+    void storeResults_uploadFails_afterFailedCommand_logsErrorAndReturnsNull(@TempDir Path tempDir) throws Exception {
+        var results = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]}]");
+        var logger = mock(Logger.class);
+
+        var uri = newTask().storeResults(contextWithFailingStorage(logger), tempDir, List.of(results), failure(), true);
+
+        assertThat(uri, is(nullValue()));
+        verify(logger).error(contains("Unable to store the per-host results"), anyString());
+        verify(logger, never()).warn(anyString());
+        assertThat(Files.exists(results), is(false));
+    }
+
+    @Test
+    void storeResults_uploadFails_withoutFailedCommand_isThrown(@TempDir Path tempDir) throws Exception {
+        var results = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]}]");
+
+        assertThrows(
+            IOException.class,
+            () -> newTask().storeResults(contextWithFailingStorage(mock(Logger.class)), tempDir, List.of(results), null, true)
+        );
+        assertThat(Files.exists(results), is(false));
+    }
+
+    @Test
+    void storeResults_noResultsWritten_afterSuccessfulPlaybook_warns(@TempDir Path tempDir) throws Exception {
+        var placeholder = Files.writeString(tempDir.resolve("r0.json"), "");
+        var logger = mock(Logger.class);
+
+        var uri = newTask().storeResults(contextWithFailingStorage(logger), tempDir, List.of(placeholder), null, true);
+
+        assertThat(uri, is(nullValue()));
+        verify(logger).warn(contains("no per-host results were stored"));
+    }
+
+    @Test
+    void storeResults_noResultsWritten_doesNotWarnAfterFailureOrForNonPlaybookRun(@TempDir Path tempDir) throws Exception {
+        var placeholder = Files.writeString(tempDir.resolve("r0.json"), "");
+        var logger = mock(Logger.class);
+        var runContext = contextWithFailingStorage(logger);
+
+        newTask().storeResults(runContext, tempDir, List.of(placeholder), failure(), true);
+        newTask().storeResults(runContext, tempDir, List.of(placeholder), null, false);
+
+        verify(logger, never()).warn(anyString());
+    }
+
+    @Test
+    void uploadMergedLog_uploadFails_afterFailedCommand_logsErrorAndKeepsOutputFiles(@TempDir Path tempDir) throws Exception {
+        var log = Files.writeString(tempDir.resolve("log"), "line");
+        var logger = mock(Logger.class);
+        Map<String, URI> existing = Map.of("other", URI.create("kestra:///other"));
+
+        var result = newTask().uploadMergedLog(contextWithFailingStorage(logger), log, existing, failure());
+
+        assertThat(result, is(existing));
+        verify(logger).error(contains("Unable to upload the merged log"), anyString());
+    }
+
+    @Test
+    void uploadMergedLog_uploadFails_withoutFailedCommand_isThrown(@TempDir Path tempDir) throws Exception {
+        var log = Files.writeString(tempDir.resolve("log"), "line");
+
+        assertThrows(
+            IOException.class,
+            () -> newTask().uploadMergedLog(contextWithFailingStorage(mock(Logger.class)), log, Map.of(), null)
+        );
+    }
+
+    @Test
+    void isPlaybookRun_onlyForRealRuns() {
+        assertThat(AnsibleCLI.isPlaybookRun("ansible-playbook site.yml"), is(true));
+        assertThat(AnsibleCLI.isPlaybookRun("ansible-playbook -i inventory site.yml --check"), is(true));
+        assertThat(AnsibleCLI.isPlaybookRun("ansible-playbook --version"), is(false));
+        assertThat(AnsibleCLI.isPlaybookRun("ansible-playbook site.yml --syntax-check"), is(false));
+        assertThat(AnsibleCLI.isPlaybookRun("ansible-playbook site.yml --list-hosts"), is(false));
+        assertThat(AnsibleCLI.isPlaybookRun("ansible-galaxy install x"), is(false));
     }
 
     @Test
