@@ -1,0 +1,8 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Fail with a reason on stderr
+      ansible.builtin.shell: echo "disk quota exceeded" >&2; exit 3
+      ignore_errors: true

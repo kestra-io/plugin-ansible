@@ -1,0 +1,23 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Register a command result
+      ansible.builtin.shell: echo "Test output"
+      register: myOutput
+
+    - name: Print the registered result
+      ansible.builtin.debug:
+        var: myOutput
+
+    - name: Print a list
+      ansible.builtin.debug:
+        msg:
+          - "line 1"
+          - "line 2"
+
+    - name: Fail with a large structured message
+      ansible.builtin.fail:
+        msg: "{{ range(400) | list }}"
+      ignore_errors: true

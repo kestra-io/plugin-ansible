@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -162,6 +164,34 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
+            title = "Run a verbose playbook and read its full per-host results downstream. By default (`resultsStorage: STORE`), `playbooks` only carries a light result per host, and the full results, including each loop item's `stdout`, are stored in a file exposed as `resultsUri`.",
+            full = true,
+            code = """
+                id: ansible_full_results
+                namespace: company.team
+
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    inputFiles:
+                      playbook.yml: |
+                        ---
+                        - hosts: localhost
+                          gather_facts: false
+                          tasks:
+                            - name: Print a long sequence per item
+                              ansible.builtin.shell: seq 1 200
+                              with_sequence: start=1 end=50
+                    containerImage: cytopia/ansible:latest-tools
+                    commands:
+                      - ansible-playbook -i localhost -c local playbook.yml
+
+                  - id: read_results
+                    type: io.kestra.plugin.core.log.Log
+                    message: "{{ read(outputs.ansible_task.resultsUri) }}"
+                """
+        ),
+        @Example(
             title = "Expose only explicitly declared playbook values as outputs. With `outputsMode: EXPLICIT`, the bundled `kestra` module declares which values become task outputs; raw per-host results are redacted from outputs and logs, so sensitive data fetched by the playbook is never leaked. The playbook is kept in flow variables without using the `render()` function, so that its Ansible Jinja expressions are not evaluated by Kestra.",
             full = true,
             code = """
@@ -287,6 +317,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
+    public static final String RESULTS_STORAGE_ENV = "KESTRA_RESULTS_STORAGE";
+    public static final String RESULTS_FILE_ENV = "KESTRA_RESULTS_FILE";
     public static final String STREAM_LOGS_ENV = "KESTRA_STREAM_LOGS";
     // kept in sync with the marker key kestra_logger.py's _log_kestra_outputs adds to its stdout fallback frame
     private static final String EXPLICIT_OUTPUTS_FALLBACK_MARKER = "_kestra_outputs_fallback";
@@ -409,8 +441,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Outputs capture mode",
         description = """
-            ALL (default) captures every per-host result of every playbook task; `outputs` is a list of per-host result maps.
-            EXPLICIT captures only values declared in the playbook via the bundled `kestra` module, redacting per-host payloads to `{"changed": <bool>}` while keeping task names, timings, and statuses; `outputs` is then a map, not a list, so switching modes changes its shape for downstream references.
+            ALL (default) captures every per-host result of every playbook task in `playbooks`; where the full result is kept is controlled by `resultsStorage`.
+            EXPLICIT captures only values declared in the playbook via the bundled `kestra` module, redacting per-host payloads to `{"changed": <bool>}` (plus `msg` on failure) while keeping task names, timings, and statuses.
+            In both modes `vars.outputs` is the map of values declared through the `kestra` module, empty when the playbook declares none.
             A custom `ansibleConfig` must keep `library = ./library` for the bundled module to resolve. In EXPLICIT mode it must also keep `stdout_callback = ansible.builtin.null`: another stdout callback renders per-host payloads itself (a failed host, or any host with `-v`), which the redaction cannot reach. In ALL mode the setting makes no difference to what is logged, since per-host results are logged from the captured outputs anyway.
             """
     )
@@ -421,7 +454,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Maximum size of the outputs payload",
         description = """
-            Upper bound, in bytes, on the serialized size of the merged `outputs`/`playbooks` payload; default 10 000 000 (10 MB), maximum 100 000 000 (100 MB). Exceeding it fails the task instead of emitting an oversized output.
+            Upper bound, in bytes, on the serialized size of the whole task output (`vars`, `playbooks` and the other output fields); default 10 000 000 (10 MB), maximum 100 000 000 (100 MB). Exceeding it fails the task instead of emitting an oversized output.
+            With `resultsStorage: STORE` (default) the full per-host results are stored in a file outside the output, so they do not count toward this bound.
             This guards against the `WorkerTaskResult` being rejected by the message queue (`kestra.queue.message-protection.limit`), which a plugin cannot read: align this value with your instance's configuration. It is checked once all commands have completed, so it never shortens a slow run.
             It also bounds what is read back into memory: a callback outputs file larger than this value is never parsed, so an oversized run fails instead of materializing that volume in the worker heap.
             """
@@ -431,9 +465,22 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected Property<@Min(1) @Max(MAX_OUTPUTS_SIZE_CEILING) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
 
     @Schema(
+        title = "Where full per-host results are kept",
+        description = """
+            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed or unreachable hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`. The output of `debug` tasks (`msg` or `var`) is kept inline, since printing it is the purpose of the task, except that each value larger than 64 KB is cut to its first 64 KB followed by a pointer to `resultsUri`, where the full value is stored; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
+            With `outputsMode: EXPLICIT`, only `changed` (plus `msg` on failure) is captured per host, so the stored file is small; `resultsUri` is still set, and a null `resultsUri` means results storage failed.
+            INLINE keeps the full per-host results in `playbooks`, bounded by `maxOutputsSize`; choose it when you template `stdout` or other result fields directly and the outputs are small.
+            In both modes `stdout_lines` and `stderr_lines` are dropped from captured results at every nesting level; split `stdout`/`stderr` on newlines downstream instead.
+            """
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<ResultsStorage> resultsStorage = Property.ofValue(ResultsStorage.STORE);
+
+    @Schema(
         title = "Per-host task log verbosity",
         description = """
-            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable` hosts. FULL logs the whole per-host result payload (truncated past a few KB).
+            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable` hosts. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
             This changes only what is logged, never what is captured: EXPLICIT-mode redaction happens upstream in the callback, so FULL is not an escape hatch from it.
             """
     )
@@ -554,6 +601,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         long rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
         LogsMode rLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.SUMMARY);
+        ResultsStorage rResultsStorage = runContext.render(this.resultsStorage).as(ResultsStorage.class).orElse(ResultsStorage.STORE);
 
         boolean rStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(false);
 
@@ -599,6 +647,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         Map<String, Object> mergedVars = new HashMap<>();
         List<AnsibleOutput.PlaybookOutput> mergedPlaybooks = new ArrayList<>();
         Map<String, Object> mergedExplicitOutputs = new HashMap<>();
+        // one file per command, merged into a single stored file after the last command
+        List<Path> resultsFiles = new ArrayList<>();
+        RunnableTaskException failure = null;
+        boolean ranPlaybook = false;
 
         int mergedExitCode = 0;
         int mergedStdOutCount = 0;
@@ -615,186 +667,211 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         boolean multiCmd = rCommands.size() > 1;
         List<Path> perCommandLogs = new ArrayList<>();
 
-        int idx = 0;
-        for (String cmd : rCommands) {
-            Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
-            envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
-            envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
+        URI resultsUri;
+        try {
+            int idx = 0;
+            for (String cmd : rCommands) {
+                Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
+                envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
+                envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
 
-            // Each command gets its own outputs file: the callback writes it once per
-            // ansible-playbook run, and a shared name would let a later command in a
-            // multi-command task overwrite an earlier one's payload before we read it back.
-            Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
-            envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
-            // the container may run as a non-root user while the working dir stays root-owned, so
-            // it can't create a new file there; pre-create one it can open with O_TRUNC instead
-            createContainerWritableFile(runContext, outputsFile);
+                // Each command gets its own outputs file: the callback writes it once per
+                // ansible-playbook run, and a shared name would let a later command in a
+                // multi-command task overwrite an earlier one's payload before we read it back.
+                Path outputsFile = workingDir.resolve("kestra-outputs-" + idx + ".json");
+                envForRun.put(OUTPUTS_FILE_ENV, outputsFile.toString());
+                // the container may run as a non-root user while the working dir stays root-owned, so
+                // it can't create a new file there; pre-create one it can open with O_TRUNC instead
+                createContainerWritableFile(runContext, outputsFile);
 
-            // If multiple commands and outputLogFile enabled,
-            // override ANSIBLE_LOG_PATH so each run writes a different file.
-            // The default ansibleConfig always sets log_path, so pre-create whichever file
-            // is actually targeted this run, otherwise Ansible warns on every non-root run.
-            if (wantLogFile && multiCmd) {
-                Path logPath = workingDir.resolve("log-" + idx);
-                envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
-                perCommandLogs.add(logPath);
-                createContainerWritableFile(runContext, logPath);
-            } else {
-                createContainerWritableFile(runContext, workingDir.resolve("log"));
-            }
-
-            // First (before any user `cd`, so $PWD is the working-dir root) and on every command
-            // (each runs in its own container).
-            boolean isFirstCommand = !beforeDone;
-            List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
-            beforeForRun.addAll(dependencyInstall.pathExports());
-            if (isFirstCommand) {
-                // User beforeCommands can configure the environment
-                // (e.g. private pip index, proxy, auth) before auto-install fires.
-                beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
-                beforeForRun.addAll(dependencyInstall.commands());
-            }
-            Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
-
-            CommandsWrapper commandWrapper = baseWrapper
-                .withEnv(envForRun)
-                // user beforeCommands + auto-install run once before the first command; the callback
-                // path exports are re-applied before every command (each runs in its own container)
-                .withBeforeCommands(mergedBeforeCommands)
-                // single command per run so Kestra doesn't overwrite outputs
-                .withCommands(Property.ofValue(List.of(cmd)));
-
-            // the consumer is shared across commands, so drop any half-wrapped warning state
-            // left by the previous one before its successor's stderr starts arriving
-            logConsumer.reset();
-
-            ScriptOutput out;
-            try {
-                out = commandWrapper.run();
-            } finally {
-                // the install ran in the first command, even a failing one leaves a cacheable tree
-                if (isFirstCommand && dependencyInstall.uploadHash() != null) {
-                    saveDependencyCache(runContext, workingDir, dependencyInstall.uploadHash());
-                }
-            }
-
-            mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
-            mergedStdOutCount += out.getStdOutLineCount();
-            mergedStdErrCount += out.getStdErrLineCount();
-
-            lastOutputFiles = out.getOutputFiles();
-            lastTaskRunner = out.getTaskRunner();
-
-            Map<String, Object> vars = out.getVars();
-            if (vars != null) {
-                // merge structured playbooks, in case a command's own stdout emits them
-                // directly (e.g. a user-authored "::{...}::" line); ansible-playbook runs no
-                // longer go through this path (see the outputs file read below, issue #126)
-                List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
-                if (pbs != null && !pbs.isEmpty()) {
-                    mergedPlaybooks.addAll(pbs);
+                envForRun.put(RESULTS_STORAGE_ENV, rResultsStorage.name().toLowerCase(Locale.ROOT));
+                if (rResultsStorage == ResultsStorage.STORE) {
+                    Path resultsFile = workingDir.resolve("kestra-results-" + idx + ".json");
+                    envForRun.put(RESULTS_FILE_ENV, resultsFile.toString());
+                    createContainerWritableFile(runContext, resultsFile);
+                    resultsFiles.add(resultsFile);
                 }
 
-                // merge remaining vars (last-wins); "outputs" is rebuilt from playbooks below.
-                // An unmarked "outputs" key stays skipped in both modes, exactly as before
-                // commit cd79bfb: it may be a user-authored "::{...}::" stdout line, which is
-                // indistinguishable from the callback's own frame without the marker below.
-                // Only the callback's stdout fallback frame (see kestra_logger.py
-                // _log_kestra_outputs) carries EXPLICIT_OUTPUTS_FALLBACK_MARKER, so in EXPLICIT
-                // mode that marked frame is the sole trusted carrier of the declared outputs map,
-                // recovered here because the outputs-file read below is empty precisely when
-                // that fallback fired.
-                boolean isTrustedFallbackFrame = Boolean.TRUE.equals(vars.get(EXPLICIT_OUTPUTS_FALLBACK_MARKER));
-                for (Map.Entry<String, Object> e : vars.entrySet()) {
-                    String key = e.getKey();
-                    if ("outputs".equals(key)) {
-                        if (
-                            rOutputsModeEnum == OutputsMode.EXPLICIT && isTrustedFallbackFrame
-                                && e.getValue() instanceof Map<?, ?> explicit
-                        ) {
-                            explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                // If multiple commands and outputLogFile enabled,
+                // override ANSIBLE_LOG_PATH so each run writes a different file.
+                // The default ansibleConfig always sets log_path, so pre-create whichever file
+                // is actually targeted this run, otherwise Ansible warns on every non-root run.
+                if (wantLogFile && multiCmd) {
+                    Path logPath = workingDir.resolve("log-" + idx);
+                    envForRun.put("ANSIBLE_LOG_PATH", logPath.toString());
+                    perCommandLogs.add(logPath);
+                    createContainerWritableFile(runContext, logPath);
+                } else {
+                    createContainerWritableFile(runContext, workingDir.resolve("log"));
+                }
+
+                // First (before any user `cd`, so $PWD is the working-dir root) and on every command
+                // (each runs in its own container).
+                boolean isFirstCommand = !beforeDone;
+                List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
+                beforeForRun.addAll(dependencyInstall.pathExports());
+                if (isFirstCommand) {
+                    // User beforeCommands can configure the environment
+                    // (e.g. private pip index, proxy, auth) before auto-install fires.
+                    beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
+                    beforeForRun.addAll(dependencyInstall.commands());
+                }
+                Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
+
+                CommandsWrapper commandWrapper = baseWrapper
+                    .withEnv(envForRun)
+                    // user beforeCommands + auto-install run once before the first command; the callback
+                    // path exports are re-applied before every command (each runs in its own container)
+                    .withBeforeCommands(mergedBeforeCommands)
+                    // single command per run so Kestra doesn't overwrite outputs
+                    .withCommands(Property.ofValue(List.of(cmd)));
+
+                // the consumer is shared across commands, so drop any half-wrapped warning state
+                // left by the previous one before its successor's stderr starts arriving
+                logConsumer.reset();
+
+                ScriptOutput out;
+                try {
+                    out = commandWrapper.run();
+                } catch (RunnableTaskException e) {
+                    // a non-zero exit still leaves the callback's payload behind: keep going to read it
+                    // back so the failed attempt carries its outputs, see the end of run()
+                    if (!(e.getOutput() instanceof ScriptOutput failedOutput)) {
+                        deleteQuietly(runContext, resultsFiles);
+                        throw e;
+                    }
+                    failure = e;
+                    out = failedOutput;
+                } finally {
+                    // the install ran in the first command, even a failing one leaves a cacheable tree
+                    if (isFirstCommand && dependencyInstall.uploadHash() != null) {
+                        saveDependencyCache(runContext, workingDir, dependencyInstall.uploadHash());
+                    }
+                }
+
+                mergedExitCode = Math.max(mergedExitCode, out.getExitCode());
+                mergedStdOutCount += out.getStdOutLineCount();
+                mergedStdErrCount += out.getStdErrLineCount();
+
+                lastOutputFiles = out.getOutputFiles();
+                lastTaskRunner = out.getTaskRunner();
+
+                Map<String, Object> vars = out.getVars();
+                if (vars != null) {
+                    // merge structured playbooks, in case a command's own stdout emits them
+                    // directly (e.g. a user-authored "::{...}::" line); ansible-playbook runs no
+                    // longer go through this path (see the outputs file read below, issue #126)
+                    List<AnsibleOutput.PlaybookOutput> pbs = extractPlaybooks(vars);
+                    if (pbs != null && !pbs.isEmpty()) {
+                        mergedPlaybooks.addAll(pbs);
+                    }
+
+                    // merge remaining vars (last-wins); "outputs" is rebuilt from the declared values below.
+                    // An unmarked "outputs" key stays skipped, exactly as before commit cd79bfb:
+                    // it may be a user-authored "::{...}::" stdout line, which is
+                    // indistinguishable from the callback's own frame without the marker below.
+                    // Only the callback's stdout fallback frame (see kestra_logger.py
+                    // _log_kestra_outputs) carries EXPLICIT_OUTPUTS_FALLBACK_MARKER, so that marked
+                    // frame is the sole trusted carrier of the declared outputs map,
+                    // recovered here because the outputs-file read below is empty precisely when
+                    // that fallback fired.
+                    boolean isTrustedFallbackFrame = Boolean.TRUE.equals(vars.get(EXPLICIT_OUTPUTS_FALLBACK_MARKER));
+                    for (Map.Entry<String, Object> e : vars.entrySet()) {
+                        String key = e.getKey();
+                        if ("outputs".equals(key)) {
+                            if (isTrustedFallbackFrame && e.getValue() instanceof Map<?, ?> explicit) {
+                                explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                            }
+                            continue;
                         }
-                        continue;
+                        if ("playbooks".equals(key) || EXPLICIT_OUTPUTS_FALLBACK_MARKER.equals(key)) {
+                            continue;
+                        }
+                        mergedVars.put(key, e.getValue());
                     }
-                    if ("playbooks".equals(key) || EXPLICIT_OUTPUTS_FALLBACK_MARKER.equals(key)) {
-                        continue;
-                    }
-                    mergedVars.put(key, e.getValue());
                 }
+
+                // Read back the outputs/playbooks payload the kestra_logger callback wrote to a
+                // file instead of printing to stdout: a single, potentially multi-MB stdout line
+                // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
+                boolean looksLikePlaybookCommand = isPlaybookRun(cmd);
+                ranPlaybook |= looksLikePlaybookCommand;
+                OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
+                oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
+                outputsRead.payload().ifPresent(payload ->
+                {
+                    if (payload.get("outputs") instanceof Map<?, ?> explicit) {
+                        explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
+                    }
+
+                    List<AnsibleOutput.PlaybookOutput> filePlaybooks = extractPlaybooks(payload);
+                    if (!filePlaybooks.isEmpty()) {
+                        mergedPlaybooks.addAll(filePlaybooks);
+                    }
+                });
+
+                if (failure != null) {
+                    break;
+                }
+
+                beforeDone = true;
+                idx++;
             }
 
-            // Read back the outputs/playbooks payload the kestra_logger callback wrote to a
-            // file instead of printing to stdout: a single, potentially multi-MB stdout line
-            // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
-            boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
-            OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
-            oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
-            outputsRead.payload().ifPresent(payload ->
-            {
-                if (payload.get("outputs") instanceof Map<?, ?> explicit) {
-                    explicit.forEach((k, v) -> mergedExplicitOutputs.put(String.valueOf(k), v));
-                }
+            // If we produced per-command logs, concatenate into final "log"
+            if (wantLogFile && multiCmd && !perCommandLogs.isEmpty()) {
+                Path finalLog = workingDir.resolve("log");
+                // truncate/create
+                Files.writeString(
+                    finalLog, "", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
+                );
 
-                List<AnsibleOutput.PlaybookOutput> filePlaybooks = extractPlaybooks(payload);
-                if (!filePlaybooks.isEmpty()) {
-                    mergedPlaybooks.addAll(filePlaybooks);
-                }
-            });
-
-            beforeDone = true;
-            idx++;
-        }
-
-        // If we produced per-command logs, concatenate into final "log"
-        if (wantLogFile && multiCmd && !perCommandLogs.isEmpty()) {
-            Path finalLog = workingDir.resolve("log");
-            // truncate/create
-            Files.writeString(
-                finalLog, "", StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
-            );
-
-            for (Path p : perCommandLogs) {
-                if (Files.exists(p)) {
-                    String content = Files.readString(p, StandardCharsets.UTF_8);
-                    if (!content.isEmpty()) {
-                        Files.writeString(
-                            finalLog, content, StandardCharsets.UTF_8,
-                            StandardOpenOption.CREATE, StandardOpenOption.APPEND
-                        );
-                        if (!content.endsWith("\n")) {
+                for (Path p : perCommandLogs) {
+                    if (Files.exists(p)) {
+                        String content = Files.readString(p, StandardCharsets.UTF_8);
+                        if (!content.isEmpty()) {
                             Files.writeString(
-                                finalLog, "\n", StandardCharsets.UTF_8,
+                                finalLog, content, StandardCharsets.UTF_8,
                                 StandardOpenOption.CREATE, StandardOpenOption.APPEND
                             );
+                            if (!content.endsWith("\n")) {
+                                Files.writeString(
+                                    finalLog, "\n", StandardCharsets.UTF_8,
+                                    StandardOpenOption.CREATE, StandardOpenOption.APPEND
+                                );
+                            }
                         }
                     }
                 }
+
+                lastOutputFiles = uploadMergedLog(runContext, finalLog, lastOutputFiles, failure);
             }
 
-            // upload final log so outputs contains "log"
-            URI logUri = runContext.storage().putFile(finalLog.toFile());
-            Map<String, URI> patched = new HashMap<>(lastOutputFiles);
-            patched.put("log", logUri);
-            lastOutputFiles = patched;
+            resultsUri = storeResults(runContext, workingDir, resultsFiles, failure, ranPlaybook);
+        } finally {
+            deleteQuietly(runContext, resultsFiles);
         }
 
-        // ensure merged vars expose the expected root keys; in ALL mode the flat list is
-        // rebuilt from the structured playbooks instead of being duplicated by the callback
-        Object mergedRawOrExplicitOutputs = rOutputsModeEnum == OutputsMode.EXPLICIT
-            ? mergedExplicitOutputs
-            : flattenHostResults(mergedPlaybooks);
-        mergedVars.put("outputs", mergedRawOrExplicitOutputs);
-        mergedVars.put("playbooks", mergedPlaybooks);
+        mergedVars.put("outputs", mergedExplicitOutputs);
 
-        // Emit before the size guard: these travel on the log queue, not the WorkerTaskResult the
-        // guard protects, so a run that trips the guard still leaves per-task diagnostics behind.
-        emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode);
+        if (failure != null && oversizedOutputsFileBytes > 0) {
+            runContext.logger().error(
+                "The failing command's outputs file is {} bytes, over the `maxOutputsSize` of {} bytes, so its `playbooks` are left out of the failed attempt's outputs.{}",
+                oversizedOutputsFileBytes, rMaxOutputsSize,
+                resultsUri != null ? " The full per-host results are stored at " + resultsUri : " Raise `maxOutputsSize` or use `outputsMode: EXPLICIT` to keep them."
+            );
+        }
 
-        failOnOversizedOutputsFile(oversizedOutputsFileBytes, rMaxOutputsSize);
-        checkOutputsSize(mergedVars, rMaxOutputsSize);
+        if (failure == null) {
+            // Emit before the size guard: these travel on the log queue, not the WorkerTaskResult the
+            // guard protects, so a run that trips the guard still leaves per-task diagnostics behind.
+            emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode, rResultsStorage);
 
-        return AnsibleOutput.builder()
+            failOnOversizedOutputsFile(oversizedOutputsFileBytes, rMaxOutputsSize, rResultsStorage);
+        }
+
+        AnsibleOutput output = AnsibleOutput.builder()
             .vars(mergedVars)
             .exitCode(mergedExitCode)
             .outputFiles(lastOutputFiles)
@@ -802,7 +879,162 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .stdErrLineCount(mergedStdErrCount)
             .taskRunner(lastTaskRunner)
             .playbooks(mergedPlaybooks)
+            .resultsUri(resultsUri)
             .build();
+
+        if (failure != null) {
+            throw failedRun(runContext, failure, output, rMaxOutputsSize, rResultsStorage);
+        }
+
+        checkOutputsSize(output, rMaxOutputsSize, rResultsStorage);
+
+        return output;
+    }
+
+    /** Rebuilds the failure with the outputs gathered so far; if they are over `maxOutputsSize`, keeps it as is and logs where the results are stored. */
+    RunnableTaskException failedRun(RunContext runContext, RunnableTaskException failure, AnsibleOutput output, long maxOutputsSize, ResultsStorage resultsStorage) {
+        try {
+            checkOutputsSize(output, maxOutputsSize, resultsStorage);
+        } catch (IOException | IllegalStateException e) {
+            runContext.logger().error("The failed run's outputs were left out: {}", e.getMessage());
+            if (output.getResultsUri() != null) {
+                runContext.logger().error("Full per-host results of the failed run are stored at {}", output.getResultsUri());
+            }
+            return failure;
+        }
+
+        var rebuilt = new RunnableTaskException(failure.getMessage(), failure.getCause(), output);
+        for (var suppressed : failure.getSuppressed()) {
+            rebuilt.addSuppressed(suppressed);
+        }
+        return rebuilt;
+    }
+
+    /** True for a real `ansible-playbook` run; informational flags such as `--version` or `--syntax-check` never write results. */
+    static boolean isPlaybookRun(String command) {
+        return command.contains("ansible-playbook") && !NON_RUN_FLAGS.matcher(command).find();
+    }
+
+    private static final Pattern NON_RUN_FLAGS = Pattern.compile("(^|\\s)(--version|--syntax-check|--list-hosts|--list-tasks|--list-tags|--help|-h)(\\s|$)");
+
+    /** Uploads the concatenated per-command log; after a failed command an upload error is logged instead of thrown so it cannot hide that failure. */
+    Map<String, URI> uploadMergedLog(RunContext runContext, Path finalLog, Map<String, URI> outputFiles, RunnableTaskException failure) throws IOException {
+        try {
+            var logUri = runContext.storage().putFile(finalLog.toFile());
+            var patched = new HashMap<>(outputFiles);
+            patched.put("log", logUri);
+            return patched;
+        } catch (IOException e) {
+            if (failure == null) {
+                throw e;
+            }
+            runContext.logger().error("Unable to upload the merged log of the failed run: {}", e.getMessage());
+            return outputFiles;
+        }
+    }
+
+    /**
+     * Merges the per-command results files into one and uploads it; after a failed command a storage error is logged instead of thrown, and the local files are always deleted as they may hold
+     * secrets. Returns null when nothing was stored.
+     */
+    URI storeResults(RunContext runContext, Path workingDir, List<Path> resultsFiles, RunnableTaskException failure, boolean ranPlaybook) throws IOException {
+        if (resultsFiles.isEmpty()) {
+            return null;
+        }
+
+        Path merged = workingDir.resolve("kestra-results.json");
+        try {
+            if (!mergeResultsFiles(runContext, resultsFiles, merged)) {
+                if (failure == null && ranPlaybook) {
+                    runContext.logger().warn(
+                        "`resultsStorage: STORE` is set but no per-host results were stored, so `resultsUri` is empty and `playbooks` only hold light results. The callback may not have been able to write its results file, e.g. the working directory is not writable by the container user."
+                    );
+                }
+                return null;
+            }
+            return runContext.storage().putFile(merged.toFile(), "results.json");
+        } catch (IOException e) {
+            if (failure == null) {
+                throw e;
+            }
+            runContext.logger().error("Unable to store the per-host results of the failed run: {}", e.getMessage());
+            return null;
+        } finally {
+            deleteQuietly(runContext, resultsFiles);
+            deleteQuietly(runContext, List.of(merged));
+        }
+    }
+
+    /**
+     * Joins the JSON arrays written by the callback (one per command) into a single array by copying
+     * bytes, never parsing them: the results can be hundreds of megabytes. The callback writes them
+     * without surrounding whitespace, so each file is `[` + elements + `]`; files that are missing,
+     * empty, hold an empty array or are not shaped that way (including an unfinished in-place write, see
+     * kestra_logger.py) are skipped.
+     *
+     * @return whether the target holds at least one playbook
+     */
+    static boolean mergeResultsFiles(RunContext runContext, List<Path> sources, Path target) throws IOException {
+        var merged = 0;
+        try (var out = FileChannel.open(target, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
+            out.write(ByteBuffer.wrap(new byte[] { '[' }));
+
+            for (Path source : sources) {
+                if (!Files.isRegularFile(source) || Files.size(source) <= 2) {
+                    continue;
+                }
+
+                try (var in = FileChannel.open(source, StandardOpenOption.READ)) {
+                    long size = in.size();
+                    var edges = ByteBuffer.allocate(1);
+                    in.read(edges, 0);
+                    var first = edges.get(0);
+                    edges.clear();
+                    in.read(edges, size - 1);
+                    var last = edges.get(0);
+                    if (first != '[' || last != ']') {
+                        runContext.logger().warn("Ansible results file '{}' is not a JSON array; its results are left out.", source);
+                        continue;
+                    }
+
+                    var mark = out.position();
+                    if (merged > 0) {
+                        out.write(ByteBuffer.wrap(new byte[] { ',' }));
+                    }
+                    long position = 1;
+                    long end = size - 1;
+                    while (position < end) {
+                        var copied = in.transferTo(position, end - position, out);
+                        if (copied <= 0) {
+                            break;
+                        }
+                        position += copied;
+                    }
+                    if (position < end) {
+                        // the file shrank while being read: drop what was copied of it
+                        out.truncate(mark);
+                        out.position(mark);
+                        runContext.logger().warn("Ansible results file '{}' changed while being read; its results are left out.", source);
+                        continue;
+                    }
+                    merged++;
+                }
+            }
+
+            out.write(ByteBuffer.wrap(new byte[] { ']' }));
+        }
+
+        return merged > 0;
+    }
+
+    private static void deleteQuietly(RunContext runContext, List<Path> files) {
+        for (Path file : files) {
+            try {
+                Files.deleteIfExists(file);
+            } catch (IOException e) {
+                runContext.logger().debug("Unable to delete the file '{}': {}", file, e.getMessage());
+            }
+        }
     }
 
     /**
@@ -1139,19 +1371,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     /**
-     * Rebuilds the flat, backward-compatible ALL-mode "outputs" list from the structured
-     * playbooks, in playbook -&gt; play -&gt; task -&gt; host order. The callback used to emit every
-     * per-host result twice (once flat, once structured); it now only emits the structured form,
-     * see kestra_logger.py's `_log_kestra_outputs` (issue #126).
-     */
-    static List<Object> flattenHostResults(List<AnsibleOutput.PlaybookOutput> playbooks) {
-        return tasks(playbooks)
-            .flatMap(task -> nonNulls(task.getHosts()))
-            .map(AnsibleOutput.HostResult::getResult)
-            .toList();
-    }
-
-    /**
      * Reads back the outputs/playbooks payload the kestra_logger callback writes to a file
      * (env var {@link #OUTPUTS_FILE_ENV}) instead of printing it to stdout. Degrades gracefully:
      * a missing or unreadable file is not a hard failure, since it can legitimately happen when
@@ -1166,7 +1385,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * caller can still emit the diagnostics it has before failing the task.
      *
      * <p>
-     * The file is deleted once consumed: in ALL mode it holds raw per-host results (registered
+     * The file is deleted once consumed: with `resultsStorage: INLINE` it holds raw per-host results (registered
      * vars, stdout/msg, gathered facts) that may carry secrets a playbook fetched, and there is no
      * reason to leave them in plaintext in the working directory for the rest of the task.
      *
@@ -1204,9 +1423,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         try {
-            // The file only ever holds "playbooks" (plus "outputs" in EXPLICIT mode), while the
-            // final payload adds the flat list rebuilt from those same playbooks: a file already
-            // over the bound can never fit, so rejecting on file size raises no false failure.
+            // The file holds a subset of the final output ("playbooks" and the declared "outputs"),
+            // so a file already over the bound can never fit: rejecting on file size raises no false failure.
             long fileSize = Files.size(outputsFile);
             if (fileSize > maxOutputsSize) {
                 return new OutputsFileRead(Optional.empty(), fileSize);
@@ -1274,20 +1492,17 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * completed, so it is a task-output/queue guard, not a fix for slow execution — it cannot
      * make a long-running ansible-playbook command finish sooner.
      */
-    void checkOutputsSize(Map<String, Object> mergedVars, long maxOutputsSize) throws IOException {
-        Map<String, Object> outputsPayload = new HashMap<>();
-        outputsPayload.put("outputs", mergedVars.get("outputs"));
-        outputsPayload.put("playbooks", mergedVars.get("playbooks"));
-
+    void checkOutputsSize(AnsibleOutput output, long maxOutputsSize, ResultsStorage resultsStorage) throws IOException {
         // Measure by counting the serialized bytes as they are produced, and stop at the bound:
-        // materializing the whole payload as a byte[] just to read its length would allocate a
+        // materializing the whole output as a byte[] just to read its length would allocate a
         // second full copy of data that was itself just parsed out of the outputs file.
         try (BoundedCountingOutputStream counter = new BoundedCountingOutputStream(maxOutputsSize)) {
-            JacksonMapper.ofJson().writeValue(counter, outputsPayload);
+            JacksonMapper.ofJson().writeValue(counter, output);
         } catch (LimitExceededException e) {
             throw new IllegalStateException(
                 outputsTooLargeMessage(
-                    "Ansible outputs payload exceeds the configured `maxOutputsSize` of " + maxOutputsSize + " bytes."
+                    "Ansible task output exceeds the configured `maxOutputsSize` of " + maxOutputsSize + " bytes.",
+                    resultsStorage
                 )
             );
         }
@@ -1298,7 +1513,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * actionable message as {@link #checkOutputsSize}. Called after the per-task logs have been
      * emitted, so the run still leaves behind whatever diagnostics the other commands produced.
      */
-    static void failOnOversizedOutputsFile(long oversizedBytes, long maxOutputsSize) {
+    static void failOnOversizedOutputsFile(long oversizedBytes, long maxOutputsSize, ResultsStorage resultsStorage) {
         if (oversizedBytes <= 0) {
             return;
         }
@@ -1307,17 +1522,23 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             outputsTooLargeMessage(
                 "The Ansible outputs file written by the callback is " + oversizedBytes + " bytes, exceeding the "
                     + "configured `maxOutputsSize` of " + maxOutputsSize + " bytes; it was not parsed, so it could "
-                    + "not exhaust the worker's heap."
+                    + "not exhaust the worker's heap.",
+                resultsStorage
             )
         );
     }
 
-    private static String outputsTooLargeMessage(String what) {
+    private static String outputsTooLargeMessage(String what, ResultsStorage resultsStorage) {
+        var fixes = resultsStorage == ResultsStorage.INLINE
+            ? " Keep the detail out of the output with `resultsStorage: STORE` (the full results go to internal"
+                + " storage), or reduce the captured volume with `outputsMode: EXPLICIT` (only declared values are"
+                + " exposed), or raise `maxOutputsSize` if your instance's queue is configured to accept larger messages."
+            : " Reduce the captured volume with `outputsMode: EXPLICIT` (only declared values are exposed), or raise"
+                + " `maxOutputsSize` if your instance's queue is configured to accept larger messages.";
         return what
             + " This guards against a worker task result the platform queue may reject; it is unrelated to how"
-            + " long the ansible-playbook command itself took to run. Reduce the captured volume with"
-            + " `outputsMode: EXPLICIT` (only declared values are exposed), or raise `maxOutputsSize` if your"
-            + " instance's queue is configured to accept larger messages.";
+            + " long the ansible-playbook command itself took to run."
+            + fixes;
     }
 
     /** Counts written bytes without keeping them, and aborts as soon as the bound is exceeded. */
@@ -1361,7 +1582,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * tagged with the taskrun's id, so logs are attributed per Ansible task instead of all landing
      * on the parent task's root taskrun (issue kestra-ee#8520).
      */
-    private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks, LogsMode logsMode) throws IllegalVariableEvaluationException {
+    private void emitDynamicTaskRuns(RunContext runContext, List<AnsibleOutput.PlaybookOutput> playbooks, LogsMode logsMode, ResultsStorage resultsStorage)
+        throws IllegalVariableEvaluationException {
         if (playbooks == null || playbooks.isEmpty()) {
             return;
         }
@@ -1408,7 +1630,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             // and masks secrets; the plugin never builds a LogEntry itself.
             runContext.dynamicWorkerResult(
                 WorkerTaskResult.builder().taskRun(subTaskRun).build(),
-                taskLogs(task, logsMode)
+                taskLogs(task, logsMode, resultsStorage)
             );
         }
     }
@@ -1439,7 +1661,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * Neither mode overrides EXPLICIT-mode redaction: the host result payload is already reduced
      * by the callback before it ever reaches this method.
      */
-    static List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task, LogsMode logsMode) {
+    static List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task, LogsMode logsMode, ResultsStorage resultsStorage) {
         if (task.getHosts() == null) {
             return List.of();
         }
@@ -1455,9 +1677,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             String message;
             if (logsMode == LogsMode.FULL) {
-                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(stringifyResult(hr.getResult()));
+                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(stringifyResult(hr.getResult()), resultsStorage);
             } else if (failed) {
-                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult()));
+                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult()), resultsStorage);
             } else {
                 message = "[" + hr.getHost() + "] " + status;
             }
@@ -1475,11 +1697,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return stringifyResult(result);
     }
 
-    static String truncateForLog(String s) {
+    static String truncateForLog(String s, ResultsStorage resultsStorage) {
         if (s == null || s.length() <= MAX_LOG_LINE_LENGTH) {
             return s;
         }
-        return s.substring(0, MAX_LOG_LINE_LENGTH) + "... (truncated, see `outputs`)";
+        var fullResults = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
+        return s.substring(0, MAX_LOG_LINE_LENGTH) + "... (truncated, see " + fullResults + ")";
     }
 
     static String stringifyResult(Object result) {
@@ -1499,6 +1722,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         EXPLICIT
     }
 
+    public enum ResultsStorage {
+        STORE,
+        INLINE
+    }
+
     public enum LogsMode {
         SUMMARY,
         FULL
@@ -1510,9 +1738,22 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         @Schema(
             title = "Structured playbook outputs",
-            description = "Each item corresponds to one ansible-playbook command execution with its plays, tasks, and host results."
+            description = """
+                Each item corresponds to one ansible-playbook command execution with its plays, tasks, and host results.
+                This is the only place per-host results are returned; with `resultsStorage: STORE` (default) they are light results, and the full ones are in the file at `resultsUri`.
+                """
         )
         private List<PlaybookOutput> playbooks;
+
+        @Schema(
+            title = "Full per-host results file",
+            description = """
+                URI of a JSON file in Kestra's internal storage holding the full per-host results, shaped like `playbooks`, without `stdout_lines`/`stderr_lines`.
+                Null with `resultsStorage: INLINE`, or when no command wrote results (no `ansible-playbook` command, or a custom `ansibleConfig` without the bundled callback).
+                Also set on the outputs of a failed attempt. Read it downstream with `{{ read(outputs.<taskId>.resultsUri) }}`.
+                """
+        )
+        private URI resultsUri;
 
         @Builder
         @Getter
@@ -1600,10 +1841,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             private String status;
 
             @Schema(
-                title = "Raw Ansible result payload for this host",
+                title = "Ansible result payload for this host",
                 description = """
-                    Arbitrary structure directly from Ansible.
-                    If the task uses loops, Ansible already returns a list in this object.
+                    Structure directly from Ansible, without `stdout_lines`/`stderr_lines`.
+                    With `resultsStorage: STORE` (default) this is the light result: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB and, for failed or unreachable hosts, the last 1 KB of `stderr`, plus the whole output of `debug` tasks; the full result is in the file at `resultsUri`.
+                    If the task uses loops, Ansible returns the per-item results under `results` in this object.
                     """
             )
             private Object result;

@@ -5,6 +5,7 @@
 from __future__ import annotations
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 
 DOCUMENTATION = """
@@ -46,6 +47,15 @@ class CallbackModule(CallbackBase):
     # always-use-FQCN lint rule invoke the module as ansible.legacy.kestra.
     KESTRA_OUTPUT_ACTIONS = frozenset({'kestra', 'ansible.legacy.kestra'})
 
+    DEBUG_ACTIONS = frozenset({'debug', 'ansible.builtin.debug', 'ansible.legacy.debug'})
+
+    # Characters of msg / stderr kept inline per result in store mode.
+    LIGHT_RESULT_LIMIT = 1024
+
+    # Characters kept inline per value of a debug task's result in store mode; the full value is in
+    # the results file (`resultsUri`).
+    DEBUG_VALUE_LIMIT = 64 * 1024
+
     def __init__(self):
         # --- explicit outputs (kestra module) ---
         # Mode is set by the AnsibleCLI task via env var:
@@ -55,6 +65,12 @@ class CallbackModule(CallbackBase):
         self._outputs_mode = os.environ.get("KESTRA_OUTPUTS_MODE", "all").strip().lower()
         self._kestra_explicit = {}
         # -----------------------------------------------
+
+        # "store" (default) keeps only a light result per host in the outputs payload and writes the
+        # full per-host results to KESTRA_RESULTS_FILE, which AnsibleCLI uploads to internal storage;
+        # "inline" keeps the full results in the outputs payload.
+        self._results_store = os.environ.get("KESTRA_RESULTS_STORAGE", "store").strip().lower() != "inline"
+        self._results_file_path = os.environ.get("KESTRA_RESULTS_FILE", "").strip() or None
 
         # Absolute path where the final outputs payload (see _log_kestra_outputs) is written.
         # Set by the AnsibleCLI task via env var. Writing to a file instead of printing to
@@ -110,18 +126,16 @@ class CallbackModule(CallbackBase):
         """
         Final payload written to KESTRA_OUTPUTS_FILE for AnsibleCLI to read back after the
         command completes (see _outputs_file_path). Per-host results only ever live under
-        "playbooks" here; AnsibleCLI rebuilds the flat, backward-compatible "outputs" list
-        itself from that structure instead of us emitting every result twice.
+        "playbooks" here; "outputs" holds the values declared via the kestra module, in every mode.
+        In store mode the full results go to KESTRA_RESULTS_FILE instead, see _write_results_file.
         """
-        if self._outputs_mode == "explicit":
-            payload = {
-                "outputs": self._kestra_explicit,
-                "playbooks": self._kestra_playbooks
-            }
-        else:
-            payload = {
-                "playbooks": self._kestra_playbooks
-            }
+        payload = {
+            "outputs": self._kestra_explicit,
+            "playbooks": self._kestra_playbooks
+        }
+
+        if self._results_store:
+            self._write_results_file()
 
         if not self._outputs_file_path:
             self._display.warning(
@@ -130,20 +144,7 @@ class CallbackModule(CallbackBase):
             return
 
         try:
-            os.makedirs(os.path.dirname(self._outputs_file_path), exist_ok=True)
-            # 0600: in "all" mode this file holds raw per-host results (registered vars,
-            # stdout/msg, gathered facts) which may carry secrets a playbook fetched. Open with
-            # restrictive permissions and re-apply them on the descriptor, so an existing file
-            # created with a wider umask cannot leave the payload world-readable. AnsibleCLI
-            # deletes the file as soon as it has read it back.
-            fd = os.open(self._outputs_file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                os.fchmod(fd, 0o600)
-            except OSError:
-                # not all filesystems support fchmod; the O_CREAT mode above still applies
-                pass
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, default=str)
+            self._write_private_json(self._outputs_file_path, payload)
         except Exception as e:
             self._display.warning(
                 "Unable to write Kestra outputs file '%s': %s. This usually means the working "
@@ -163,6 +164,185 @@ class CallbackModule(CallbackBase):
             # EXPLICIT_OUTPUTS_FALLBACK_MARKER in AnsibleCLI.java).
             fallback_vars = dict(payload, _kestra_outputs_fallback=True)
             print("::" + json.dumps({"outputs": fallback_vars}, default=str) + "::")
+
+    def _write_private_json(self, path, content):
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        # 0600: these files hold raw per-host results (registered vars, stdout/msg, gathered
+        # facts) which may carry secrets a playbook fetched. AnsibleCLI deletes the file as soon
+        # as it has consumed it.
+        try:
+            existing = os.stat(path)
+        except OSError:
+            existing = None
+
+        # Replacing the pre-created file keeps its owner only if we can restore it, else truncate in place.
+        if existing is None or existing.st_uid == os.geteuid() or os.geteuid() == 0:
+            try:
+                self._write_atomically(path, directory, content, existing)
+                return
+            except OSError:
+                pass
+
+        # Not atomic: the first byte is written last, so a run killed mid-write leaves a file that
+        # does not start with "[" or "{" and AnsibleCLI skips it.
+        chunks = json.JSONEncoder(default=str, separators=(",", ":")).iterencode(content)
+        first = next(chunks)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            # not all filesystems support fchmod; the O_CREAT mode above still applies
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(" " + first[1:])
+            for chunk in chunks:
+                fh.write(chunk)
+            fh.flush()
+            os.pwrite(fh.fileno(), first[:1].encode("ascii"), 0)
+
+    @staticmethod
+    def _write_atomically(path, directory, content, existing):
+        """Temp file renamed over the target, so a run killed mid-write leaves no truncated file."""
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".kestra-tmp-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(content, fh, default=str, separators=(",", ":"))
+            if existing is not None and existing.st_uid != os.geteuid():
+                os.chown(tmp_path, existing.st_uid, existing.st_gid)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _write_results_file(self):
+        """Writes the full per-host results as a whitespace-free JSON array (merged by byte copy), never to stdout (issue #126)."""
+        full_playbooks = []
+        try:
+            for playbook in self._kestra_playbooks:
+                full_plays = []
+                for play in playbook["plays"]:
+                    full_tasks = []
+                    for task in play["tasks"]:
+                        full_hosts = [
+                            {k: v for k, v in host.items() if k != "_full"}
+                            | {"result": host.get("_full", host["result"])}
+                            for host in task["hosts"]
+                        ]
+                        full_tasks.append(dict(task, hosts=full_hosts))
+                    full_plays.append(dict(play, tasks=full_tasks))
+                full_playbooks.append(dict(playbook, plays=full_plays))
+        finally:
+            # "_full" must never leak into the light playbooks written to the outputs file,
+            # even if building the copy above failed halfway
+            for playbook in self._kestra_playbooks:
+                for play in playbook["plays"]:
+                    for task in play["tasks"]:
+                        for host in task["hosts"]:
+                            host.pop("_full", None)
+
+        if not self._results_file_path:
+            self._display.warning(
+                "KESTRA_RESULTS_FILE is not set: the full per-host results were not stored."
+            )
+            return
+
+        try:
+            self._write_private_json(self._results_file_path, full_playbooks)
+        except Exception as e:
+            self._display.warning(
+                "Unable to write Kestra results file '%s': %s. This usually means the working "
+                "directory is not writable by the container user; only the light per-host results "
+                "are returned in `playbooks`. Set `taskRunner: {type: "
+                "io.kestra.plugin.scripts.runner.docker.Docker, user: \"0\"}` to avoid it."
+                % (self._results_file_path, e)
+            )
+
+    @staticmethod
+    def _without_lines(value):
+        """
+        Copy of a value without the line-split duplicates of stdout/stderr at every nesting level:
+        loop items, registered results nested in a debug `var`, and so on.
+        """
+        if isinstance(value, dict):
+            return {
+                k: CallbackModule._without_lines(v)
+                for k, v in value.items()
+                if k not in ("stdout_lines", "stderr_lines")
+            }
+        if isinstance(value, list):
+            return [CallbackModule._without_lines(v) for v in value]
+        return value
+
+    @staticmethod
+    def _light_msg(msg):
+        """
+        A string msg is cut to LIGHT_RESULT_LIMIT characters; any other type keeps its JSON type
+        unless its serialization is over the limit, in which case the start of that serialization
+        stands in for it.
+        """
+        limit = CallbackModule.LIGHT_RESULT_LIMIT
+        if isinstance(msg, str):
+            return msg[:limit]
+        serialized = json.dumps(msg, default=str)
+        if len(serialized) <= limit:
+            return msg
+        return serialized[:limit] + "... (truncated)"
+
+    @staticmethod
+    def _cap_debug_value(value):
+        """
+        A debug value whose serialization is over DEBUG_VALUE_LIMIT is replaced by the start of
+        that serialization plus a pointer to `resultsUri`; smaller values keep their native type.
+        """
+        limit = CallbackModule.DEBUG_VALUE_LIMIT
+        if isinstance(value, str):
+            serialized = value
+        elif isinstance(value, (dict, list)):
+            serialized = json.dumps(value, default=str)
+        else:
+            return value
+        if len(serialized) <= limit:
+            return value
+        return serialized[:limit] + "... (truncated, full value in `resultsUri`)"
+
+    @staticmethod
+    def _light_result(result, failed, is_debug=False):
+        """
+        Subset of a result kept inline in store mode: status flags, return code and a bounded
+        reason. For command/shell, msg is just "non-zero return code", so a failed result also
+        keeps the tail of stderr. The debug module's output is the point of the task, so it is
+        kept minus Ansible's internal keys, with each value capped at DEBUG_VALUE_LIMIT characters
+        (the full value stays in the results file); maxOutputsSize still bounds the total.
+        """
+        if is_debug:
+            light = {
+                k: CallbackModule._cap_debug_value(v)
+                for k, v in result.items()
+                if not k.startswith("_ansible_")
+            }
+        else:
+            light = {k: result[k] for k in ("changed", "failed", "skipped", "unreachable", "rc") if k in result}
+
+            if result.get("msg") is not None:
+                light["msg"] = CallbackModule._light_msg(result["msg"])
+
+            stderr = result.get("stderr")
+            if failed and isinstance(stderr, str) and stderr:
+                light["stderr"] = stderr[-CallbackModule.LIGHT_RESULT_LIMIT:]
+
+        items = result.get("results")
+        if isinstance(items, list):
+            light["results"] = [
+                CallbackModule._light_result(
+                    item, bool(item.get("failed") or item.get("unreachable")), is_debug
+                ) if isinstance(item, dict) else item
+                for item in items
+            ]
+        return light
 
     def _is_kestra_output_task(self, result):
         action = getattr(result._task, "action", None)
@@ -272,7 +452,10 @@ class CallbackModule(CallbackBase):
             "startedAt": started_at_str,
             "endedAt": ended_at_str,
             "durationMs": duration_ms,
-            "hosts": self._current_task.get("hosts", [])
+            "hosts": [
+                {k: v for k, v in host.items() if k != "_full"}
+                for host in self._current_task.get("hosts", [])
+            ]
         }
 
         json_line = json.dumps(task_payload, default=str, separators=(",", ":"))
@@ -358,9 +541,9 @@ class CallbackModule(CallbackBase):
     def _add_host_result(self, result, status):
         """
         Add per-host result under current task (structured). This is the only place a
-        per-host result is retained (see _log_kestra_outputs); AnsibleCLI rebuilds the flat
-        "outputs" list Java-side from this structure instead of it being duplicated here.
-        In explicit mode, result payloads are redacted: only declared
+        per-host result is retained (see _log_kestra_outputs), without the *_lines copies of
+        stdout/stderr. In store mode the entry keeps a light result and the full one is recorded
+        separately for the results file. In explicit mode, result payloads are redacted: only declared
         kestra outputs are collected, statuses are preserved.
         """
         if self._is_kestra_output_task(result) and status == "ok":
@@ -383,13 +566,19 @@ class CallbackModule(CallbackBase):
                 if msg is not None:
                     result_payload["msg"] = msg
         else:
-            result_payload = dict(result._result)
+            result_payload = self._without_lines(result._result)
 
         host_result = {
             "host": host_name,
             "status": status,
             "result": result_payload
         }
+        if self._results_store:
+            is_debug = getattr(result._task, "action", None) in self.DEBUG_ACTIONS
+            host_result["result"] = self._light_result(
+                result_payload, status in ("failed", "unreachable"), is_debug
+            )
+            host_result["_full"] = result_payload
         self._current_task["hosts"].append(host_result)
 
     # -------------------------------------------------------------------------

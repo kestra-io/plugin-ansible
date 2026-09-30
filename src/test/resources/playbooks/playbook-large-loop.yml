@@ -1,0 +1,8 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Print a long sequence per item
+      ansible.builtin.shell: seq 1 200
+      loop: "{{ range(50) | list }}"
