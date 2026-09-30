@@ -67,8 +67,6 @@ class CallbackModule(CallbackBase):
         # "inline" keeps the full results in the outputs payload.
         self._results_store = os.environ.get("KESTRA_RESULTS_STORAGE", "store").strip().lower() != "inline"
         self._results_file_path = os.environ.get("KESTRA_RESULTS_FILE", "").strip() or None
-        # id(host entry in _kestra_playbooks) -> full result, only filled in store mode
-        self._full_results = {}
 
         # Absolute path where the final outputs payload (see _log_kestra_outputs) is written.
         # Set by the AnsibleCLI task via env var. Writing to a file instead of printing to
@@ -184,6 +182,10 @@ class CallbackModule(CallbackBase):
             except OSError:
                 pass
 
+        # Not atomic: the first byte is written last, so a run killed mid-write leaves a file that
+        # does not start with "[" or "{" and AnsibleCLI skips it.
+        chunks = json.JSONEncoder(default=str, separators=(",", ":")).iterencode(content)
+        first = next(chunks)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.fchmod(fd, 0o600)
@@ -191,14 +193,15 @@ class CallbackModule(CallbackBase):
             # not all filesystems support fchmod; the O_CREAT mode above still applies
             pass
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(content, fh, default=str, separators=(",", ":"))
+            fh.write(" " + first[1:])
+            for chunk in chunks:
+                fh.write(chunk)
+            fh.flush()
+            os.pwrite(fh.fileno(), first[:1].encode("ascii"), 0)
 
     @staticmethod
     def _write_atomically(path, directory, content, existing):
-        """
-        Written to a temp file and renamed over the target, so a run killed mid-write never
-        leaves a truncated file for AnsibleCLI to read. mkstemp creates it 0600.
-        """
+        """Temp file renamed over the target, so a run killed mid-write leaves no truncated file."""
         fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".kestra-tmp-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -215,31 +218,30 @@ class CallbackModule(CallbackBase):
 
     def _write_results_file(self):
         """
-        Writes the full per-host results, shaped like "playbooks", as a JSON array with no
-        surrounding whitespace: AnsibleCLI merges the files of several commands by copying the
-        bytes between the outer brackets, without parsing them. On failure the light results
-        already in the outputs payload are kept; the full results are never printed to stdout,
-        which would stall the log pipeline (issue #126).
+        Writes the full per-host results as a JSON array with no surrounding whitespace, as AnsibleCLI
+        merges files by copying bytes. Never printed to stdout on failure (issue #126).
         """
-        if not self._results_file_path:
-            self._display.warning(
-                "KESTRA_RESULTS_FILE is not set: the full per-host results were not stored."
-            )
-            return
-
+        # the full result rides on each host entry as "_full" and is popped here, so the light
+        # playbooks written to the outputs file afterwards never carry it
         full_playbooks = []
         for playbook in self._kestra_playbooks:
             full_plays = []
             for play in playbook["plays"]:
                 full_tasks = []
                 for task in play["tasks"]:
-                    full_hosts = [
-                        dict(host, result=self._full_results.get(id(host), host["result"]))
-                        for host in task["hosts"]
-                    ]
+                    full_hosts = []
+                    for host in task["hosts"]:
+                        full = host.pop("_full", host["result"])
+                        full_hosts.append(dict(host, result=full))
                     full_tasks.append(dict(task, hosts=full_hosts))
                 full_plays.append(dict(play, tasks=full_tasks))
             full_playbooks.append(dict(playbook, plays=full_plays))
+
+        if not self._results_file_path:
+            self._display.warning(
+                "KESTRA_RESULTS_FILE is not set: the full per-host results were not stored."
+            )
+            return
 
         try:
             self._write_private_json(self._results_file_path, full_playbooks)
@@ -421,7 +423,10 @@ class CallbackModule(CallbackBase):
             "startedAt": started_at_str,
             "endedAt": ended_at_str,
             "durationMs": duration_ms,
-            "hosts": self._current_task.get("hosts", [])
+            "hosts": [
+                {k: v for k, v in host.items() if k != "_full"}
+                for host in self._current_task.get("hosts", [])
+            ]
         }
 
         json_line = json.dumps(task_payload, default=str, separators=(",", ":"))
@@ -544,7 +549,7 @@ class CallbackModule(CallbackBase):
             host_result["result"] = self._light_result(
                 result_payload, status in ("failed", "unreachable"), is_debug
             )
-            self._full_results[id(host_result)] = result_payload
+            host_result["_full"] = result_payload
         self._current_task["hosts"].append(host_result)
 
     # -------------------------------------------------------------------------

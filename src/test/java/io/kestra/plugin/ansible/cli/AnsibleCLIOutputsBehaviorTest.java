@@ -1,5 +1,6 @@
 package io.kestra.plugin.ansible.cli;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.event.Level;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
@@ -147,6 +149,72 @@ class AnsibleCLIOutputsBehaviorTest {
         var real = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[2]}]");
 
         assertThat(merge(tempDir.resolve("merged.json"), truncated, real), is("[{\"plays\":[2]}]"));
+    }
+
+    // a callback killed during its in-place write leaves the first byte unwritten, but the tail can still be `]`
+    @Test
+    void mergeResultsFiles_skipsUnfinishedWriteThatStillEndsWithBracket(@TempDir Path tempDir) throws Exception {
+        var unfinished = Files.writeString(tempDir.resolve("r0.json"), " {\"plays\":[1,2]}]");
+        var real = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[2]}]");
+
+        assertThat(merge(tempDir.resolve("merged.json"), unfinished, real), is("[{\"plays\":[2]}]"));
+    }
+
+    // -------------------------------------------------------------------------
+    // storeResults / failedRun: a failed command must stay the reported error
+    // -------------------------------------------------------------------------
+
+    private static RunnableTaskException failure() {
+        return new RunnableTaskException("exit 3", new IllegalStateException("cause"), null);
+    }
+
+    @Test
+    void storeResults_storageError_afterFailedCommand_isLoggedNotThrown(@TempDir Path tempDir) throws Exception {
+        var results = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]}]");
+        var runContext = TestsUtils.mockRunContext(runContextFactory, newTask(), Map.of());
+        // the target directory does not exist, so writing the merged file fails like a full disk would
+        var missingDir = tempDir.resolve("missing");
+
+        var uri = newTask().storeResults(runContext, missingDir, List.of(results), failure());
+
+        assertThat(uri, is(nullValue()));
+        assertThat(Files.exists(results), is(false));
+    }
+
+    @Test
+    void storeResults_storageError_withoutFailedCommand_isThrown(@TempDir Path tempDir) throws Exception {
+        var results = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]}]");
+        var runContext = TestsUtils.mockRunContext(runContextFactory, newTask(), Map.of());
+
+        assertThrows(
+            IOException.class,
+            () -> newTask().storeResults(runContext, tempDir.resolve("missing"), List.of(results), null)
+        );
+    }
+
+    @Test
+    void failedRun_outputsOverLimit_keepsOriginalFailure() {
+        var runContext = TestsUtils.mockRunContext(runContextFactory, newTask(), Map.of());
+        var original = failure();
+
+        var result = newTask().failedRun(runContext, original, outputWith("x".repeat(1000)), 100L, AnsibleCLI.ResultsStorage.STORE);
+
+        assertThat(result, is(sameInstance(original)));
+        assertThat(result.getOutput(), is(nullValue()));
+    }
+
+    @Test
+    void failedRun_outputsUnderLimit_carriesOutputsAndSuppressed() {
+        var runContext = TestsUtils.mockRunContext(runContextFactory, newTask(), Map.of());
+        var original = failure();
+        var suppressed = new IllegalArgumentException("cleanup failed");
+        original.addSuppressed(suppressed);
+        var output = outputWith("small");
+
+        var result = newTask().failedRun(runContext, original, output, 10_000_000L, AnsibleCLI.ResultsStorage.STORE);
+
+        assertThat(result.getOutput(), is(sameInstance(output)));
+        assertThat(result.getSuppressed(), arrayContaining(suppressed));
     }
 
     // -------------------------------------------------------------------------

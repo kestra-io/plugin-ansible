@@ -649,6 +649,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         // one file per command, merged into a single stored file after the last command
         List<Path> resultsFiles = new ArrayList<>();
         RunnableTaskException failure = null;
+        boolean ranPlaybook = false;
 
         int mergedExitCode = 0;
         int mergedStdOutCount = 0;
@@ -793,6 +794,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 // file instead of printing to stdout: a single, potentially multi-MB stdout line
                 // stalls the task runner's line-oriented log pipeline for minutes (issue #126).
                 boolean looksLikePlaybookCommand = cmd.contains("ansible-playbook");
+                ranPlaybook |= looksLikePlaybookCommand;
                 OutputsFileRead outputsRead = readOutputsFile(runContext, outputsFile, looksLikePlaybookCommand, rMaxOutputsSize);
                 oversizedOutputsFileBytes = Math.max(oversizedOutputsFileBytes, outputsRead.oversizedBytes());
                 outputsRead.payload().ifPresent(payload ->
@@ -843,15 +845,28 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 }
 
                 // upload final log so outputs contains "log"
-                URI logUri = runContext.storage().putFile(finalLog.toFile());
-                Map<String, URI> patched = new HashMap<>(lastOutputFiles);
-                patched.put("log", logUri);
-                lastOutputFiles = patched;
+                try {
+                    URI logUri = runContext.storage().putFile(finalLog.toFile());
+                    Map<String, URI> patched = new HashMap<>(lastOutputFiles);
+                    patched.put("log", logUri);
+                    lastOutputFiles = patched;
+                } catch (IOException e) {
+                    if (failure == null) {
+                        throw e;
+                    }
+                    runContext.logger().error("Unable to upload the merged log of the failed run: {}", e.getMessage());
+                }
             }
 
-            resultsUri = storeResults(runContext, workingDir, resultsFiles);
+            resultsUri = storeResults(runContext, workingDir, resultsFiles, failure);
         } finally {
             deleteQuietly(runContext, resultsFiles);
+        }
+
+        if (rResultsStorage == ResultsStorage.STORE && resultsUri == null && ranPlaybook) {
+            runContext.logger().warn(
+                "`resultsStorage: STORE` is set but no per-host results were stored, so `resultsUri` is empty and `playbooks` only hold light results. The callback may not have been able to write its results file, e.g. the working directory is not writable by the container user."
+            );
         }
 
         mergedVars.put("outputs", mergedExplicitOutputs);
@@ -892,12 +907,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return output;
     }
 
-    /**
-     * Rethrows a failed command with the outputs gathered so far, so the failed attempt exposes its
-     * `playbooks` and `resultsUri` and the user can see why it failed. If those outputs are over
-     * `maxOutputsSize` the original failure is kept untouched and the results location is logged instead.
-     */
-    private RunnableTaskException failedRun(RunContext runContext, RunnableTaskException failure, AnsibleOutput output, long maxOutputsSize, ResultsStorage resultsStorage) {
+    /** Rebuilds the failure with the outputs gathered so far; if they are over `maxOutputsSize`, keeps it as is and logs where the results are stored. */
+    RunnableTaskException failedRun(RunContext runContext, RunnableTaskException failure, AnsibleOutput output, long maxOutputsSize, ResultsStorage resultsStorage) {
         try {
             checkOutputsSize(output, maxOutputsSize, resultsStorage);
         } catch (IOException | IllegalStateException e) {
@@ -908,16 +919,21 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             return failure;
         }
 
-        return new RunnableTaskException(failure.getMessage(), failure.getCause(), output);
+        var rebuilt = new RunnableTaskException(failure.getMessage(), failure.getCause(), output);
+        for (var suppressed : failure.getSuppressed()) {
+            rebuilt.addSuppressed(suppressed);
+        }
+        return rebuilt;
     }
 
     /**
-     * Merges the per-command results files into one and uploads it to internal storage. The local
-     * files are always deleted, also when the upload fails: they may hold secrets a playbook fetched.
+     * Merges the per-command results files into one and uploads it. The local files are always
+     * deleted, as they may hold secrets. When a command already failed, a storage error is logged
+     * instead of thrown so it cannot hide that failure.
      *
-     * @return the stored file, or null when no command wrote results
+     * @return the stored file, or null when no command wrote results or the upload failed after a failure
      */
-    private URI storeResults(RunContext runContext, Path workingDir, List<Path> resultsFiles) throws IOException {
+    URI storeResults(RunContext runContext, Path workingDir, List<Path> resultsFiles, RunnableTaskException failure) throws IOException {
         if (resultsFiles.isEmpty()) {
             return null;
         }
@@ -928,6 +944,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 return null;
             }
             return runContext.storage().putFile(merged.toFile(), "results.json");
+        } catch (IOException e) {
+            if (failure == null) {
+                throw e;
+            }
+            runContext.logger().error("Unable to store the per-host results of the failed run: {}", e.getMessage());
+            return null;
         } finally {
             deleteQuietly(runContext, resultsFiles);
             deleteQuietly(runContext, List.of(merged));
@@ -938,7 +960,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
      * Joins the JSON arrays written by the callback (one per command) into a single array by copying
      * bytes, never parsing them: the results can be hundreds of megabytes. The callback writes them
      * without surrounding whitespace, so each file is `[` + elements + `]`; files that are missing,
-     * empty, hold an empty array or are not shaped that way are skipped.
+     * empty, hold an empty array or are not shaped that way (including an unfinished in-place write, see
+     * kestra_logger.py) are skipped.
      *
      * @return whether the target holds at least one playbook
      */
@@ -965,13 +988,25 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                         continue;
                     }
 
+                    var mark = out.position();
                     if (merged > 0) {
                         out.write(ByteBuffer.wrap(new byte[] { ',' }));
                     }
                     long position = 1;
                     long end = size - 1;
                     while (position < end) {
-                        position += in.transferTo(position, end - position, out);
+                        var copied = in.transferTo(position, end - position, out);
+                        if (copied <= 0) {
+                            break;
+                        }
+                        position += copied;
+                    }
+                    if (position < end) {
+                        // the file shrank while being read: drop what was copied of it
+                        out.truncate(mark);
+                        out.position(mark);
+                        runContext.logger().warn("Ansible results file '{}' changed while being read; its results are left out.", source);
+                        continue;
                     }
                     merged++;
                 }
