@@ -2217,6 +2217,14 @@ class AnsibleCLITest {
     }
 
     private RunWithLogs runInlinePlaybook(String tasksYaml, AnsibleCLI.LogsMode logsMode, AnsibleCLI.OutputsMode outputsMode, String awaited) throws Exception {
+        return runInlinePlaybook(tasksYaml, logsMode, outputsMode, awaited, false);
+    }
+
+    private RunWithLogs runFailingInlinePlaybook(String tasksYaml, String awaited) throws Exception {
+        return runInlinePlaybook(tasksYaml, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, awaited, true);
+    }
+
+    private RunWithLogs runInlinePlaybook(String tasksYaml, AnsibleCLI.LogsMode logsMode, AnsibleCLI.OutputsMode outputsMode, String awaited, boolean expectFailure) throws Exception {
         var playbook = "{% verbatim %}\n- hosts: localhost\n  gather_facts: false\n  tasks:\n" + tasksYaml + "\n{% endverbatim %}\n";
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
@@ -2231,7 +2239,13 @@ class AnsibleCLITest {
         List<LogEntry> logs = new CopyOnWriteArrayList<>();
         Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
 
-        var output = execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()));
+        AnsibleCLI.AnsibleOutput output = null;
+        var context = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        if (expectFailure) {
+            assertThrows(RunnableTaskException.class, () -> execute.run(context));
+        } else {
+            output = execute.run(context);
+        }
 
         TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().contains(awaited));
         receive.blockLast();
@@ -2299,6 +2313,29 @@ class AnsibleCLITest {
         var run = runInlinePlaybook(tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "[localhost] failed");
 
         assertThat(run.messages(), hasItem("[localhost] failed => The command exited with a non-zero return code. (rc=3) | stderr: oops"));
+    }
+
+    @Test
+    void run_failedShellWithoutIgnoreErrors_failsAndLogsRcAndStderr() throws Exception {
+        var tasks = """
+                - name: Plain failing shell
+                  ansible.builtin.shell: "echo partial output; echo 'disk quota exceeded' >&2; exit 3"
+            """;
+        var run = runFailingInlinePlaybook(tasks, "[localhost] failed");
+
+        assertThat(run.messages(), hasItem("[localhost] failed => The command exited with a non-zero return code. (rc=3) | stderr: disk quota exceeded"));
+    }
+
+    @Test
+    void run_failedLoopItemWithoutIgnoreErrors_failsAndLogsItemLine() throws Exception {
+        var tasks = """
+                - name: Loop with one failing item
+                  ansible.builtin.shell: "if [ {{ item }} -eq 3 ]; then echo 'boom on item 3' >&2; exit 2; fi; echo ok {{ item }}"
+                  loop: [1, 2, 3, 4]
+            """;
+        var run = runFailingInlinePlaybook(tasks, "(item=3)");
+
+        assertThat(run.messages(), hasItem("[localhost] failed (item=3) => The command exited with a non-zero return code. (rc=2) | stderr: boom on item 3"));
     }
 
     @Test

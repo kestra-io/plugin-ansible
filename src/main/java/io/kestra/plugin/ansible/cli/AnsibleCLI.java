@@ -989,7 +989,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             );
         }
 
-        if (failure == null) {
+        if (failure != null) {
+            // A failed run is exactly when the per-host reasons matter; never let a logging error mask it.
+            try {
+                emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode, rResultsStorage);
+            } catch (Exception e) {
+                runContext.logger().warn("Unable to emit the per-task logs of the failed run: {}", e.getMessage());
+            }
+        } else {
             // Emit before the size guard: these travel on the log queue, not the WorkerTaskResult the
             // guard protects, so a run that trips the guard still leaves per-task diagnostics behind.
             emitDynamicTaskRuns(runContext, mergedPlaybooks, rLogsMode, rResultsStorage);
