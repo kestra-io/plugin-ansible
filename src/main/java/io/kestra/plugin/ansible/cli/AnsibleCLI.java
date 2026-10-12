@@ -22,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -99,6 +100,32 @@ import lombok.experimental.SuperBuilder;
                     containerImage: cytopia/ansible:latest-tools
                     commands:
                       - ansible-playbook -i inventory.ini myplaybook.yml
+                """
+        ),
+        @Example(
+            title = "Execute an Ansible playbook using the typed playbook options (tags, limit, checkMode).",
+            full = true,
+            code = """
+                id: ansible_typed_options
+                namespace: company.team
+
+                tasks:
+                  - id: ansible_task
+                    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+                    limit: "localhost"
+                    tags:
+                      - update
+                    checkMode: true
+                    inputFiles:
+                      inventory.ini: |
+                        localhost ansible_connection=local
+                      playbook.yml: |
+                        ---
+                        - hosts: localhost
+                          tasks:
+                            - debug: msg="Done"
+                    commands:
+                      - ansible-playbook -i inventory.ini playbook.yml
                 """
         ),
         @Example(
@@ -385,6 +412,58 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     protected Property<List<String>> commands;
 
     @Schema(
+        title = "Dry-run check mode (--check)",
+        description = "If true, runs the playbook in check mode (no changes applied). Applies only to ansible-playbook commands."
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Boolean> checkMode = Property.ofValue(false);
+
+    @Schema(
+        title = "Show line-by-line configuration diffs (--diff)",
+        description = "If true, prints configuration differences. Applies only to ansible-playbook commands."
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<Boolean> diff = Property.ofValue(false);
+
+    @Schema(
+        title = "Limit execution to specific hosts or groups (--limit)",
+        description = "A limit pattern. Automatically quoted to prevent shell evaluation. Applies only to ansible-playbook commands."
+    )
+    @PluginProperty(group = "execution")
+    protected Property<String> limit;
+
+    @Schema(
+        title = "Tags to execute (--tags)",
+        description = "List of tags to execute. Joined with commas and automatically quoted. Applies only to ansible-playbook commands."
+    )
+    @PluginProperty(group = "execution")
+    protected Property<List<String>> tags;
+
+    @Schema(
+        title = "Tags to bypass (--skip-tags)",
+        description = "List of tags to skip. Joined with commas and automatically quoted. Applies only to ansible-playbook commands."
+    )
+    @PluginProperty(group = "execution")
+    protected Property<List<String>> skipTags;
+
+    @Schema(
+        title = "Verbosity level (0 to 4)",
+        description = "Sets the verbosity (-v to -vvvv). Default 0, capped at 4. Applies only to ansible-playbook commands."
+    )
+    @Builder.Default
+    @PluginProperty(group = "execution")
+    protected Property<@Min(0) @Max(4) Integer> verbosity = Property.ofValue(0);
+
+    @Schema(
+        title = "Number of parallel forks",
+        description = "Sets the --forks parameter. Must be at least 1. Applies only to ansible-playbook commands."
+    )
+    @PluginProperty(group = "execution")
+    protected Property<@Min(1) Integer> forks;
+
+    @Schema(
         title = "Additional environment variables",
         description = "Variables injected into the task runner environment for every command."
     )
@@ -584,6 +663,46 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @PluginProperty(group = "destination")
     private Property<List<String>> outputFiles;
 
+    static final Pattern PLAYBOOK_BINARY = Pattern.compile("(^|[\\s;&|(\\[])((?:\\S*/)?ansible-playbook)(?=\\s|$)");
+
+    String addTypedPlaybookOptions(RunContext runContext, String cmd) throws IllegalVariableEvaluationException {
+        List<String> flags = new ArrayList<>();
+        if (runContext.render(this.checkMode).as(Boolean.class).orElse(false)) {
+            flags.add("--check");
+        }
+        if (runContext.render(this.diff).as(Boolean.class).orElse(false)) {
+            flags.add("--diff");
+        }
+        String rLimit = runContext.render(this.limit).as(String.class).orElse(null);
+        if (rLimit != null && !rLimit.isBlank()) {
+            flags.add("--limit " + AnsibleDependencyCache.quote("limit", rLimit));
+        }
+        List<String> rTags = runContext.render(this.tags).asList(String.class);
+        if (!rTags.isEmpty()) {
+            flags.add("--tags " + AnsibleDependencyCache.quote("tags", String.join(",", rTags)));
+        }
+        List<String> rSkipTags = runContext.render(this.skipTags).asList(String.class);
+        if (!rSkipTags.isEmpty()) {
+            flags.add("--skip-tags " + AnsibleDependencyCache.quote("skipTags", String.join(",", rSkipTags)));
+        }
+        Integer rForks = runContext.render(this.forks).as(Integer.class).orElse(null);
+        if (rForks != null) {
+            flags.add("--forks " + rForks);
+        }
+        int rVerbosity = runContext.render(this.verbosity).as(Integer.class).orElse(0);
+        if (rVerbosity > 0) {
+            flags.add("-" + "v".repeat(Math.min(rVerbosity, 4)));
+        }
+
+        var playbook = PLAYBOOK_BINARY.matcher(cmd);
+        if (flags.isEmpty() || !playbook.find()) {
+            return cmd;
+        }
+        // right after the binary, so a pipe, `&&` chain or trailing newline cannot detach the flags from it
+        String flagString = String.join(" ", flags);
+        return playbook.replaceAll(m -> Matcher.quoteReplacement(m.group() + " " + flagString));
+    }
+
     @Override
     public AnsibleOutput run(RunContext runContext) throws Exception {
         List<String> outputFilesList = new ArrayList<>(runContext.render(this.outputFiles).asList(String.class));
@@ -641,7 +760,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         DependencyInstall dependencyInstall = planDependencyInstall(runContext, workingDir);
 
-        List<String> rCommands = runContext.render(this.commands).asList(String.class, extraVars);
+        List<String> rCommands = new ArrayList<>();
+        for (String cmd : runContext.render(this.commands).asList(String.class, extraVars)) {
+            rCommands.add(addTypedPlaybookOptions(runContext, cmd));
+        }
 
         // run each ansible-playbook separately and merge outputs
         Map<String, Object> mergedVars = new HashMap<>();
