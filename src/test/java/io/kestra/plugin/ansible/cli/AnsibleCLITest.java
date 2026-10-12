@@ -122,6 +122,104 @@ class AnsibleCLITest {
     }
 
     @Test
+    void addTypedPlaybookOptions_shouldInjectFlagsCorrectly() throws Exception {
+        AnsibleCLI task = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .checkMode(Property.ofValue(true))
+            .diff(Property.ofValue(true))
+            .limit(Property.ofValue("web;&db"))
+            .tags(Property.ofValue(List.of("tag1", "tag2")))
+            .skipTags(Property.ofValue(List.of("skip1")))
+            .forks(Property.ofValue(10))
+            .verbosity(Property.ofValue(3))
+            .commands(Property.ofValue(List.of("dummy")))
+            .build();
+
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+        var flags = "--check --diff --limit 'web;&db' --tags 'tag1,tag2' --skip-tags 'skip1' --forks 10 -vvv";
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "ansible-playbook site.yml"),
+            is("ansible-playbook " + flags + " site.yml"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "ansible all -m ping"),
+            is("ansible all -m ping"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "ansible-playbook -i inv site.yml | tee out.log"),
+            is("ansible-playbook " + flags + " -i inv site.yml | tee out.log"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "cd playbooks && ansible-playbook site.yml"),
+            is("cd playbooks && ansible-playbook " + flags + " site.yml"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "ANSIBLE_FORCE_COLOR=1 ansible-playbook site.yml"),
+            is("ANSIBLE_FORCE_COLOR=1 ansible-playbook " + flags + " site.yml"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "ansible-playbook a.yml && ansible-playbook b.yml"),
+            is("ansible-playbook " + flags + " a.yml && ansible-playbook " + flags + " b.yml"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "/usr/bin/ansible-playbook site.yml"),
+            is("/usr/bin/ansible-playbook " + flags + " site.yml"));
+
+        assertThat(task.addTypedPlaybookOptions(runContext, "(ansible-playbook site.yml)"),
+            is("(ansible-playbook " + flags + " site.yml)"));
+
+        var taskWithNewline = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .limit(Property.ofValue("web\ndb"))
+            .commands(Property.ofValue(List.of("dummy")))
+            .build();
+        var runContext2 = TestsUtils.mockRunContext(runContextFactory, taskWithNewline, Map.of());
+        assertThrows(IllegalArgumentException.class, () -> taskWithNewline.addTypedPlaybookOptions(runContext2, "ansible-playbook site.yml"));
+
+        var defaultTask = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .commands(Property.ofValue(List.of("dummy")))
+            .build();
+        var runContext3 = TestsUtils.mockRunContext(runContextFactory, defaultTask, Map.of());
+        assertThat(defaultTask.addTypedPlaybookOptions(runContext3, "ansible-playbook site.yml"),
+            is("ansible-playbook site.yml"));
+    }
+
+    @Test
+    void run_typedPlaybookOptions_areAppliedToRealRun() throws Exception {
+        var execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image("cytopia/ansible:latest-tools")
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .checkMode(Property.ofValue(true))
+            .inputFiles(
+                Map.of(
+                    "playbook.yml",
+                    """
+                        ---
+                        - hosts: localhost
+                          gather_facts: false
+                          tasks:
+                            - name: Test check mode
+                              ansible.builtin.command: echo "changed"
+                        """
+                )
+            )
+            .commands(Property.ofValue(List.of("ansible-playbook -i localhost -c local playbook.yml")))
+            .build();
+
+        var runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        var runOutput = execute.run(runContext);
+
+        assertThat(runOutput.getExitCode(), is(0));
+        
+        // In check mode, `command` is skipped (unless it has check_mode: yes)
+        assertThat(runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks().getFirst().getHosts().getFirst().getStatus(), is("skipped"));
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void run() throws Exception {
         String envKey = "MY_KEY";
