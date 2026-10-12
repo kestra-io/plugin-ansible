@@ -1841,7 +1841,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         var logs = new ArrayList<DynamicTaskRunLog>();
         for (var item : failedItems.stream().limit(MAX_FAILED_ITEM_LOGS).toList()) {
             var status = Boolean.TRUE.equals(item.get("unreachable")) ? "unreachable" : "failed";
-            var label = item.get("item") == null ? "" : " (item=" + truncate(item.get("item") instanceof String s ? s : stringifyResult(item.get("item")), MAX_ITEM_LABEL_LENGTH) + ")";
+            var label = itemLabel(item);
             logs.add(
                 new DynamicTaskRunLog(
                     Level.ERROR,
@@ -1862,6 +1862,18 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return logs;
     }
 
+    /** Prefers loop_control.label over the raw item, like the callback does for the light result; no_log items get none. */
+    private static String itemLabel(Map<?, ?> item) {
+        if (Boolean.TRUE.equals(item.get("_ansible_no_log"))) {
+            return "";
+        }
+        var raw = item.get("_ansible_item_label") != null ? item.get("_ansible_item_label") : item.get("item");
+        if (raw == null) {
+            return "";
+        }
+        return " (item=" + truncate(raw instanceof String text ? text : stringifyResult(raw), MAX_ITEM_LABEL_LENGTH) + ")";
+    }
+
     private static String truncate(String s, int max) {
         return s.length() <= max ? s : s.substring(0, max);
     }
@@ -1873,7 +1885,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             if (m.get("rc") != null) {
                 reason.append(" (rc=").append(m.get("rc")).append(")");
             }
-            if (m.get("stderr") instanceof String stderr && !stderr.isEmpty()) {
+            if (!Boolean.TRUE.equals(m.get("_ansible_no_log")) && m.get("stderr") instanceof String stderr && !stderr.isEmpty()) {
                 var tail = stderr.length() <= STDERR_TAIL_LENGTH ? stderr : stderr.substring(stderr.length() - STDERR_TAIL_LENGTH);
                 reason.append(" | stderr: ").append(tail);
             }

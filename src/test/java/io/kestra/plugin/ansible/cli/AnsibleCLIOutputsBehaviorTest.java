@@ -6,6 +6,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
@@ -372,6 +373,23 @@ class AnsibleCLIOutputsBehaviorTest {
 
         assertThat(logs.getFirst().message(), endsWith("(rc=2) | stderr: boom"));
         assertThat(logs.getFirst().message(), containsString("`playbooks`"));
+    }
+
+    @Test
+    void taskLogs_summaryMode_inlineItemLineUsesLoopControlLabelAndHonorsNoLog() {
+        var labelled = new HashMap<String, Object>(failedItem(3));
+        labelled.put("item", "SECRETITEM");
+        labelled.put("_ansible_item_label", "lbl-3");
+        var noLog = new HashMap<String, Object>(failedItem(4));
+        noLog.put("item", "SECRETITEM");
+        noLog.put("stderr", "SECRETERR");
+        noLog.put("_ansible_no_log", true);
+
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.INLINE, Map.of("msg", "One or more items failed", "results", List.of(labelled, noLog)));
+
+        assertThat(logs.get(1).message(), startsWith("[h1] failed (item=lbl-3) =>"));
+        assertThat(logs.get(2).message(), is("[h1] failed => non-zero return code (rc=2)"));
+        assertThat(logs.stream().anyMatch(l -> l.message().contains("SECRET")), is(false));
     }
 
     @Test
