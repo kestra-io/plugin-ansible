@@ -26,43 +26,42 @@ import io.kestra.plugin.ansible.runner.utils.ArchiveUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
 import io.kestra.plugin.scripts.runner.docker.Docker;
-import java.io.InputStream;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
-import lombok.*;
+import lombok.Builder;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 import org.apache.commons.io.FileUtils;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.FileVisitResult;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.LinkedHashMap;
-import java.util.Comparator;
-import java.util.Arrays;
-import java.util.Iterator;
 import java.util.Optional;
-import java.util.stream.Stream;
+import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 @SuperBuilder
 @ToString
 @EqualsAndHashCode
@@ -74,6 +73,28 @@ import java.util.regex.Pattern;
 )
 @Plugin(
     examples = {
+        @Example(
+            title = "Execute an inline Ansible playbook and inventory with zero external dependencies.",
+            full = true,
+            code = """
+                id: run_ansible_inline
+                namespace: dev
+
+                tasks:
+                  - id: run_ansible
+                    type: io.kestra.plugin.ansible.runner.AnsibleRunner
+                    project:
+                      content: |
+                        - hosts: localhost
+                          tasks:
+                            - name: Ping host
+                              ansible.builtin.ping:
+                    inventory:
+                      content: |
+                        localhost ansible_connection=local
+                    verbosity: 1
+                """
+        ),
         @Example(
             title = "Execute an Ansible playbook using Namespace Files for project and inventory with live log streaming and telemetry output.",
             full = true,
@@ -89,7 +110,8 @@ import java.util.regex.Pattern;
                       enabled: true
                     project:
                       playbook: site.yml
-                    inventory: inventory/hosts.ini
+                    inventory:
+                      file: inventory/hosts.ini
                     streamLogs: true
                     outputLogFile: true
                     verbosity: 1
@@ -210,8 +232,7 @@ public class AnsibleRunner extends Task implements
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
-    @Min(0)
-    private Property<Long> maxLogLines = Property.ofValue(DEFAULT_MAX_LOG_LINES);
+    private Property<@Min(0) Long> maxLogLines = Property.ofValue(DEFAULT_MAX_LOG_LINES);
 
     @Schema(
         title = "Whether to write the execution logs to a file in internal storage",
@@ -227,8 +248,7 @@ public class AnsibleRunner extends Task implements
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
-    @Min(0)
-    private Property<Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
+    private Property<@Min(0) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
 
     @Schema(
         title = "Generate and upload consolidated results.json report",
@@ -308,24 +328,6 @@ public class AnsibleRunner extends Task implements
     @Schema(title = "Environment and credentials configuration")
     private RunnerEnv env;
 
-    @Schema(title = "Extra variables passed as JSON to /runner/env/extravars")
-    @PluginProperty(group = "execution")
-    private Property<Map<String, Object>> extraVars;
-
-    @Schema(title = "Environment variables for /runner/env/envvars")
-    @PluginProperty(group = "execution")
-    private Property<Map<String, String>> envVars;
-
-    @Schema(title = "Interactive prompt passwords for /runner/env/passwords")
-    @PluginProperty(group = "connection", secret = true)
-    @ToString.Exclude
-    private Property<Map<String, String>> passwords;
-
-    @Schema(title = "Private SSH key for device authentication")
-    @PluginProperty(group = "connection", secret = true)
-    @ToString.Exclude
-    private Property<String> sshKey;
-
     // --- Engine Controls ---
     @Schema(title = "Execution timeout (maps to job_timeout)")
     private Property<Duration> timeout;
@@ -375,13 +377,9 @@ public class AnsibleRunner extends Task implements
 
         // Pre-load namespace files directly into the working directory if configured
         if (this.namespaceFiles != null) {
-            try {
-                Boolean enabled = runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(false);
-                if (Boolean.TRUE.equals(enabled)) {
-                    NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
-                }
-            } catch (Exception e) {
-                runContext.logger().debug("Could not pre-load namespace files directly: {}", e.getMessage());
+            Boolean enabled = runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(false);
+            if (Boolean.TRUE.equals(enabled)) {
+                NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
             }
         }
 
@@ -413,24 +411,39 @@ public class AnsibleRunner extends Task implements
         long resolvedMaxLogLines = runContext.render(this.maxLogLines).as(Long.class).orElse(DEFAULT_MAX_LOG_LINES);
 
         // Full raw output is always spooled to disk (never kept in memory) so it can be uploaded without loss.
-        // It MUST live outside the task working directory: container task runners (Docker) sync the working
-        // directory to/from the container volume and would overwrite the spool file with an empty copy.
-        // Rename the tmp spool file now that we have the ident
-        Path finalSpool = workingDir.resolve("ansible-runner-log-" + ident + "-" + System.currentTimeMillis() + ".log");
-        Files.move(logSpoolFile, finalSpool, StandardCopyOption.REPLACE_EXISTING);
-        logSpoolFile = finalSpool;
+        // It lives in the system temp directory outside the container working directory to prevent Docker volume mount collisions.
         try {
             Files.setPosixFilePermissions(logSpoolFile, PosixFilePermissions.fromString("rw-------"));
         } catch (UnsupportedOperationException ignored) {
             logSpoolFile.toFile().setReadable(true, true);
             logSpoolFile.toFile().setWritable(true, true);
         }
+
         List<String> secrets = new ArrayList<>();
-        if (this.sshKey != null) runContext.render(this.sshKey).as(String.class).ifPresent(secrets::add);
-        if (this.passwords != null) {
-            Map<String, String> map = runContext.render(this.passwords).asMap(String.class, String.class);
-            if (map != null) {
-                secrets.addAll(map.values());
+        if (this.env != null) {
+            if (this.env.getSshKey() != null) {
+                String k = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
+                if (k != null && !k.isBlank()) {
+                    for (String line : k.split("\\r?\\n")) {
+                        String trimmed = line.trim();
+                        if (trimmed.length() > 5) {
+                            secrets.add(trimmed);
+                        }
+                    }
+                }
+            }
+            if (this.env.getPasswords() != null) {
+                Map<String, String> map = runContext.render(this.env.getPasswords()).asMap(String.class, String.class);
+                if (map != null) {
+                    for (String val : map.values()) {
+                        if (val != null && !val.isBlank()) {
+                            String renderedVal = runContext.render(val);
+                            if (renderedVal != null && !renderedVal.isBlank()) {
+                                secrets.add(renderedVal);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -457,23 +470,22 @@ public class AnsibleRunner extends Task implements
             commandsWrapper = commandsWrapper.withBeforeCommands(Property.ofValue(preCommands));
         }
 
-        if (this.namespaceFiles != null) {
-            commandsWrapper = commandsWrapper.withNamespaceFiles(this.namespaceFiles);
-        }
         if (this.inputFiles != null) {
             commandsWrapper = commandsWrapper.withInputFiles(this.inputFiles);
         }
+
         if (this.outputFiles != null) {
             List<String> renderedOutputFiles = runContext.render(this.outputFiles).asList(String.class);
-            List<String> expandedOutputFiles = new ArrayList<>();
+            List<String> outputPatterns = new ArrayList<>();
             for (String pattern : renderedOutputFiles) {
-                expandedOutputFiles.add(pattern);
+                outputPatterns.add(pattern);
                 if (!pattern.startsWith("/") && !pattern.startsWith("**/") && !pattern.startsWith("runner/")) {
-                    expandedOutputFiles.add("runner/project/" + pattern);
-                    expandedOutputFiles.add("runner/" + pattern);
+                    outputPatterns.add("runner/project/" + pattern);
+                    outputPatterns.add("runner/" + pattern);
                 }
             }
-            commandsWrapper = commandsWrapper.withOutputFiles(expandedOutputFiles);
+            outputPatterns.add("runner/artifacts/" + ident + "/**");
+            commandsWrapper = commandsWrapper.withOutputFiles(outputPatterns);
         }
 
         ScriptOutput scriptOutput = commandsWrapper.run();
@@ -482,7 +494,7 @@ public class AnsibleRunner extends Task implements
 
         // 5. Parse Status, Return Code, and Job Events Telemetry
         Path identArtifactsDir = artifactsBaseDir.resolve(ident);
-        ExecutionTelemetry telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode);
+        ExecutionTelemetry telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, secrets);
 
         // Check telemetry size against maxOutputsSize
         long maxSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
@@ -1016,7 +1028,12 @@ public class AnsibleRunner extends Task implements
         if (this.env != null && this.env.getPasswords() != null) {
             Map<String, String> rawPasswords = runContext.render(this.env.getPasswords()).asMap(String.class, String.class);
             if (rawPasswords != null && !rawPasswords.isEmpty()) {
-                Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(rawPasswords), StandardCharsets.UTF_8);
+                Map<String, String> renderedPasswords = new HashMap<>();
+                for (Map.Entry<String, String> entry : rawPasswords.entrySet()) {
+                    String val = entry.getValue() != null ? runContext.render(entry.getValue()) : null;
+                    renderedPasswords.put(entry.getKey(), val);
+                }
+                Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(renderedPasswords), StandardCharsets.UTF_8);
             }
         }
 
@@ -1057,7 +1074,7 @@ public class AnsibleRunner extends Task implements
         }
     }
 
-    private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode) {
+    private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode, List<String> secrets) {
         String status = "failed";
         int rc = processExitCode;
         Set<String> failedHostsSet = new java.util.LinkedHashSet<>();
@@ -1070,6 +1087,12 @@ public class AnsibleRunner extends Task implements
             .failures(0)
             .unreachable(0)
             .skipped(0);
+
+        if (!Files.exists(identArtifactsDir)) {
+            if (processExitCode == 0) {
+                throw new IllegalStateException("Ansible runner execution failed: process completed with exit code 0, but artifacts directory was not found at: " + identArtifactsDir);
+            }
+        }
 
         if (Files.exists(identArtifactsDir)) {
             // Read status
@@ -1120,6 +1143,13 @@ public class AnsibleRunner extends Task implements
                                 failedTask.put("event", event);
                                 String msg = eventData.path("res").path("msg").asText("");
                                 if (!msg.isBlank()) {
+                                    if (secrets != null) {
+                                        for (String secret : secrets) {
+                                            if (secret != null && !secret.isBlank()) {
+                                                msg = msg.replace(secret, "***");
+                                            }
+                                        }
+                                    }
                                     failedTask.put("error", msg);
                                 }
                                 if (failedTasks.size() < 1000) failedTasks.add(failedTask);
@@ -1179,8 +1209,8 @@ public class AnsibleRunner extends Task implements
 
 
     private void validateCmdlineArg(String arg) {
-        if (WHITESPACE_PATTERN.matcher(arg).matches() || arg.startsWith("-")) {
-            throw new IllegalArgumentException("Invalid cmdline argument: '" + arg + "'. Cannot contain whitespace or start with '-'.");
+        if (arg == null || arg.indexOf('\0') != -1 || WHITESPACE_PATTERN.matcher(arg).matches() || arg.startsWith("-")) {
+            throw new IllegalArgumentException("Invalid cmdline argument: '" + arg + "'. Cannot contain whitespace, NUL bytes, or start with '-'.");
         }
     }
 

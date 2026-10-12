@@ -89,7 +89,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
 
     @Override
     public synchronized void accept(String line, Boolean isStdErr, Instant instant) {
-        try { super.accept(line, isStdErr); } catch (Exception ignored) {}
+        try { super.accept(line, isStdErr, instant); } catch (Exception ignored) {}
         if (line == null || line.isBlank()) {
             return;
         }
