@@ -364,6 +364,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     // Plenty for a summary or a failure reason while keeping a single dynamic-taskrun log line
     // from growing unbounded when a host result is large.
     private static final int MAX_LOG_LINE_LENGTH = 4_000;
+    // Same tail the callback keeps in the light result, so INLINE and STORE log alike.
+    private static final int STDERR_TAIL_LENGTH = 1_024;
+    private static final int MAX_ITEM_LABEL_LENGTH = 256;
+    private static final int MAX_FAILED_ITEM_LOGS = 50;
 
     // Ensure Ansible can find our bundled callback/library dirs regardless of where the playbook
     // lives or what the image configures (issue #120). Prepend them onto the search path using the
@@ -546,7 +550,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Where full per-host results are kept",
         description = """
-            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed or unreachable hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`. The output of `debug` tasks (`msg` or `var`) is kept inline, since printing it is the purpose of the task, except that each value larger than 64 KB is cut to its first 64 KB followed by a pointer to `resultsUri`, where the full value is stored; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
+            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed or unreachable hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`; a failed item also keeps the item label (cut to 256 characters), `failed: true` and its `stderr` tail. The output of `debug` tasks (`msg` or `var`) is kept inline, since printing it is the purpose of the task, except that each value larger than 64 KB is cut to its first 64 KB followed by a pointer to `resultsUri`, where the full value is stored; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
             With `outputsMode: EXPLICIT`, only `changed` (plus `msg` on failure) is captured per host, so the stored file is small; `resultsUri` is still set, and a null `resultsUri` means results storage failed.
             INLINE keeps the full per-host results in `playbooks`, bounded by `maxOutputsSize`; choose it when you template `stdout` or other result fields directly and the outputs are small.
             In both modes `stdout_lines` and `stderr_lines` are dropped from captured results at every nesting level; split `stdout`/`stderr` on newlines downstream instead.
@@ -559,7 +563,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Per-host task log verbosity",
         description = """
-            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable` hosts. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
+            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable` hosts, with the return code and the last 1 KB of `stderr` when present. A loop task also logs one extra ERROR line per failed item (at most 50 per host and task, then a line counting the rest), whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
             This changes only what is logged, never what is captured: EXPLICIT-mode redaction happens upstream in the callback, so FULL is not an escape hatch from it.
             """
     )
@@ -1807,14 +1811,64 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             }
 
             logs.add(new DynamicTaskRunLog(failed ? Level.ERROR : Level.INFO, message));
+
+            if (logsMode != LogsMode.FULL) {
+                logs.addAll(failedItemLogs(hr, resultsStorage));
+            }
         }
 
         return logs;
     }
 
+    private static List<DynamicTaskRunLog> failedItemLogs(AnsibleOutput.HostResult hr, ResultsStorage resultsStorage) {
+        if (!(hr.getResult() instanceof Map<?, ?> result) || !(result.get("results") instanceof List<?> items)) {
+            return List.of();
+        }
+
+        var failedItems = items.stream()
+            .filter(item -> item instanceof Map<?, ?> m && (Boolean.TRUE.equals(m.get("failed")) || Boolean.TRUE.equals(m.get("unreachable"))))
+            .map(item -> (Map<?, ?>) item)
+            .toList();
+
+        var logs = new ArrayList<DynamicTaskRunLog>();
+        for (var item : failedItems.stream().limit(MAX_FAILED_ITEM_LOGS).toList()) {
+            var status = Boolean.TRUE.equals(item.get("unreachable")) ? "unreachable" : "failed";
+            var label = item.get("item") == null ? "" : " (item=" + truncate(item.get("item") instanceof String s ? s : stringifyResult(item.get("item")), MAX_ITEM_LABEL_LENGTH) + ")";
+            logs.add(
+                new DynamicTaskRunLog(
+                    Level.ERROR,
+                    "[" + hr.getHost() + "] " + status + label + " => " + truncateForLog(failureReason(item), resultsStorage)
+                )
+            );
+        }
+
+        if (failedItems.size() > MAX_FAILED_ITEM_LOGS) {
+            var fullResults = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
+            logs.add(
+                new DynamicTaskRunLog(
+                    Level.ERROR,
+                    "[" + hr.getHost() + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items, see " + fullResults
+                )
+            );
+        }
+        return logs;
+    }
+
+    private static String truncate(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
     static String failureReason(Object result) {
         if (result instanceof Map<?, ?> m && m.get("msg") != null) {
-            return String.valueOf(m.get("msg"));
+            var reason = new StringBuilder(String.valueOf(m.get("msg")));
+            if (m.get("rc") != null) {
+                reason.append(" (rc=").append(m.get("rc")).append(")");
+            }
+            if (m.get("stderr") instanceof String stderr && !stderr.isEmpty()) {
+                var tail = stderr.length() <= STDERR_TAIL_LENGTH ? stderr : stderr.substring(stderr.length() - STDERR_TAIL_LENGTH);
+                reason.append(" | stderr: ").append(tail);
+            }
+            return reason.toString();
         }
         return stringifyResult(result);
     }

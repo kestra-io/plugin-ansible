@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
@@ -139,29 +140,45 @@ class AnsibleCLITest {
         var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
         var flags = "--check --diff --limit 'web;&db' --tags 'tag1,tag2' --skip-tags 'skip1' --forks 10 -vvv";
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "ansible-playbook site.yml"),
-            is("ansible-playbook " + flags + " site.yml"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "ansible-playbook site.yml"),
+            is("ansible-playbook " + flags + " site.yml")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "ansible all -m ping"),
-            is("ansible all -m ping"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "ansible all -m ping"),
+            is("ansible all -m ping")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "ansible-playbook -i inv site.yml | tee out.log"),
-            is("ansible-playbook " + flags + " -i inv site.yml | tee out.log"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "ansible-playbook -i inv site.yml | tee out.log"),
+            is("ansible-playbook " + flags + " -i inv site.yml | tee out.log")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "cd playbooks && ansible-playbook site.yml"),
-            is("cd playbooks && ansible-playbook " + flags + " site.yml"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "cd playbooks && ansible-playbook site.yml"),
+            is("cd playbooks && ansible-playbook " + flags + " site.yml")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "ANSIBLE_FORCE_COLOR=1 ansible-playbook site.yml"),
-            is("ANSIBLE_FORCE_COLOR=1 ansible-playbook " + flags + " site.yml"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "ANSIBLE_FORCE_COLOR=1 ansible-playbook site.yml"),
+            is("ANSIBLE_FORCE_COLOR=1 ansible-playbook " + flags + " site.yml")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "ansible-playbook a.yml && ansible-playbook b.yml"),
-            is("ansible-playbook " + flags + " a.yml && ansible-playbook " + flags + " b.yml"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "ansible-playbook a.yml && ansible-playbook b.yml"),
+            is("ansible-playbook " + flags + " a.yml && ansible-playbook " + flags + " b.yml")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "/usr/bin/ansible-playbook site.yml"),
-            is("/usr/bin/ansible-playbook " + flags + " site.yml"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "/usr/bin/ansible-playbook site.yml"),
+            is("/usr/bin/ansible-playbook " + flags + " site.yml")
+        );
 
-        assertThat(task.addTypedPlaybookOptions(runContext, "(ansible-playbook site.yml)"),
-            is("(ansible-playbook " + flags + " site.yml)"));
+        assertThat(
+            task.addTypedPlaybookOptions(runContext, "(ansible-playbook site.yml)"),
+            is("(ansible-playbook " + flags + " site.yml)")
+        );
 
         var taskWithNewline = AnsibleCLI.builder()
             .id(IdUtils.create())
@@ -178,8 +195,10 @@ class AnsibleCLITest {
             .commands(Property.ofValue(List.of("dummy")))
             .build();
         var runContext3 = TestsUtils.mockRunContext(runContextFactory, defaultTask, Map.of());
-        assertThat(defaultTask.addTypedPlaybookOptions(runContext3, "ansible-playbook site.yml"),
-            is("ansible-playbook site.yml"));
+        assertThat(
+            defaultTask.addTypedPlaybookOptions(runContext3, "ansible-playbook site.yml"),
+            is("ansible-playbook site.yml")
+        );
     }
 
     @Test
@@ -214,7 +233,7 @@ class AnsibleCLITest {
         var runOutput = execute.run(runContext);
 
         assertThat(runOutput.getExitCode(), is(0));
-        
+
         // In check mode, `command` is skipped (unless it has check_mode: yes)
         assertThat(runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks().getFirst().getHosts().getFirst().getStatus(), is("skipped"));
     }
@@ -2188,6 +2207,128 @@ class AnsibleCLITest {
 
         // the failure reason is kept on purpose in EXPLICIT mode, so a redacted run stays debuggable
         assertThat(snapshot.stream().anyMatch(l -> l.getMessage() != null && l.getMessage().contains("module failed on purpose")), is(true));
+    }
+
+    // issue #147: a failed task must say why in the logs, including failed loop items
+    private record RunWithLogs(AnsibleCLI.AnsibleOutput output, List<String> messages) {
+        boolean anyContains(String text) {
+            return messages.stream().anyMatch(m -> m.contains(text));
+        }
+    }
+
+    private RunWithLogs runInlinePlaybook(String tasksYaml, AnsibleCLI.LogsMode logsMode, AnsibleCLI.OutputsMode outputsMode, String awaited) throws Exception {
+        var playbook = "{% verbatim %}\n- hosts: localhost\n  gather_facts: false\n  tasks:\n" + tasksYaml + "\n{% endverbatim %}\n";
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .logsMode(Property.ofValue(logsMode))
+            .outputsMode(Property.ofValue(outputsMode))
+            .inputFiles(Map.of("inventory.ini", "localhost ansible_connection=local\n", "playbook.yml", playbook))
+            .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
+            .build();
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        var output = execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().contains(awaited));
+        receive.blockLast();
+
+        return new RunWithLogs(output, List.copyOf(logs).stream().map(LogEntry::getMessage).filter(Objects::nonNull).toList());
+    }
+
+    private static String failingLoopTask(String extra) {
+        return """
+                - name: Loop with one failing item
+                  ansible.builtin.shell: "if [ {{ item }} -eq 3 ]; then echo 'boom on item 3' >&2; exit 2; fi; echo ok {{ item }}"
+                  loop: [1, 2, 3, 4]
+                  ignore_errors: true
+            """ + extra;
+    }
+
+    @Test
+    void run_failedLoopItem_fullMode_keepsFailedFlagAndStderrInLightResult() throws Exception {
+        var run = runInlinePlaybook(failingLoopTask(""), AnsibleCLI.LogsMode.FULL, AnsibleCLI.OutputsMode.ALL, "boom on item 3");
+
+        assertThat(run.anyContains("boom on item 3"), is(true));
+        var items = loopItems(run.output().getPlaybooks().getFirst());
+        assertThat(items.get(2).get("failed"), is(true));
+        assertThat((String) items.get(2).get("stderr"), containsString("boom on item 3"));
+        assertThat(items.get(2).get("item"), is("3"));
+        assertThat(items.get(0).get("failed"), is(not(true)));
+        assertThat(items.get(0).containsKey("item"), is(false));
+
+        var stored = readResults(run.output().getResultsUri());
+        assertThat(firstHostResult(stored.get(0)).get("results").get(2).get("failed").asBoolean(), is(true));
+    }
+
+    @Test
+    void run_failedLoopItem_summaryMode_logsItemLineWithRcAndStderr() throws Exception {
+        var run = runInlinePlaybook(failingLoopTask(""), AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "(item=3)");
+
+        assertThat(run.messages(), hasItem("[localhost] failed (item=3) => The command exited with a non-zero return code. (rc=2) | stderr: boom on item 3"));
+        assertThat(run.anyContains("(item=1)"), is(false));
+    }
+
+    @Test
+    void run_failedWhenFalseItem_isNotLoggedAsFailed() throws Exception {
+        var tasks = """
+                - name: Non-zero rc that is not a failure
+                  ansible.builtin.shell: "echo noise >&2; exit 2"
+                  loop: [1, 2]
+                  failed_when: false
+            """;
+        var run = runInlinePlaybook(tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "[localhost] ok");
+
+        assertThat(run.anyContains("failed (item="), is(false));
+        for (var item : loopItems(run.output().getPlaybooks().getFirst())) {
+            assertThat(item.get("failed"), is(not(true)));
+            assertThat(item.containsKey("stderr"), is(false));
+        }
+    }
+
+    @Test
+    void run_failedShell_summaryMode_logsRcAndStderr() throws Exception {
+        var tasks = """
+                - name: Plain failure
+                  ansible.builtin.shell: "echo oops >&2; exit 3"
+                  ignore_errors: true
+            """;
+        var run = runInlinePlaybook(tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "[localhost] failed");
+
+        assertThat(run.messages(), hasItem("[localhost] failed => The command exited with a non-zero return code. (rc=3) | stderr: oops"));
+    }
+
+    @Test
+    void run_failedLoopItem_explicitMode_logsNoStderrNorItemLines() throws Exception {
+        var run = runInlinePlaybook(failingLoopTask(""), AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.EXPLICIT, "[localhost] failed");
+
+        assertThat(run.anyContains("stderr:"), is(false));
+        assertThat(run.anyContains("(item="), is(false));
+        assertThat(run.anyContains("boom on item 3"), is(false));
+    }
+
+    @Test
+    void run_failedLoopItemWithRetries_isNotShifted() throws Exception {
+        var tasks = """
+                - name: Retried loop
+                  ansible.builtin.shell: "if [ {{ item }} -eq 2 ]; then echo 'bad item' >&2; exit 1; fi; echo ok"
+                  loop: [1, 2, 3]
+                  register: r
+                  until: r.rc == 0
+                  retries: 2
+                  delay: 0
+                  ignore_errors: true
+            """;
+        var run = runInlinePlaybook(tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "(item=2)");
+
+        assertThat(run.messages(), hasItem("[localhost] failed (item=2) => The command exited with a non-zero return code. (rc=1) | stderr: bad item"));
+        var items = loopItems(run.output().getPlaybooks().getFirst());
+        assertThat(items.get(1).get("failed"), is(true));
+        assertThat(items.get(0).get("failed"), is(not(true)));
+        assertThat(items.get(2).get("failed"), is(not(true)));
     }
 
     // issue #135: galaxyDependencies/pythonDependencies install into a working-directory subtree

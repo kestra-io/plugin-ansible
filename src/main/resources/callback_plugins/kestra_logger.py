@@ -51,6 +51,7 @@ class CallbackModule(CallbackBase):
 
     # Characters of msg / stderr kept inline per result in store mode.
     LIGHT_RESULT_LIMIT = 1024
+    ITEM_LABEL_LIMIT = 256
 
     # Characters kept inline per value of a debug task's result in store mode; the full value is in
     # the results file (`resultsUri`).
@@ -85,6 +86,9 @@ class CallbackModule(CallbackBase):
         self._current_play = None
         self._current_task = None
         self._unnamed_task_counter = 0
+        # (task uuid, host) -> {"count": item events seen, "failed": indices}. The aggregated loop
+        # result carries no `failed` key per item (e.g. with ignore_errors), only item events do.
+        self._item_events = {}
 
         # --- timing (minimal add) ---
         self._current_task_started_at = None  # datetime internal only
@@ -337,12 +341,42 @@ class CallbackModule(CallbackBase):
         items = result.get("results")
         if isinstance(items, list):
             light["results"] = [
-                CallbackModule._light_result(
-                    item, bool(item.get("failed") or item.get("unreachable")), is_debug
-                ) if isinstance(item, dict) else item
+                CallbackModule._light_item(item, is_debug) if isinstance(item, dict) else item
                 for item in items
             ]
         return light
+
+    @staticmethod
+    def _light_item(item, is_debug):
+        failed = bool(item.get("failed") or item.get("unreachable"))
+        light = CallbackModule._light_result(item, failed, is_debug)
+        if failed and not is_debug:
+            label = item.get("_ansible_item_label", item.get("item"))
+            if label is not None:
+                if not isinstance(label, str):
+                    label = json.dumps(label, default=str)
+                light["item"] = label[:CallbackModule.ITEM_LABEL_LIMIT]
+        return light
+
+    def _track_item_event(self, result, failed):
+        if isinstance(result._task, TaskInclude):
+            return
+        state = self._item_events.setdefault(
+            (result._task._uuid, result._host.get_name()), {"count": 0, "failed": set()}
+        )
+        if failed:
+            state["failed"].add(state["count"])
+        state["count"] += 1
+
+    def _mark_failed_items(self, result, host_name, payload):
+        state = self._item_events.pop((result._task._uuid, host_name), None)
+        items = payload.get("results")
+        # A count mismatch (async, include_tasks loops) means indices cannot be trusted.
+        if not state or not isinstance(items, list) or state["count"] != len(items):
+            return
+        for index in state["failed"]:
+            if isinstance(items[index], dict):
+                items[index]["failed"] = True
 
     def _is_kestra_output_task(self, result):
         action = getattr(result._task, "action", None)
@@ -537,6 +571,7 @@ class CallbackModule(CallbackBase):
 
         self._current_task = task_entry
         self._current_play["tasks"].append(task_entry)
+        self._item_events = {k: v for k, v in self._item_events.items() if k[0] != task._uuid}
 
     def _add_host_result(self, result, status):
         """
@@ -567,6 +602,7 @@ class CallbackModule(CallbackBase):
                     result_payload["msg"] = msg
         else:
             result_payload = self._without_lines(result._result)
+            self._mark_failed_items(result, host_name, result_payload)
 
         host_result = {
             "host": host_name,
@@ -901,6 +937,7 @@ class CallbackModule(CallbackBase):
     # -------------------------------------------------------------------------
 
     def v2_runner_item_on_ok(self, result):
+        self._track_item_event(result, False)
         # Avoid duplicates on loops: only aggregated event is collected.
         if self._silent:
             return
@@ -928,6 +965,7 @@ class CallbackModule(CallbackBase):
         self._display.display(msg, color=color)
 
     def v2_runner_item_on_failed(self, result):
+        self._track_item_event(result, True)
         # Avoid duplicates on loops: only aggregated event is collected.
         if self._silent:
             return
@@ -951,6 +989,7 @@ class CallbackModule(CallbackBase):
         )
 
     def v2_runner_item_on_skipped(self, result):
+        self._track_item_event(result, False)
         # Avoid duplicates on loops: only aggregated event is collected.
         if self._silent:
             return
