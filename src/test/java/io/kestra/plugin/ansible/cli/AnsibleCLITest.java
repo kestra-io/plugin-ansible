@@ -2225,14 +2225,19 @@ class AnsibleCLITest {
     }
 
     private RunWithLogs runInlinePlaybook(String tasksYaml, AnsibleCLI.LogsMode logsMode, AnsibleCLI.OutputsMode outputsMode, String awaited, boolean expectFailure) throws Exception {
-        var playbook = "{% verbatim %}\n- hosts: localhost\n  gather_facts: false\n  tasks:\n" + tasksYaml + "\n{% endverbatim %}\n";
+        return runInlinePlaybook(tasksYaml, logsMode, outputsMode, awaited, expectFailure, "localhost ansible_connection=local\n", "localhost");
+    }
+
+    private RunWithLogs runInlinePlaybook(String tasksYaml, AnsibleCLI.LogsMode logsMode, AnsibleCLI.OutputsMode outputsMode, String awaited, boolean expectFailure, String inventory,
+        String hosts) throws Exception {
+        var playbook = "{% verbatim %}\n- hosts: " + hosts + "\n  gather_facts: false\n  tasks:\n" + tasksYaml + "\n{% endverbatim %}\n";
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
             .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
             .logsMode(Property.ofValue(logsMode))
             .outputsMode(Property.ofValue(outputsMode))
-            .inputFiles(Map.of("inventory.ini", "localhost ansible_connection=local\n", "playbook.yml", playbook))
+            .inputFiles(Map.of("inventory.ini", inventory, "playbook.yml", playbook))
             .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
             .build();
 
@@ -2345,6 +2350,122 @@ class AnsibleCLITest {
         assertThat(run.anyContains("stderr:"), is(false));
         assertThat(run.anyContains("(item="), is(false));
         assertThat(run.anyContains("boom on item 3"), is(false));
+    }
+
+    @Test
+    void run_noLogTasks_doNotLeakStderrOrItemValue() throws Exception {
+        var tasks = """
+                - name: Censored plain failure
+                  ansible.builtin.shell: "echo SECRETERR >&2; exit 3"
+                  no_log: true
+                  ignore_errors: true
+                - name: Censored loop failure
+                  ansible.builtin.shell: "echo SECRETERR >&2; exit 3"
+                  loop: [SECRETITEM]
+                  no_log: true
+                  ignore_errors: true
+                - name: Marker
+                  ansible.builtin.debug:
+                    msg: marker-after-no-log
+            """;
+        var run = runInlinePlaybook(tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "[localhost] ok");
+
+        assertThat(run.anyContains("[localhost] failed"), is(true));
+        assertThat(run.anyContains("SECRETERR"), is(false));
+        assertThat(run.anyContains("SECRETITEM"), is(false));
+        var stored = readResults(run.output().getResultsUri()).toString();
+        var inline = run.output().getPlaybooks().toString();
+        assertThat(stored, not(containsString("SECRETERR")));
+        assertThat(stored, not(containsString("SECRETITEM")));
+        assertThat(inline, not(containsString("SECRETERR")));
+        assertThat(inline, not(containsString("SECRETITEM")));
+    }
+
+    @Test
+    void run_failedLoopItemsOnTwoHosts_areAttributedToTheirOwnHost() throws Exception {
+        var tasks = """
+                - name: Per-host failing item
+                  ansible.builtin.shell: "if [ '{{ inventory_hostname }}-{{ item }}' = 'h1-1' ] || [ '{{ inventory_hostname }}-{{ item }}' = 'h2-3' ]; then echo 'bad {{ inventory_hostname }} {{ item }}' >&2; exit 2; fi"
+                  loop: [1, 2, 3]
+                  ignore_errors: true
+            """;
+        var run = runInlinePlaybook(
+            tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "[h2] failed (item=3)", false,
+            "h1 ansible_connection=local\nh2 ansible_connection=local\n", "all"
+        );
+
+        var failure = "=> The command exited with a non-zero return code. (rc=2) | stderr: bad ";
+        assertThat(run.messages(), hasItem("[h1] failed (item=1) " + failure + "h1 1"));
+        assertThat(run.messages(), hasItem("[h2] failed (item=3) " + failure + "h2 3"));
+        assertThat(run.anyContains("[h1] failed (item=3)"), is(false));
+        assertThat(run.anyContains("[h2] failed (item=1)"), is(false));
+    }
+
+    @Test
+    void run_failedLoopItem_labelIsCappedAndHonorsLoopControlLabel() throws Exception {
+        var tasks = """
+                - name: Long item
+                  ansible.builtin.shell: "exit 1"
+                  loop: ["{{ 'x' * 300 }}"]
+                  ignore_errors: true
+                - name: Labelled item
+                  ansible.builtin.shell: "exit 1"
+                  loop: [3]
+                  loop_control:
+                    label: "lbl-{{ item }}"
+                  ignore_errors: true
+            """;
+        var run = runInlinePlaybook(tasks, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.OutputsMode.ALL, "(item=lbl-3)");
+
+        assertThat(run.messages().stream().anyMatch(m -> m.contains("(item=" + "x".repeat(256) + ")")), is(true));
+        assertThat(run.anyContains("x".repeat(257)), is(false));
+        var tasksOut = run.output().getPlaybooks().getFirst().getPlays().getFirst().getTasks();
+        for (var task : tasksOut) {
+            @SuppressWarnings("unchecked")
+            var item = ((List<Map<String, Object>>) ((Map<String, Object>) task.getHosts().getFirst().getResult()).get("results")).getFirst();
+            assertThat(((String) item.get("item")).length(), lessThanOrEqualTo(256));
+        }
+    }
+
+    // Item events and results[] cannot be made to disagree with a real playbook, so the callback is
+    // driven directly from a command running in the same image.
+    @Test
+    void run_callbackCountMismatch_keepsKeyBasedFailureFlags() throws Exception {
+        var script = """
+            import importlib.util, sys
+            from types import SimpleNamespace as NS
+            spec = importlib.util.spec_from_file_location("kestra_logger", "callback_plugins/kestra_logger.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cb = mod.CallbackModule()
+            task = NS(_uuid="t1", action="shell")
+            res = NS(_task=task, _host=NS(get_name=lambda: "h1"))
+            cb._track_item_event(res, True)
+            payload = {"results": [{"rc": 0}, {"rc": 0}, {"rc": 0}]}
+            cb._mark_failed_items(res, "h1", payload)
+            assert all("failed" not in i for i in payload["results"]), payload
+
+            cb._track_item_event(res, False)
+            cb._track_item_event(res, True)
+            payload = {"results": [{"rc": 0}, {"rc": 2}]}
+            cb._mark_failed_items(res, "h1", payload)
+            assert [i.get("failed") for i in payload["results"]] == [None, True], payload
+
+            light = cb._light_result({"results": [{"failed": True, "stderr": "e", "item": 5}, {"rc": 2, "stderr": "ignored"}]}, False)
+            assert light["results"][0]["stderr"] == "e" and light["results"][0]["item"] == "5", light
+            assert "stderr" not in light["results"][1], light
+            """;
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(DockerOptions.builder().image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .inputFiles(Map.of("check.py", script))
+            .commands(Property.ofValue(List.of("ansible-playbook --version >/dev/null && python3 check.py")))
+            .build();
+
+        var output = execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()));
+
+        assertThat(output.getExitCode(), is(0));
     }
 
     @Test

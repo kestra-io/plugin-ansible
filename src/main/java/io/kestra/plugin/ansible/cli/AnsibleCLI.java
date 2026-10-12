@@ -366,6 +366,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final int MAX_LOG_LINE_LENGTH = 4_000;
     // Same tail the callback keeps in the light result, so INLINE and STORE log alike.
     private static final int STDERR_TAIL_LENGTH = 1_024;
+    private static final int MAX_MSG_LOG_LENGTH = 2_000;
     private static final int MAX_ITEM_LABEL_LENGTH = 256;
     private static final int MAX_FAILED_ITEM_LOGS = 50;
 
@@ -1812,7 +1813,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             if (logsMode == LogsMode.FULL) {
                 message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(stringifyResult(hr.getResult()), resultsStorage);
             } else if (failed) {
-                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult()), resultsStorage);
+                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult(), resultsStorage), resultsStorage);
             } else {
                 message = "[" + hr.getHost() + "] " + status;
             }
@@ -1844,7 +1845,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             logs.add(
                 new DynamicTaskRunLog(
                     Level.ERROR,
-                    "[" + hr.getHost() + "] " + status + label + " => " + truncateForLog(failureReason(item), resultsStorage)
+                    "[" + hr.getHost() + "] " + status + label + " => " + truncateForLog(failureReason(item, resultsStorage), resultsStorage)
                 )
             );
         }
@@ -1865,9 +1866,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return s.length() <= max ? s : s.substring(0, max);
     }
 
-    static String failureReason(Object result) {
+    static String failureReason(Object result, ResultsStorage resultsStorage) {
         if (result instanceof Map<?, ?> m && m.get("msg") != null) {
-            var reason = new StringBuilder(String.valueOf(m.get("msg")));
+            // msg is cut on its own so rc and the stderr tail still fit under the line limit
+            var reason = new StringBuilder(truncateForLog(String.valueOf(m.get("msg")), MAX_MSG_LOG_LENGTH, resultsStorage));
             if (m.get("rc") != null) {
                 reason.append(" (rc=").append(m.get("rc")).append(")");
             }
@@ -1881,11 +1883,15 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     static String truncateForLog(String s, ResultsStorage resultsStorage) {
-        if (s == null || s.length() <= MAX_LOG_LINE_LENGTH) {
+        return truncateForLog(s, MAX_LOG_LINE_LENGTH, resultsStorage);
+    }
+
+    private static String truncateForLog(String s, int max, ResultsStorage resultsStorage) {
+        if (s == null || s.length() <= max) {
             return s;
         }
         var fullResults = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
-        return s.substring(0, MAX_LOG_LINE_LENGTH) + "... (truncated, see " + fullResults + ")";
+        return s.substring(0, max) + "... (truncated, see " + fullResults + ")";
     }
 
     static String stringifyResult(Object result) {

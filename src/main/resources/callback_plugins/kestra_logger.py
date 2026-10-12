@@ -335,7 +335,7 @@ class CallbackModule(CallbackBase):
                 light["msg"] = CallbackModule._light_msg(result["msg"])
 
             stderr = result.get("stderr")
-            if failed and isinstance(stderr, str) and stderr:
+            if failed and not result.get("_ansible_no_log") and isinstance(stderr, str) and stderr:
                 light["stderr"] = stderr[-CallbackModule.LIGHT_RESULT_LIMIT:]
 
         items = result.get("results")
@@ -350,7 +350,7 @@ class CallbackModule(CallbackBase):
     def _light_item(item, is_debug):
         failed = bool(item.get("failed") or item.get("unreachable"))
         light = CallbackModule._light_result(item, failed, is_debug)
-        if failed and not is_debug:
+        if failed and not is_debug and not item.get("_ansible_no_log"):
             label = item.get("_ansible_item_label", item.get("item"))
             if label is not None:
                 if not isinstance(label, str):
@@ -359,7 +359,8 @@ class CallbackModule(CallbackBase):
         return light
 
     def _track_item_event(self, result, failed):
-        if isinstance(result._task, TaskInclude):
+        # _mark_failed_items, the only consumer and the only place state is popped, runs in "all" mode only.
+        if self._outputs_mode == "explicit" or isinstance(result._task, TaskInclude):
             return
         state = self._item_events.setdefault(
             (result._task._uuid, result._host.get_name()), {"count": 0, "failed": set()}

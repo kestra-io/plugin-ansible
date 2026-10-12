@@ -367,6 +367,14 @@ class AnsibleCLIOutputsBehaviorTest {
     }
 
     @Test
+    void taskLogs_summaryMode_hugeMsgDoesNotPushRcAndStderrPastTheLineLimit() {
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.INLINE, Map.of("msg", "x".repeat(10_000), "rc", 2, "stderr", "boom"));
+
+        assertThat(logs.getFirst().message(), endsWith("(rc=2) | stderr: boom"));
+        assertThat(logs.getFirst().message(), containsString("`playbooks`"));
+    }
+
+    @Test
     void taskLogs_summaryMode_emptyStderrIsOmitted() {
         var logs = summaryLogs(AnsibleCLI.ResultsStorage.STORE, Map.of("msg", "boom", "rc", 1, "stderr", ""));
 
