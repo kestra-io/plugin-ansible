@@ -6,8 +6,10 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -346,6 +348,109 @@ class AnsibleCLIOutputsBehaviorTest {
         assertThat(logs.getFirst().message(), is("[h1] failed => boom"));
         assertThat(logs.getFirst().level(), is(Level.ERROR));
         assertThat(logs.getFirst().message(), not(containsString("lots of detail")));
+    }
+
+    private static List<DynamicTaskRunLog> summaryLogs(AnsibleCLI.ResultsStorage storage, Map<String, Object> result) {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder().hosts(List.of(host("h1", "failed", result))).build();
+        return AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, storage);
+    }
+
+    private static Map<String, Object> failedItem(int i) {
+        return Map.of("failed", true, "rc", 2, "msg", "non-zero return code", "stderr", "boom on item " + i, "item", String.valueOf(i));
+    }
+
+    @Test
+    void taskLogs_summaryMode_failedHostLineHasRcAndStderr() {
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.STORE, Map.of("msg", "non-zero return code", "rc", 2, "stderr", "boom"));
+
+        assertThat(logs, hasSize(1));
+        assertThat(logs.getFirst().message(), is("[h1] failed => non-zero return code (rc=2) | stderr: boom"));
+    }
+
+    @Test
+    void taskLogs_summaryMode_hugeMsgDoesNotPushRcAndStderrPastTheLineLimit() {
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.INLINE, Map.of("msg", "x".repeat(10_000), "rc", 2, "stderr", "boom"));
+
+        assertThat(logs.getFirst().message(), endsWith("(rc=2) | stderr: boom"));
+        assertThat(logs.getFirst().message(), containsString("`playbooks`"));
+    }
+
+    @Test
+    void taskLogs_summaryMode_inlineItemLineUsesLoopControlLabelAndHonorsNoLog() {
+        var labelled = new HashMap<String, Object>(failedItem(3));
+        labelled.put("item", "SECRETITEM");
+        labelled.put("_ansible_item_label", "lbl-3");
+        var noLog = new HashMap<String, Object>(failedItem(4));
+        noLog.put("item", "SECRETITEM");
+        noLog.put("stderr", "SECRETERR");
+        noLog.put("_ansible_no_log", true);
+
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.INLINE, Map.of("msg", "One or more items failed", "results", List.of(labelled, noLog)));
+
+        assertThat(logs.get(1).message(), startsWith("[h1] failed (item=lbl-3) =>"));
+        assertThat(logs.get(2).message(), is("[h1] failed => non-zero return code (rc=2)"));
+        assertThat(logs.stream().anyMatch(l -> l.message().contains("SECRET")), is(false));
+    }
+
+    @Test
+    void taskLogs_summaryMode_emptyStderrIsOmitted() {
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.STORE, Map.of("msg", "boom", "rc", 1, "stderr", ""));
+
+        assertThat(logs.getFirst().message(), is("[h1] failed => boom (rc=1)"));
+    }
+
+    @Test
+    void taskLogs_summaryMode_inlineStderrIsTailedTo1Kb() {
+        var stderr = "a".repeat(2_000) + "END";
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.INLINE, Map.of("msg", "boom", "stderr", stderr));
+
+        var message = logs.getFirst().message();
+        assertThat(message, endsWith("END"));
+        assertThat(message, is("[h1] failed => boom | stderr: " + stderr.substring(stderr.length() - 1_024)));
+    }
+
+    @Test
+    void taskLogs_summaryMode_logsOneLinePerFailedLoopItemAfterHostLine() {
+        var logs = summaryLogs(
+            AnsibleCLI.ResultsStorage.STORE, Map.of(
+                "msg", "One or more items failed",
+                "results", List.of(Map.of("rc", 0, "item", "1"), failedItem(3), Map.of("rc", 1, "item", "4", "msg", "ignored rc"))
+            )
+        );
+
+        assertThat(logs, hasSize(2));
+        assertThat(logs.get(0).message(), is("[h1] failed => One or more items failed"));
+        assertThat(logs.get(1).message(), is("[h1] failed (item=3) => non-zero return code (rc=2) | stderr: boom on item 3"));
+        assertThat(logs.get(1).level(), is(Level.ERROR));
+    }
+
+    @Test
+    void taskLogs_summaryMode_capsFailedItemLines_andPointsAtResultsUri() {
+        var items = IntStream.range(0, 53).mapToObj(AnsibleCLIOutputsBehaviorTest::failedItem).toList();
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.STORE, Map.of("msg", "One or more items failed", "results", items));
+
+        assertThat(logs, hasSize(1 + 50 + 1));
+        assertThat(logs.getLast().message(), is("[h1] ... and 3 more failed items, see `resultsUri`"));
+    }
+
+    @Test
+    void taskLogs_summaryMode_capLinePointsAtPlaybooksWhenInline() {
+        var items = IntStream.range(0, 51).mapToObj(AnsibleCLIOutputsBehaviorTest::failedItem).toList();
+        var logs = summaryLogs(AnsibleCLI.ResultsStorage.INLINE, Map.of("msg", "One or more items failed", "results", items));
+
+        assertThat(logs.getLast().message(), is("[h1] ... and 1 more failed items, see `playbooks`"));
+    }
+
+    @Test
+    void taskLogs_fullMode_doesNotAddItemLines() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "failed", Map.of("msg", "x", "results", List.of(failedItem(3))))))
+            .build();
+
+        var logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.FULL, AnsibleCLI.ResultsStorage.STORE);
+
+        assertThat(logs, hasSize(1));
+        assertThat(logs.getFirst().message(), containsString("boom on item 3"));
     }
 
     @Test
