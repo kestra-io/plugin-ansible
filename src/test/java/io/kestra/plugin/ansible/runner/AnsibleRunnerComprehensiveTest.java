@@ -1,5 +1,23 @@
 package io.kestra.plugin.ansible.runner;
 
+import java.io.*;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.util.*;
+import java.util.zip.GZIPOutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.runners.TaskCommands;
@@ -14,32 +32,12 @@ import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.LogsMode;
 import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
-import io.kestra.plugin.ansible.runner.utils.ArchiveUtils;
+
 import jakarta.inject.Inject;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.io.FileUtils;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
-
-import java.io.*;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.attribute.PosixFilePermissions;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.*;
-import java.util.zip.GZIPOutputStream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -71,18 +69,20 @@ public class AnsibleRunnerComprehensiveTest {
     }
 
     private void recordResult(String id, String category, String description, String inputs, String expected,
-                              String status, int rc, long durationMs, String notes) {
-        testRecords.add(TestRecord.builder()
-            .id(id)
-            .category(category)
-            .description(description)
-            .inputs(inputs)
-            .expected(expected)
-            .status(status)
-            .returnCode(rc)
-            .durationMs(durationMs)
-            .notes(notes)
-            .build());
+        String status, int rc, long durationMs, String notes) {
+        testRecords.add(
+            TestRecord.builder()
+                .id(id)
+                .category(category)
+                .description(description)
+                .inputs(inputs)
+                .expected(expected)
+                .status(status)
+                .returnCode(rc)
+                .durationMs(durationMs)
+                .notes(notes)
+                .build()
+        );
     }
 
     @AfterAll
@@ -105,19 +105,11 @@ public class AnsibleRunnerComprehensiveTest {
         Path reportDir = Paths.get("build", "reports");
         Files.createDirectories(reportDir);
         Files.writeString(reportDir.resolve("test-results-matrix.csv"), csv.toString(), StandardCharsets.UTF_8);
-
-        // Also write to brain artifact directory if accessible
-        try {
-            Path brainDir = Paths.get("/Users/apple/.gemini/antigravity-ide/brain/7c7c1185-bec9-4002-a960-cca3653cd46d");
-            if (Files.exists(brainDir)) {
-                Files.writeString(brainDir.resolve("test_results_matrix.csv"), csv.toString(), StandardCharsets.UTF_8);
-            }
-        } catch (Exception ignored) {
-        }
     }
 
     private static String escapeCsv(String val) {
-        if (val == null) return "\"\"";
+        if (val == null)
+            return "\"\"";
         return "\"" + val.replace("\"", "\"\"") + "\"";
     }
 
@@ -139,13 +131,17 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .playbook(Property.ofValue("site.yml"))
-                .source(Property.ofValue(inlineYaml))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("site.yml"))
+                    .source(Property.ofValue(inlineYaml))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -159,9 +155,11 @@ public class AnsibleRunnerComprehensiveTest {
         Path playbook = runContext.workingDir().path().resolve("runner/project/site.yml");
         assertTrue(Files.exists(playbook));
 
-        recordResult("TC01", "Playbook Source", "Inline playbook string execution",
+        recordResult(
+            "TC01", "Playbook Source", "Inline playbook string execution",
             "project.source=inline YAML, inventory.inline=localhost", "status=successful, rc=0",
-            "PASS", output.getRc(), dur, "Playbook written to runner/project/site.yml, zero exit code");
+            "PASS", output.getRc(), dur, "Playbook written to runner/project/site.yml, zero exit code"
+        );
     }
 
     @Test
@@ -180,13 +178,17 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .playbook(Property.ofValue("audit.yml"))
-                .source(Property.ofValue(inlineYamlWithTypo))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("audit.yml"))
+                    .source(Property.ofValue(inlineYamlWithTypo))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -197,9 +199,11 @@ public class AnsibleRunnerComprehensiveTest {
         String content = Files.readString(playbook);
         assertTrue(content.startsWith("---\n") || content.startsWith("---"), "Leading 4+ hyphens must normalize to 3 dashes");
 
-        recordResult("TC02", "Playbook Source", "Sanitize leading 4+ dashes typo in inline YAML",
+        recordResult(
+            "TC02", "Playbook Source", "Sanitize leading 4+ dashes typo in inline YAML",
             "project.source='----\\n- name:...'", "Normalized to '---' and executed successfully",
-            "PASS", output.getRc(), dur, "Sanitized 4 dashes to valid YAML --- header");
+            "PASS", output.getRc(), dur, "Sanitized 4 dashes to valid YAML --- header"
+        );
     }
 
     @Test
@@ -230,13 +234,17 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue(zipUri.toString()))
-                .playbook(Property.ofValue("deploy.yml"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue(zipUri.toString()))
+                    .playbook(Property.ofValue("deploy.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -246,9 +254,11 @@ public class AnsibleRunnerComprehensiveTest {
         Path extractedPb = runContext.workingDir().path().resolve("runner/project/deploy.yml");
         assertTrue(Files.exists(extractedPb));
 
-        recordResult("TC03", "Project Source", "Zip archive uploaded to Kestra storage",
+        recordResult(
+            "TC03", "Project Source", "Zip archive uploaded to Kestra storage",
             "project.source=kestra:///.../project.zip, playbook=deploy.yml", "Unzipped into runner/project/ and executed",
-            "PASS", output.getRc(), dur, "Storage zip stream extracted cleanly, target playbook resolved");
+            "PASS", output.getRc(), dur, "Storage zip stream extracted cleanly, target playbook resolved"
+        );
     }
 
     @Test
@@ -259,8 +269,10 @@ public class AnsibleRunnerComprehensiveTest {
 
         // Create in-memory tar.gz archive
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (GZIPOutputStream gzos = new GZIPOutputStream(baos);
-             TarArchiveOutputStream taos = new TarArchiveOutputStream(gzos)) {
+        try (
+            GZIPOutputStream gzos = new GZIPOutputStream(baos);
+            TarArchiveOutputStream taos = new TarArchiveOutputStream(gzos)
+        ) {
             String pb = "- name: TarGz Playbook\n  hosts: localhost\n  tasks:\n    - debug: msg='TarGz'\n";
             byte[] bytes = pb.getBytes(StandardCharsets.UTF_8);
             TarArchiveEntry entry = new TarArchiveEntry("release.yml");
@@ -277,13 +289,17 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue(tarUri.toString()))
-                .playbook(Property.ofValue("release.yml"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue(tarUri.toString()))
+                    .playbook(Property.ofValue("release.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -293,9 +309,11 @@ public class AnsibleRunnerComprehensiveTest {
         Path extractedPb = runContext.workingDir().path().resolve("runner/project/release.yml");
         assertTrue(Files.exists(extractedPb));
 
-        recordResult("TC04", "Project Source", "Tar.gz archive uploaded to Kestra storage",
+        recordResult(
+            "TC04", "Project Source", "Tar.gz archive uploaded to Kestra storage",
             "project.source=kestra:///.../project.tar.gz", "Extracted into runner/project/ and executed",
-            "PASS", output.getRc(), dur, "Gzip and Tar extracted properly, target release.yml found");
+            "PASS", output.getRc(), dur, "Gzip and Tar extracted properly, target release.yml found"
+        );
     }
 
     @Test
@@ -329,12 +347,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .playbook(Property.ofValue("site.yml"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("site.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -347,9 +369,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertTrue(Files.exists(runnerProject.resolve("scripts/healthcheck.sh")), "scripts must be copied to runner/project");
         assertTrue(Files.exists(runnerProject.resolve("site.yml")), "site.yml must be copied to runner/project");
 
-        recordResult("TC05", "Namespace Files", "Namespace files with roles/, templates/, scripts/ folders",
+        recordResult(
+            "TC05", "Namespace Files", "Namespace files with roles/, templates/, scripts/ folders",
             "workingDir/roles, workingDir/templates, workingDir/scripts", "All folders synced into runner/project/",
-            "PASS", output.getRc(), dur, "Verified roles, templates, and scripts directories copied to runner/project/");
+            "PASS", output.getRc(), dur, "Verified roles, templates, and scripts directories copied to runner/project/"
+        );
     }
 
     @Test
@@ -362,13 +386,17 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
-                .playbook(Property.ofValue("site.yml"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue(inv))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
+                    .playbook(Property.ofValue("site.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue(inv))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -381,9 +409,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(content, containsString("db-primary"));
         assertThat(content, containsString("db-replica"));
 
-        recordResult("TC06", "Inventory", "Inline inventory string",
+        recordResult(
+            "TC06", "Inventory", "Inline inventory string",
             "inventory.inline='db-primary... db-replica...'", "Written to runner/inventory/hosts",
-            "PASS", output.getRc(), dur, "Verified INI content written to inventory/hosts");
+            "PASS", output.getRc(), dur, "Verified INI content written to inventory/hosts"
+        );
     }
 
     @Test
@@ -399,12 +429,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: web\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .file(Property.ofValue(invUri.toString()))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: web\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .file(Property.ofValue(invUri.toString()))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -416,9 +450,11 @@ public class AnsibleRunnerComprehensiveTest {
         String content = Files.readString(hosts);
         assertThat(content, containsString("node-01"));
 
-        recordResult("TC07", "Inventory", "Inventory file from Kestra storage URI",
+        recordResult(
+            "TC07", "Inventory", "Inventory file from Kestra storage URI",
             "inventory.file=kestra:///.../hosts.ini", "Downloaded and placed into runner/inventory/hosts",
-            "PASS", output.getRc(), dur, "Downloaded storage file to runner/inventory/hosts");
+            "PASS", output.getRc(), dur, "Downloaded storage file to runner/inventory/hosts"
+        );
     }
 
     @Test
@@ -445,12 +481,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .file(Property.ofValue(jsonUri.toString()))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .file(Property.ofValue(jsonUri.toString()))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -462,9 +502,11 @@ public class AnsibleRunnerComprehensiveTest {
         String content = Files.readString(hosts);
         assertThat(content, containsString("cloud-node-1"));
 
-        recordResult("TC08", "Inventory", "JSON dynamic/cached inventory from storage",
+        recordResult(
+            "TC08", "Inventory", "JSON dynamic/cached inventory from storage",
             "inventory.file=kestra:///.../inventory.json", "Written to runner/inventory/hosts",
-            "PASS", output.getRc(), dur, "Dynamic JSON inventory resolved properly");
+            "PASS", output.getRc(), dur, "Dynamic JSON inventory resolved properly"
+        );
     }
 
     @Test
@@ -477,12 +519,16 @@ public class AnsibleRunnerComprehensiveTest {
             .taskRunner(runner)
             .checkMode(Property.ofValue(true))
             .diff(Property.ofValue(true))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: msg='Dry Run'\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: msg='Dry Run'\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -494,9 +540,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(cmd, containsString("--check"));
         assertThat(cmd, containsString("--diff"));
 
-        recordResult("TC09", "Execution Controls", "Check mode (--check) and Diff mode (--diff)",
+        recordResult(
+            "TC09", "Execution Controls", "Check mode (--check) and Diff mode (--diff)",
             "checkMode=true, diff=true", "--check and --diff flags written to env/cmdline",
-            "PASS", output.getRc(), dur, "Verified --check and --diff in env/cmdline");
+            "PASS", output.getRc(), dur, "Verified --check and --diff in env/cmdline"
+        );
     }
 
     @Test
@@ -510,12 +558,16 @@ public class AnsibleRunnerComprehensiveTest {
             .limit(Property.ofValue("app_servers:&east_coast"))
             .tags(Property.ofValue(List.of("deploy", "patch")))
             .skipTags(Property.ofValue(List.of("reboot")))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - debug: msg='Tagged'\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - debug: msg='Tagged'\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -528,9 +580,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(cmd, containsString("--tags deploy,patch"));
         assertThat(cmd, containsString("--skip-tags reboot"));
 
-        recordResult("TC10", "Execution Controls", "Target limiting and Tag filtering",
+        recordResult(
+            "TC10", "Execution Controls", "Target limiting and Tag filtering",
             "limit=app_servers:&east_coast, tags=[deploy, patch], skipTags=[reboot]", "Flags in env/cmdline",
-            "PASS", output.getRc(), dur, "Verified --limit, --tags, and --skip-tags formatted properly");
+            "PASS", output.getRc(), dur, "Verified --limit, --tags, and --skip-tags formatted properly"
+        );
     }
 
     @Test
@@ -543,12 +597,16 @@ public class AnsibleRunnerComprehensiveTest {
             .taskRunner(runner)
             .verbosity(Property.ofValue(3))
             .forks(Property.ofValue(30))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: msg='Verbose'\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: msg='Verbose'\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -560,9 +618,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(cmd, containsString("-vvv"));
         assertThat(cmd, containsString("-f 30"));
 
-        recordResult("TC11", "Execution Controls", "High verbosity (-vvv) and Parallel forks (-f 30)",
+        recordResult(
+            "TC11", "Execution Controls", "High verbosity (-vvv) and Parallel forks (-f 30)",
             "verbosity=3, forks=30", "-vvv and -f 30 present in env/cmdline",
-            "PASS", output.getRc(), dur, "Verified verbosity flag mapping and forks flag");
+            "PASS", output.getRc(), dur, "Verified verbosity flag mapping and forks flag"
+        );
     }
 
     @Test
@@ -579,15 +639,21 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(RunnerEnv.builder()
-                .extraVars(Property.ofValue(vars))
-                .build())
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: var=env_name\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .env(
+                RunnerEnv.builder()
+                    .extraVars(Property.ofValue(vars))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: var=env_name\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -600,9 +666,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(json, containsString("\"env_name\":\"production\""));
         assertThat(json, containsString("\"max_connections\":1000"));
 
-        recordResult("TC12", "Environment & Secrets", "Extra variables JSON serialization",
+        recordResult(
+            "TC12", "Environment & Secrets", "Extra variables JSON serialization",
             "env.extraVars={env_name: production, max_connections: 1000}", "Serialized to JSON in runner/env_backup/extravars",
-            "PASS", output.getRc(), dur, "Verified JSON extra variables structure");
+            "PASS", output.getRc(), dur, "Verified JSON extra variables structure"
+        );
     }
 
     @Test
@@ -618,15 +686,21 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(RunnerEnv.builder()
-                .envVars(Property.ofValue(envs))
-                .build())
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .env(
+                RunnerEnv.builder()
+                    .envVars(Property.ofValue(envs))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -638,9 +712,11 @@ public class AnsibleRunnerComprehensiveTest {
         String json = Files.readString(envvars);
         assertThat(json, containsString("ANSIBLE_HOST_KEY_CHECKING"));
 
-        recordResult("TC13", "Environment & Secrets", "Environment variables JSON serialization",
+        recordResult(
+            "TC13", "Environment & Secrets", "Environment variables JSON serialization",
             "env.envVars={ANSIBLE_HOST_KEY_CHECKING: False}", "Written to runner/env_backup/envvars",
-            "PASS", output.getRc(), dur, "Verified environment variables exported to env/envvars");
+            "PASS", output.getRc(), dur, "Verified environment variables exported to env/envvars"
+        );
     }
 
     @Test
@@ -651,15 +727,21 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(RunnerEnv.builder()
-                .passwords(Property.ofValue(Map.of("vault_password", "{{ secretVault }}")))
-                .build())
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .env(
+                RunnerEnv.builder()
+                    .passwords(Property.ofValue(Map.of("vault_password", "{{ secretVault }}")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -671,9 +753,11 @@ public class AnsibleRunnerComprehensiveTest {
         String json = Files.readString(passwords);
         assertThat(json, containsString("vaultSuperSecret999"));
 
-        recordResult("TC14", "Environment & Secrets", "Dynamic password rendering (Vault/Sudo)",
+        recordResult(
+            "TC14", "Environment & Secrets", "Dynamic password rendering (Vault/Sudo)",
             "env.passwords={vault_password: '{{ secretVault }}'}", "Dynamically evaluated and written to runner/env_backup/passwords",
-            "PASS", output.getRc(), dur, "Pebble expressions evaluated; written to runner/env_backup/passwords without leaking to CLI");
+            "PASS", output.getRc(), dur, "Pebble expressions evaluated; written to runner/env_backup/passwords without leaking to CLI"
+        );
     }
 
     @Test
@@ -686,15 +770,21 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(RunnerEnv.builder()
-                .sshKey(Property.ofValue(key))
-                .build())
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .env(
+                RunnerEnv.builder()
+                    .sshKey(Property.ofValue(key))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -711,9 +801,11 @@ public class AnsibleRunnerComprehensiveTest {
             // Windows filesystems don't support POSIX attributes
         }
 
-        recordResult("TC15", "Environment & Secrets", "Private SSH key permission isolation (0600)",
+        recordResult(
+            "TC15", "Environment & Secrets", "Private SSH key permission isolation (0600)",
             "env.sshKey=-----BEGIN OPENSSH...", "runner/env_backup/ssh_key written with chmod 0600",
-            "PASS", output.getRc(), dur, "Verified rw------- (0600) POSIX permissions");
+            "PASS", output.getRc(), dur, "Verified rw------- (0600) POSIX permissions"
+        );
     }
 
     @Test
@@ -726,12 +818,16 @@ public class AnsibleRunnerComprehensiveTest {
             .taskRunner(runner)
             .timeout(Property.ofValue(Duration.ofMinutes(15)))
             .idleTimeout(Property.ofValue(Duration.ofMinutes(3)))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -744,9 +840,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(json, containsString("\"job_timeout\":900"));
         assertThat(json, containsString("\"idle_timeout\":180"));
 
-        recordResult("TC16", "Engine Controls", "Execution and Idle timeouts in seconds",
+        recordResult(
+            "TC16", "Engine Controls", "Execution and Idle timeouts in seconds",
             "timeout=PT15M (900s), idleTimeout=PT3M (180s)", "runner/env_backup/settings populated with job_timeout and idle_timeout",
-            "PASS", output.getRc(), dur, "Verified duration converted to seconds in settings JSON");
+            "PASS", output.getRc(), dur, "Verified duration converted to seconds in settings JSON"
+        );
     }
 
     @Test
@@ -760,12 +858,16 @@ public class AnsibleRunnerComprehensiveTest {
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
             .failOnErrors(Property.ofValue(false))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - name: Failing task\n      fail: msg='Error'\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("host-01\nhost-02\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - name: Failing task\n      fail: msg='Error'\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("host-01\nhost-02\n"))
+                    .build()
+            )
             .outputSummary(Property.ofValue(true))
             .build();
 
@@ -780,9 +882,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(output.getFailedHosts(), containsInAnyOrder("host-02"));
         assertEquals(1, output.getSummary().getOk());
 
-        recordResult("TC17", "Telemetry & Outputs", "Structured failure telemetry and host tracking",
+        recordResult(
+            "TC17", "Telemetry & Outputs", "Structured failure telemetry and host tracking",
             "failOnErrors=false with task failure on host-02", "status=failed, failures=1, failedHosts=[host-02]",
-            "PASS", output.getRc(), dur, "Downstream routing enabled without premature worker crashes");
+            "PASS", output.getRc(), dur, "Downstream routing enabled without premature worker crashes"
+        );
     }
 
     @Test
@@ -796,12 +900,16 @@ public class AnsibleRunnerComprehensiveTest {
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
             .failOnErrors(Property.ofValue(true))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - fail:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("host-01\nhost-02\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - fail:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("host-01\nhost-02\n"))
+                    .build()
+            )
             .build();
 
         Exception thrown = assertThrows(RuntimeException.class, () -> task.run(runContext));
@@ -810,9 +918,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(thrown.getMessage(), containsString("Ansible Runner failed with status"));
         assertThat(thrown.getMessage(), containsString("exit code 2"));
 
-        recordResult("TC18", "Engine Controls", "failOnErrors=true hard failure exception",
+        recordResult(
+            "TC18", "Engine Controls", "failOnErrors=true hard failure exception",
             "failOnErrors=true, runner returns rc=2", "RuntimeException thrown with failed hosts list",
-            "PASS", 2, dur, "Verified exception raised with detailed error message");
+            "PASS", 2, dur, "Verified exception raised with detailed error message"
+        );
     }
 
     @Test
@@ -824,12 +934,16 @@ public class AnsibleRunnerComprehensiveTest {
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
             .autoCleanArtifacts(Property.ofValue(false))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -844,9 +958,11 @@ public class AnsibleRunnerComprehensiveTest {
             assertEquals('K', (char) header[1]);
         }
 
-        recordResult("TC19", "Storage & Archiving", "Zipped telemetry artifact upload to Kestra Internal Storage",
+        recordResult(
+            "TC19", "Storage & Archiving", "Zipped telemetry artifact upload to Kestra Internal Storage",
             "autoCleanArtifacts=false", "artifactsUri pointing to valid zip archive in Kestra storage",
-            "PASS", output.getRc(), dur, "Verified ZIP archive magic bytes (PK) in uploaded blob");
+            "PASS", output.getRc(), dur, "Verified ZIP archive magic bytes (PK) in uploaded blob"
+        );
     }
 
     @Test
@@ -858,12 +974,16 @@ public class AnsibleRunnerComprehensiveTest {
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
             .autoCleanArtifacts(Property.ofValue(true))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -873,9 +993,11 @@ public class AnsibleRunnerComprehensiveTest {
         Path artifactsDir = runContext.workingDir().path().resolve("runner/artifacts");
         assertFalse(Files.exists(artifactsDir), "runner/artifacts must be deleted after upload when autoCleanArtifacts is true");
 
-        recordResult("TC20", "Storage & Archiving", "Local artifacts directory cleanup after upload",
+        recordResult(
+            "TC20", "Storage & Archiving", "Local artifacts directory cleanup after upload",
             "autoCleanArtifacts=true", "runner/artifacts directory purged from local worker disk",
-            "PASS", output.getRc(), dur, "Worker disk bloat prevented by auto-cleaning local artifact tree");
+            "PASS", output.getRc(), dur, "Worker disk bloat prevented by auto-cleaning local artifact tree"
+        );
     }
 
     @Test
@@ -895,12 +1017,16 @@ public class AnsibleRunnerComprehensiveTest {
         // Simple flow definition: project with only playbook: site.yml, inventory: inventory/hosts.ini
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .playbook(Property.ofValue("site.yml"))
-                .build())
-            .inventory(Inventory.builder()
-                .file(Property.ofValue("inventory/hosts.ini"))
-                .build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("site.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .file(Property.ofValue("inventory/hosts.ini"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -915,9 +1041,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertTrue(Files.exists(projectPlaybook), "Playbook must be copied automatically from playbooks/ to runner/project/");
         assertTrue(Files.exists(runnerHosts), "Inventory must be copied automatically from inventory/hosts.ini to runner/inventory/hosts");
 
-        recordResult("TC21", "Namespace & Path Resolution", "Simplified playbook & inventory file name resolution",
+        recordResult(
+            "TC21", "Namespace & Path Resolution", "Simplified playbook & inventory file name resolution",
             "project.playbook=site.yml, inventory.file=inventory/hosts.ini", "Resolved from namespace files in workingDir",
-            "PASS", output.getRc(), dur, "User does not need to specify source or inline read expressions");
+            "PASS", output.getRc(), dur, "User does not need to specify source or inline read expressions"
+        );
     }
 
     @Test
@@ -933,12 +1061,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .hosts(Property.ofValue(hosts))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .hosts(Property.ofValue(hosts))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -951,9 +1083,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(json, containsString("srv1"));
         assertThat(json, containsString("10.0.0.1"));
 
-        recordResult("TC22", "Inventory Options", "Structured hosts map JSON inventory",
+        recordResult(
+            "TC22", "Inventory Options", "Structured hosts map JSON inventory",
             "inventory.hosts={srv1: {ansible_host: 10.0.0.1}}", "runner/inventory/hosts.json generated",
-            "PASS", output.getRc(), dur, "Native Ansible JSON inventory format generated from structured map");
+            "PASS", output.getRc(), dur, "Native Ansible JSON inventory format generated from structured map"
+        );
     }
 
     @Test
@@ -971,12 +1105,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: webservers\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .groups(Property.ofValue(groups))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: webservers\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .groups(Property.ofValue(groups))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -989,9 +1127,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertThat(json, containsString("webservers"));
         assertThat(json, containsString("http_port"));
 
-        recordResult("TC23", "Inventory Options", "Structured groups map JSON inventory",
+        recordResult(
+            "TC23", "Inventory Options", "Structured groups map JSON inventory",
             "inventory.groups={webservers: {...}}", "runner/inventory/hosts.json generated",
-            "PASS", output.getRc(), dur, "Group hierarchy and group vars serialized directly to JSON inventory");
+            "PASS", output.getRc(), dur, "Group hierarchy and group vars serialized directly to JSON inventory"
+        );
     }
 
     @Test
@@ -1007,12 +1147,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .sources(Property.ofValue(List.of("inv1.ini", "inv2.ini")))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .sources(Property.ofValue(List.of("inv1.ini", "inv2.ini")))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -1022,9 +1166,11 @@ public class AnsibleRunnerComprehensiveTest {
         assertTrue(Files.exists(runContext.workingDir().path().resolve("runner/inventory/inv1.ini")));
         assertTrue(Files.exists(runContext.workingDir().path().resolve("runner/inventory/inv2.ini")));
 
-        recordResult("TC24", "Inventory Options", "Multiple inventory sources directory merging",
+        recordResult(
+            "TC24", "Inventory Options", "Multiple inventory sources directory merging",
             "inventory.sources=[inv1.ini, inv2.ini]", "Both files copied into runner/inventory/",
-            "PASS", output.getRc(), dur, "Multiple inventory sources merged in /runner/inventory/ tree");
+            "PASS", output.getRc(), dur, "Multiple inventory sources merged in /runner/inventory/ tree"
+        );
     }
 
     @Test
@@ -1038,12 +1184,16 @@ public class AnsibleRunnerComprehensiveTest {
             .outputLogFile(Property.ofValue(true))
             .streamLogs(Property.ofValue(true))
             .logsMode(Property.ofValue(LogsMode.FULL))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -1055,9 +1205,11 @@ public class AnsibleRunnerComprehensiveTest {
             assertNotNull(is);
         }
 
-        recordResult("TC25", "Logging Controls", "outputLogFile storage upload",
+        recordResult(
+            "TC25", "Logging Controls", "outputLogFile storage upload",
             "outputLogFile=true", "Complete execution log uploaded to internal storage",
-            "PASS", output.getRc(), dur, "Execution log persisted and available via outputLogFile URI");
+            "PASS", output.getRc(), dur, "Execution log persisted and available via outputLogFile URI"
+        );
     }
 
     @Test
@@ -1070,12 +1222,16 @@ public class AnsibleRunnerComprehensiveTest {
             .taskRunner(runner)
             .streamLogs(Property.ofValue(true))
             .logsMode(Property.ofValue(LogsMode.SUMMARY))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -1084,9 +1240,11 @@ public class AnsibleRunnerComprehensiveTest {
 
         assertEquals(0, output.getRc());
 
-        recordResult("TC26", "Logging Controls", "logsMode=SUMMARY log stream filtering",
+        recordResult(
+            "TC26", "Logging Controls", "logsMode=SUMMARY log stream filtering",
             "logsMode=SUMMARY, streamLogs=true", "Filters noise and keeps high-level play/task headers",
-            "PASS", output.getRc(), dur, "Validated SUMMARY logsMode operation");
+            "PASS", output.getRc(), dur, "Validated SUMMARY logsMode operation"
+        );
     }
 
     @Test
@@ -1098,12 +1256,16 @@ public class AnsibleRunnerComprehensiveTest {
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
             .maxOutputsSize(Property.ofValue(5L)) // Tiny limit to trigger guard
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         Exception thrown = assertThrows(IllegalStateException.class, () -> task.run(runContext));
@@ -1111,9 +1273,11 @@ public class AnsibleRunnerComprehensiveTest {
 
         assertThat(thrown.getMessage(), containsString("maxOutputsSize"));
 
-        recordResult("TC27", "Execution Guards", "maxOutputsSize guard against queue payload overflow",
+        recordResult(
+            "TC27", "Execution Guards", "maxOutputsSize guard against queue payload overflow",
             "maxOutputsSize=5 bytes", "IllegalStateException thrown when telemetry exceeds limit",
-            "PASS", 0, dur, "Verified output payload size ceiling enforcement");
+            "PASS", 0, dur, "Verified output payload size ceiling enforcement"
+        );
     }
 
     @Test
@@ -1124,12 +1288,16 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -1145,9 +1313,11 @@ public class AnsibleRunnerComprehensiveTest {
             assertThat(json, containsString("\"stats\" :"));
         }
 
-        recordResult("TC28", "Telemetry & Storage", "Consolidated single results.json report generation",
+        recordResult(
+            "TC28", "Telemetry & Storage", "Consolidated single results.json report generation",
             "resultsUri generated in storage", "Single unified JSON replaces thousands of raw event files",
-            "PASS", output.getRc(), dur, "Validated single consolidated results.json output structure");
+            "PASS", output.getRc(), dur, "Validated single consolidated results.json output structure"
+        );
     }
 
     @Test
@@ -1162,12 +1332,16 @@ public class AnsibleRunnerComprehensiveTest {
             .autoInstallPythonRequirements(Property.ofValue(true))
             .galaxyDependencies(Property.ofValue(List.of("community.general")))
             .pythonDependencies(Property.ofValue(List.of("requests")))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);
@@ -1176,9 +1350,11 @@ public class AnsibleRunnerComprehensiveTest {
 
         assertEquals(0, output.getRc());
 
-        recordResult("TC29", "Dependency Management", "Auto-install Galaxy and Python dependencies",
+        recordResult(
+            "TC29", "Dependency Management", "Auto-install Galaxy and Python dependencies",
             "galaxyDependencies=[community.general], pythonDependencies=[requests]", "Pre-commands injected for execution",
-            "PASS", output.getRc(), dur, "Verified pre-commands container execution injection");
+            "PASS", output.getRc(), dur, "Verified pre-commands container execution injection"
+        );
     }
 
     @Test
@@ -1197,12 +1373,16 @@ public class AnsibleRunnerComprehensiveTest {
             AnsibleRunner task = AnsibleRunner.builder()
                 .taskRunner(runner)
                 .verbosity(Property.ofValue(entry.getKey()))
-                .project(Project.builder()
-                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                    .build())
-                .inventory(Inventory.builder()
-                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                    .build())
+                .project(
+                    Project.builder()
+                        .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                        .build()
+                )
+                .inventory(
+                    Inventory.builder()
+                        .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                        .build()
+                )
                 .build();
 
             task.run(runContext);
@@ -1224,12 +1404,16 @@ public class AnsibleRunnerComprehensiveTest {
         AnsibleRunner taskZero = AnsibleRunner.builder()
             .taskRunner(runnerZero)
             .verbosity(Property.ofValue(0))
-            .project(Project.builder()
-                .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         taskZero.run(runContextZero);
@@ -1247,7 +1431,8 @@ public class AnsibleRunnerComprehensiveTest {
         int total = 50_000;
 
         AnsibleRunnerLogConsumer consumer = new AnsibleRunnerLogConsumer(
-            runContext, true, LogsMode.FULL, spool, 1_000L, 100, java.util.Collections.emptyList());
+            runContext, true, LogsMode.FULL, spool, 1_000L, 100, java.util.Collections.emptyList()
+        );
         for (int i = 0; i < total; i++) {
             consumer.accept("ok: [router-" + i + "] => (item=Gi0/" + i + ")", false, java.time.Instant.now());
         }
@@ -1271,7 +1456,8 @@ public class AnsibleRunnerComprehensiveTest {
         Path spool = runContext.workingDir().path().resolve("summary.log");
 
         AnsibleRunnerLogConsumer consumer = new AnsibleRunnerLogConsumer(
-            runContext, true, LogsMode.SUMMARY, spool, 0L, 100, java.util.Collections.emptyList());
+            runContext, true, LogsMode.SUMMARY, spool, 0L, 100, java.util.Collections.emptyList()
+        );
         consumer.accept("TASK [loop] ****", false, java.time.Instant.now());
         for (int i = 0; i < 2_000; i++) {
             consumer.accept("ok: [router-1] => (item=" + i + ")", false, java.time.Instant.now());
@@ -1285,7 +1471,6 @@ public class AnsibleRunnerComprehensiveTest {
             assertEquals(2_003, lines.count(), "Raw spool still keeps everything in SUMMARY mode");
         }
     }
-
 
     /**
      * Flexible Mock TaskRunner for testing all combinations of AnsibleRunner.

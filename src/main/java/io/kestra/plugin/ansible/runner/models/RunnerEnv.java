@@ -1,11 +1,12 @@
 package io.kestra.plugin.ansible.runner.models;
 
+import java.util.Map;
+
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
+
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.*;
-
-import java.util.Map;
 
 @Builder
 @Getter

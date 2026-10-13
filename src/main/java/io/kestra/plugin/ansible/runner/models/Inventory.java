@@ -1,12 +1,14 @@
 package io.kestra.plugin.ansible.runner.models;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import io.kestra.core.models.property.Property;
-import io.swagger.v3.oas.annotations.media.Schema;
-import lombok.*;
-
 import java.util.List;
 import java.util.Map;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+
+import io.kestra.core.models.property.Property;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.*;
 
 @Builder
 @Getter

@@ -1,16 +1,15 @@
 package io.kestra.plugin.ansible.runner.utils;
 
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
-import org.apache.commons.io.IOUtils;
-
 import java.io.*;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 
 public class ArchiveUtils {
 
@@ -110,8 +109,10 @@ public class ArchiveUtils {
      */
     public static void untarGz(InputStream inputStream, Path targetDir) throws IOException {
         Files.createDirectories(targetDir);
-        try (GzipCompressorInputStream gzis = new GzipCompressorInputStream(new BufferedInputStream(inputStream));
-             TarArchiveInputStream tais = new TarArchiveInputStream(gzis)) {
+        try (
+            GzipCompressorInputStream gzis = new GzipCompressorInputStream(new BufferedInputStream(inputStream));
+            TarArchiveInputStream tais = new TarArchiveInputStream(gzis)
+        ) {
             TarArchiveEntry entry;
             int entryCount = 0;
             long totalBytes = 0;
@@ -120,7 +121,7 @@ public class ArchiveUtils {
                 if (entryCount > MAX_ENTRIES) {
                     throw new IOException("Archive contains too many entries (exceeds " + MAX_ENTRIES + ").");
                 }
-                
+
                 if (entry.isSymbolicLink() || entry.isLink()) {
                     System.err.println("Warning: Skipping symlink in archive: " + entry.getName());
                     continue;

@@ -1,5 +1,14 @@
 package io.kestra.plugin.ansible.runner;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.*;
+
+import org.junit.jupiter.api.Test;
+
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.runners.TaskCommands;
@@ -13,17 +22,10 @@ import io.kestra.core.storages.StorageInterface;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
+
 import jakarta.inject.Inject;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
-import org.junit.jupiter.api.Test;
-
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.util.*;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -42,10 +44,21 @@ class AnsibleRunnerTest {
 
     @Test
     void testRunnerDirectoryContractAndExecution() throws Exception {
-        RunContext runContext = runContextFactory.of(Map.of(
-            "flowVar", "testValue",
-            "secretVault", "topSecret123"
-        ));
+        RunContext runContext = runContextFactory.of(
+            Map.of(
+                "flowVar", "testValue",
+                "secretVault", "topSecret123"
+            )
+        );
+
+        Path playbooksDir = runContext.workingDir().path().resolve("playbooks");
+        Files.createDirectories(playbooksDir);
+        Files.writeString(playbooksDir.resolve("site.yml"), """
+            - hosts: all
+              tasks:
+                - name: Audit ping
+                  ansible.builtin.ping:
+            """);
 
         // Create a custom mock TaskRunner to simulate ansible-runner inside container
         TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
@@ -60,19 +73,25 @@ class AnsibleRunnerTest {
             .skipTags(Property.ofValue(List.of("slow")))
             .verbosity(Property.ofValue(2))
             .forks(Property.ofValue(15))
-            .project(Project.builder()
-                .playbook(Property.ofValue("audit.yml"))
-                .source(Property.ofValue("playbooks/site.yml"))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("router-1 ansible_host=192.168.1.1\nrouter-2 ansible_host=192.168.1.2\n"))
-                .build())
-            .env(RunnerEnv.builder()
-                .extraVars(Property.ofValue(Map.of("strict_mode", true, "count", 42)))
-                .envVars(Property.ofValue(Map.of("ANSIBLE_HOST_KEY_CHECKING", "False")))
-                .passwords(Property.ofValue(Map.of("vault_pass", "{{ secretVault }}")))
-                .sshKey(Property.ofValue("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("audit.yml"))
+                    .source(Property.ofValue("playbooks/site.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("router-1 ansible_host=192.168.1.1\nrouter-2 ansible_host=192.168.1.2\n"))
+                    .build()
+            )
+            .env(
+                RunnerEnv.builder()
+                    .extraVars(Property.ofValue(Map.of("strict_mode", true, "count", 42)))
+                    .envVars(Property.ofValue(Map.of("ANSIBLE_HOST_KEY_CHECKING", "False")))
+                    .passwords(Property.ofValue(Map.of("vault_pass", "{{ secretVault }}")))
+                    .sshKey(Property.ofValue("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n"))
+                    .build()
+            )
             .timeout(Property.ofValue(Duration.ofMinutes(10)))
             .idleTimeout(Property.ofValue(Duration.ofMinutes(2)))
             .autoCleanArtifacts(Property.ofValue(true))
@@ -126,13 +145,17 @@ class AnsibleRunnerTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(mockRunner)
-            .project(Project.builder()
-                .playbook(Property.ofValue("test.yml"))
-                .source(Property.ofValue(inlineYaml))
-                .build())
-            .inventory(Inventory.builder()
-                .inline(Property.ofValue("localhost ansible_connection=local\n"))
-                .build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("test.yml"))
+                    .source(Property.ofValue(inlineYaml))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
             .build();
 
         AnsibleRunner.Output output = task.run(runContext);

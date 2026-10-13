@@ -1,9 +1,5 @@
 package io.kestra.plugin.ansible.runner;
 
-import io.kestra.core.models.tasks.runners.DefaultLogConsumer;
-import io.kestra.core.runners.RunContext;
-import io.kestra.plugin.ansible.runner.models.LogsMode;
-
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,27 +8,23 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.List;
+import java.util.regex.Pattern;
 
-/**
- * Intercepts process output line-by-line and forwards it to the Kestra execution logger
- * in a way that stays friendly to the UI and the log repository at very large volumes:
- * <ul>
- *   <li><b>Batching</b>: lines are grouped into a single log entry (up to {@code batchSize} lines or
- *       {@code flushIntervalMs}) so 100k lines become ~1k log rows instead of 100k.</li>
- *   <li><b>Cap</b>: at most {@code maxLogLines} lines are streamed; afterwards only critical lines
- *       (failures, unreachable, errors, recap) pass through, up to {@code CRITICAL_OVERFLOW_LIMIT}.</li>
- *   <li><b>Disk spooling</b>: the complete output is always written to a file on local disk (never kept in
- *       memory), so it can be uploaded as {@code outputLogFile} without any loss.</li>
- *   <li>Raw event JSON dumps are always filtered out (Tri-Layer architecture).</li>
- * </ul>
- */
+import io.kestra.core.models.tasks.runners.DefaultLogConsumer;
+import io.kestra.core.runners.RunContext;
+import io.kestra.plugin.ansible.runner.models.LogsMode;
+
+// Batches, caps and masks runner output, and spools the full masked log to disk.
 public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
 
     private static final int CRITICAL_OVERFLOW_LIMIT = 500;
+
+    // Same syntax as core's TaskLogLineMatcher for ::{"outputs":...}:: and ::{"metrics":...}:: lines
+    private static final Pattern KESTRA_MARKER = Pattern.compile("^::(\\{.*})::$");
 
     private final RunContext runContext;
     private final boolean streamLogs;
@@ -40,7 +32,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
     private final long maxLogLines;
     private final int batchSize;
     private final Path spoolFile;
-    private final List<String> secrets;
+    private final SecretMasker masker;
     private BufferedWriter spoolWriter;
     private final ScheduledExecutorService flusher;
 
@@ -56,7 +48,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
     private boolean closed = false;
 
     public AnsibleRunnerLogConsumer(RunContext runContext, boolean streamLogs, LogsMode logsMode, Path spoolFile,
-                                    long maxLogLines, int batchSize, java.util.List<String> secrets) {
+        long maxLogLines, int batchSize, SecretMasker masker) {
         super(runContext);
         this.runContext = runContext;
         this.streamLogs = streamLogs;
@@ -64,7 +56,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         this.maxLogLines = maxLogLines;
         this.batchSize = Math.max(1, batchSize);
         this.spoolFile = spoolFile;
-        this.secrets = secrets != null ? secrets : java.util.Collections.emptyList();
+        this.masker = masker != null ? masker : new SecretMasker();
 
         try {
             this.spoolWriter = spoolFile != null
@@ -76,7 +68,8 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
 
         if (streamLogs && this.batchSize > 1) {
             // Make sure slow/idle output is still delivered live (every second).
-            this.flusher = Executors.newSingleThreadScheduledExecutor(r -> {
+            this.flusher = Executors.newSingleThreadScheduledExecutor(r ->
+            {
                 Thread t = new Thread(r, "ansible-runner-log-flusher");
                 t.setDaemon(true);
                 return t;
@@ -87,27 +80,53 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         }
     }
 
+    public AnsibleRunnerLogConsumer(RunContext runContext, boolean streamLogs, LogsMode logsMode, Path spoolFile,
+        long maxLogLines, int batchSize, List<String> secrets) {
+        this(runContext, streamLogs, logsMode, spoolFile, maxLogLines, batchSize, toMasker(secrets));
+    }
+
+    private static SecretMasker toMasker(List<String> secrets) {
+        SecretMasker m = new SecretMasker();
+        if (secrets != null) {
+            secrets.forEach(m::add);
+        }
+        return m;
+    }
+
     @Override
-    public synchronized void accept(String line, Boolean isStdErr, Instant instant) {
-        try { super.accept(line, isStdErr, instant); } catch (Exception ignored) {}
-        if (line == null || line.isBlank()) {
+    public synchronized void accept(String rawLine, Boolean isStdErr, Instant instant) {
+        if (rawLine == null) {
+            return;
+        }
+        boolean stderr = Boolean.TRUE.equals(isStdErr);
+        String line = masker.mask(rawLine);
+
+        // Core parses outputs and metrics from marker lines without logging them; every other line is
+        // logged only through the batched path below
+        String unterminated = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
+        if (KESTRA_MARKER.matcher(unterminated).matches()) {
+            super.accept(unterminated, stderr, instant);
+            return;
+        }
+        if (stderr) {
+            stdErrCount.incrementAndGet();
+        } else {
+            stdOutCount.incrementAndGet();
+        }
+        if (line.isBlank()) {
             return;
         }
 
-        for (String secret : secrets) {
-            if (secret != null && !secret.isBlank()) {
-                line = line.replace(secret, "***");
-            }
-        }
-
-        // Always spool the complete raw output to disk (bounded memory)
+        // Always spool the complete masked output to disk (bounded memory)
         writeToSpool(line);
         totalLines++;
 
         // Filter out raw event JSON telemetry dumps to satisfy the Tri-Layer Architecture requirement
         String trimmed = line.trim();
-        if ((trimmed.startsWith("{") && trimmed.endsWith("}")) &&
-            (trimmed.contains("\"event\"") || trimmed.contains("\"uuid\"") || trimmed.contains("\"counter\""))) {
+        if (
+            (trimmed.startsWith("{") && trimmed.endsWith("}")) &&
+                (trimmed.contains("\"event\"") || trimmed.contains("\"uuid\"") || trimmed.contains("\"counter\""))
+        ) {
             return;
         }
 
@@ -115,7 +134,6 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
             return;
         }
 
-        boolean stderr = Boolean.TRUE.equals(isStdErr);
         boolean critical = isCriticalLine(trimmed, stderr);
 
         if (logsMode == LogsMode.SUMMARY && !isSummaryLine(trimmed, stderr)) {
@@ -162,8 +180,8 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         flush();
         runContext.logger().warn(
             "Log streaming limit reached ({} lines): further output is not streamed to the Kestra UI " +
-            "to keep it responsive (failures, unreachable hosts and the recap are still shown). " +
-            "The complete log is stored in 'outputLogFile'. Raise 'maxLogLines' (0 = unlimited) or use logsMode: SUMMARY.",
+                "to keep it responsive (failures, unreachable hosts and the recap are still shown). " +
+                "The complete log is stored in 'outputLogFile'. Raise 'maxLogLines' (0 = unlimited) or use logsMode: SUMMARY.",
             maxLogLines
         );
     }
@@ -233,19 +251,22 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
             spoolWriter.newLine();
         } catch (IOException e) {
             runContext.logger().warn("Failed to write to spool log, disabling spooling: {}", e.getMessage());
-            try { spoolWriter.close(); } catch (Exception ignored) {}
+            try {
+                spoolWriter.close();
+            } catch (Exception ignored) {
+            }
             spoolWriter = null;
         }
     }
 
     private boolean isCriticalLine(String trimmed, boolean stderr) {
         return stderr ||
-               trimmed.startsWith("fatal:") ||
-               trimmed.startsWith("failed:") ||
-               trimmed.startsWith("unreachable:") ||
-               trimmed.startsWith("ERROR!") ||
-               trimmed.startsWith("PLAY RECAP") ||
-               trimmed.contains(" : ok=");
+            trimmed.startsWith("fatal:") ||
+            trimmed.startsWith("failed:") ||
+            trimmed.startsWith("unreachable:") ||
+            trimmed.startsWith("ERROR!") ||
+            trimmed.startsWith("PLAY RECAP") ||
+            trimmed.contains(" : ok=");
     }
 
     private boolean isSummaryLine(String trimmed, boolean stderr) {
@@ -255,16 +276,16 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         // 'ok:' and 'skipping:' are per-host-per-item lines that dominate large runs; they are
         // intentionally excluded here (counts are available in the recap and in the stats output).
         return trimmed.startsWith("PLAY [") ||
-               trimmed.startsWith("TASK [") ||
-               trimmed.startsWith("PLAY RECAP") ||
-               trimmed.startsWith("changed:") ||
-               trimmed.startsWith("failed:") ||
-               trimmed.startsWith("fatal:") ||
-               trimmed.startsWith("unreachable:") ||
-               trimmed.startsWith("ERROR!") ||
-               trimmed.startsWith("WARNING:") ||
-               trimmed.contains(" : ok=") ||
-               trimmed.startsWith("ansible-playbook");
+            trimmed.startsWith("TASK [") ||
+            trimmed.startsWith("PLAY RECAP") ||
+            trimmed.startsWith("changed:") ||
+            trimmed.startsWith("failed:") ||
+            trimmed.startsWith("fatal:") ||
+            trimmed.startsWith("unreachable:") ||
+            trimmed.startsWith("ERROR!") ||
+            trimmed.startsWith("WARNING:") ||
+            trimmed.contains(" : ok=") ||
+            trimmed.startsWith("ansible-playbook");
     }
 
     public Path getSpoolFile() {
