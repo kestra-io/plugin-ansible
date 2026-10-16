@@ -24,6 +24,7 @@ DOCUMENTATION = """
 
 from ansible import constants as C
 from ansible import context
+from ansible.module_utils.parsing.convert_bool import boolean
 from ansible.playbook.task_include import TaskInclude
 from ansible.plugins.callback import CallbackBase
 from ansible.utils.color import colorize, hostcolor
@@ -52,6 +53,9 @@ class CallbackModule(CallbackBase):
     # Characters of msg / stderr kept inline per result in store mode.
     LIGHT_RESULT_LIMIT = 1024
     ITEM_LABEL_LIMIT = 256
+
+    # Host statuses that carry a failure payload (an `ignored` host failed but was tolerated).
+    FAILURE_STATUSES = ("failed", "unreachable", "ignored")
 
     # Characters kept inline per value of a debug task's result in store mode; the full value is in
     # the results file (`resultsUri`).
@@ -597,13 +601,16 @@ class CallbackModule(CallbackBase):
             # likely to carry a raw secret (cmd/stdout/facts stay dropped). Secrets
             # placed directly on a command line can still surface here.
             result_payload = {"changed": bool(result._result.get("changed", False))}
-            if status in ("failed", "unreachable"):
+            if status in self.FAILURE_STATUSES:
                 msg = result._result.get("msg")
                 if msg is not None:
                     result_payload["msg"] = msg
         else:
             result_payload = self._without_lines(result._result)
             self._mark_failed_items(result, host_name, result_payload)
+            if status in ("failed", "ignored"):
+                # Ansible strips `failed` from the result it passes to callbacks; restore it.
+                result_payload.setdefault("failed", True)
 
         host_result = {
             "host": host_name,
@@ -613,7 +620,7 @@ class CallbackModule(CallbackBase):
         if self._results_store:
             is_debug = getattr(result._task, "action", None) in self.DEBUG_ACTIONS
             host_result["result"] = self._light_result(
-                result_payload, status in ("failed", "unreachable"), is_debug
+                result_payload, status in self.FAILURE_STATUSES, is_debug
             )
             host_result["_full"] = result_payload
         self._current_task["hosts"].append(host_result)
@@ -731,7 +738,12 @@ class CallbackModule(CallbackBase):
         # error reason. Keep this ordering if you change either call.
         self._clean_results(result._result, result._task.action)
 
-        self._add_host_result(result, "failed")
+        # An ignored failure keeps its payload but gets its own status (as in PLAY RECAP)
+        # so the task run is not reported as failed.
+        # A failure caught by block/rescue arrives with ignore_errors=False but the play carries on,
+        # so it is reported like an ignored one.
+        ignore_errors = ignore_errors or self._is_rescued(result._task)
+        self._add_host_result(result, "ignored" if ignore_errors else "failed")
 
         if self._silent:
             return
@@ -778,8 +790,34 @@ class CallbackModule(CallbackBase):
                 msg += " => %s" % self._dump_host_result(result._result)
             self._display.display(msg, color=C.COLOR_SKIP)
 
+    @staticmethod
+    def _is_rescued(task):
+        """
+        True when a failure of this task is caught by an enclosing block's rescue section.
+        Walks up the parents: a task sitting in a block's `block:` list with a non-empty
+        `rescue:` is rescued. A task in a `rescue:` or `always:` list is not rescued by that
+        block, so the walk goes on to the outer block.
+        """
+        child = task
+        parent = getattr(task, "_parent", None)
+        while parent is not None:
+            if hasattr(parent, "rescue") and hasattr(parent, "always"):
+                # Ansible hands callbacks a copy of the task, so match on uuid rather than identity.
+                in_main = any(c._uuid == child._uuid for c in (parent.block or []))
+                if in_main and parent.rescue:
+                    return True
+            child = parent
+            parent = getattr(parent, "_parent", None)
+        return False
+
+    @staticmethod
+    def _ignores_unreachable(result):
+        # Read the templated task field so a string such as "{{ var }}" is coerced, not always truthy.
+        return boolean(result._task_fields.get('ignore_unreachable'), strict=False)
+
     def v2_runner_on_unreachable(self, result):
-        self._add_host_result(result, "unreachable")
+        ignore_unreachable = self._ignores_unreachable(result)
+        self._add_host_result(result, "ignored" if ignore_unreachable else "unreachable")
 
         if self._silent:
             return
@@ -797,7 +835,7 @@ class CallbackModule(CallbackBase):
             stderr=self.get_option('display_failed_stderr')
         )
 
-        if result._task.ignore_unreachable:
+        if ignore_unreachable:
             self._display.display("...ignoring", color=C.COLOR_SKIP)
 
     def v2_playbook_on_stats(self, stats):

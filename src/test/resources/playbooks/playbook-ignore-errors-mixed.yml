@@ -1,0 +1,9 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Allowed to fail
+      ansible.builtin.command: /bin/false
+      ignore_errors: true
+
+    - name: Really fails
+      ansible.builtin.command: /bin/false

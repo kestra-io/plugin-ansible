@@ -350,6 +350,31 @@ class AnsibleCLIOutputsBehaviorTest {
         assertThat(logs.getFirst().message(), not(containsString("lots of detail")));
     }
 
+    @Test
+    void taskLogs_summaryMode_ignoredHostLogsWarnWithReason() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "ignored", Map.of("msg", "boom", "stdout", "lots of detail"))))
+            .build();
+
+        var logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.ResultsStorage.INLINE);
+
+        assertThat(logs.getFirst().message(), is("[h1] ignored => boom"));
+        assertThat(logs.getFirst().level(), is(Level.WARN));
+    }
+
+    @Test
+    void taskLogs_summaryMode_ignoredLoopHostLogsItemsAtWarn() {
+        var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder()
+            .hosts(List.of(host("h1", "ignored", Map.of("msg", "One or more items failed", "results", List.of(failedItem(1))))))
+            .build();
+
+        var logs = AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, AnsibleCLI.ResultsStorage.INLINE);
+
+        assertThat(logs, hasSize(2));
+        assertThat(logs.stream().allMatch(l -> l.level() == Level.WARN), is(true));
+        assertThat(logs.getLast().message(), containsString("boom on item 1"));
+    }
+
     private static List<DynamicTaskRunLog> summaryLogs(AnsibleCLI.ResultsStorage storage, Map<String, Object> result) {
         var task = AnsibleCLI.AnsibleOutput.TaskOutput.builder().hosts(List.of(host("h1", "failed", result))).build();
         return AnsibleCLI.taskLogs(task, AnsibleCLI.LogsMode.SUMMARY, storage);
