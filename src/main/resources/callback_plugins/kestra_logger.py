@@ -24,6 +24,7 @@ DOCUMENTATION = """
 
 from ansible import constants as C
 from ansible import context
+from ansible.module_utils.parsing.convert_bool import boolean
 from ansible.playbook.task_include import TaskInclude
 from ansible.plugins.callback import CallbackBase
 from ansible.utils.color import colorize, hostcolor
@@ -607,9 +608,8 @@ class CallbackModule(CallbackBase):
         else:
             result_payload = self._without_lines(result._result)
             self._mark_failed_items(result, host_name, result_payload)
-            if status == "ignored":
-                # Ansible drops `failed` from a result whose failure is ignored; keep it so the
-                # payload still shows the task failed.
+            if status in ("failed", "ignored"):
+                # Ansible strips `failed` from the result it passes to callbacks; restore it.
                 result_payload.setdefault("failed", True)
 
         host_result = {
@@ -787,8 +787,14 @@ class CallbackModule(CallbackBase):
                 msg += " => %s" % self._dump_host_result(result._result)
             self._display.display(msg, color=C.COLOR_SKIP)
 
+    @staticmethod
+    def _ignores_unreachable(result):
+        # Read the templated task field so a string such as "{{ var }}" is coerced, not always truthy.
+        return boolean(result._task_fields.get('ignore_unreachable'), strict=False)
+
     def v2_runner_on_unreachable(self, result):
-        self._add_host_result(result, "ignored" if result._task.ignore_unreachable else "unreachable")
+        ignore_unreachable = self._ignores_unreachable(result)
+        self._add_host_result(result, "ignored" if ignore_unreachable else "unreachable")
 
         if self._silent:
             return
@@ -806,7 +812,7 @@ class CallbackModule(CallbackBase):
             stderr=self.get_option('display_failed_stderr')
         )
 
-        if result._task.ignore_unreachable:
+        if ignore_unreachable:
             self._display.display("...ignoring", color=C.COLOR_SKIP)
 
     def v2_playbook_on_stats(self, stats):

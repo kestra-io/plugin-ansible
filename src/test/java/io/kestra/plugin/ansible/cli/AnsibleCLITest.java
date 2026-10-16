@@ -20,7 +20,6 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.event.Level;
-import io.kestra.core.models.flows.State;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -29,6 +28,7 @@ import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.executions.LogEntry;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.NamespaceFiles;
 import io.kestra.core.models.tasks.RunnableTaskException;
@@ -1217,6 +1217,24 @@ class AnsibleCLITest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void run_ignoredUnreachable_reportsIgnoredAndKeepsTaskRunSuccess() throws Exception {
+        var execute = ignoreErrorsTask("playbook-ignore-unreachable.yml");
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        var runOutput = execute.run(runContext);
+        assertThat(runOutput.getExitCode(), is(0));
+
+        var tasks = runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks();
+        assertThat(tasks.get(0).getHosts().getFirst().getStatus(), is("ignored"));
+        assertThat(tasks.get(1).getHosts().getFirst().getStatus(), is("ok"));
+
+        var states = runContext.dynamicWorkerResults().stream().map(r -> r.getTaskRun().getState().getCurrent()).toList();
+        assertThat(states, is(not(empty())));
+        assertThat(states.stream().allMatch(st -> st == State.Type.SUCCESS), is(true));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void run_ignoredFailure_keepsTaskRunSuccessAndLogsWarn() throws Exception {
         var execute = ignoreErrorsTask("playbook-ignore-errors.yml");
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
@@ -1248,7 +1266,7 @@ class AnsibleCLITest {
         var execute = ignoreErrorsTask("playbook-ignore-errors-mixed.yml");
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
 
-        assertThrows(Exception.class, () -> execute.run(runContext));
+        assertThrows(RunnableTaskException.class, () -> execute.run(runContext));
 
         var states = runContext.dynamicWorkerResults().stream().map(r -> r.getTaskRun().getState().getCurrent()).toList();
         assertThat(states.stream().filter(st -> st == State.Type.FAILED).count(), is(1L));

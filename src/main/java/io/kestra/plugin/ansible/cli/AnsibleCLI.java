@@ -551,7 +551,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Where full per-host results are kept",
         description = """
-            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed or unreachable hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`; a failed item also keeps the item label (cut to 256 characters), `failed: true` and its `stderr` tail. The output of `debug` tasks (`msg` or `var`) is kept inline, since printing it is the purpose of the task, except that each value larger than 64 KB is cut to its first 64 KB followed by a pointer to `resultsUri`, where the full value is stored; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
+            STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed, unreachable or ignored hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`; a failed item also keeps the item label (cut to 256 characters), `failed: true` and its `stderr` tail. The output of `debug` tasks (`msg` or `var`) is kept inline, since printing it is the purpose of the task, except that each value larger than 64 KB is cut to its first 64 KB followed by a pointer to `resultsUri`, where the full value is stored; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
             With `outputsMode: EXPLICIT`, only `changed` (plus `msg` on failure) is captured per host, so the stored file is small; `resultsUri` is still set, and a null `resultsUri` means results storage failed.
             INLINE keeps the full per-host results in `playbooks`, bounded by `maxOutputsSize`; choose it when you template `stdout` or other result fields directly and the outputs are small.
             In both modes `stdout_lines` and `stderr_lines` are dropped from captured results at every nesting level; split `stdout`/`stderr` on newlines downstream instead.
@@ -564,7 +564,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Per-host task log verbosity",
         description = """
-            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable`/`ignored` hosts, with the return code and the last 1 KB of `stderr` when present. `ignored` hosts (failures tolerated by `ignore_errors`) are logged at WARN, not ERROR. A loop task also logs one extra line per failed item (ERROR, or WARN for an ignored host) (at most 50 per host and task, then a line counting the rest), whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
+            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable`/`ignored` hosts, with the return code and the last 1 KB of `stderr` when present. `ignored` hosts (failures tolerated by `ignore_errors`) are logged at WARN, not ERROR. A loop task also logs one extra line per failed item, at ERROR (WARN for an ignored host), at most 50 per host and task, then a line counting the rest, whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
             This changes only what is logged, never what is captured: EXPLICIT-mode redaction happens upstream in the callback, so FULL is not an escape hatch from it.
             """
     )
@@ -1795,7 +1795,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     /**
      * Build the host-result log lines for a task.
      * SUMMARY (default) logs only the status for ok/skipped hosts, and the status plus the
-     * failure reason for failed/unreachable hosts. FULL always logs the entire result payload.
+     * failure reason for failed/unreachable/ignored hosts. FULL always logs the entire result payload.
      * Neither mode overrides EXPLICIT-mode redaction: the host result payload is already reduced
      * by the callback before it ever reaches this method.
      */
@@ -1811,19 +1811,18 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             }
 
             String status = hr.getStatus();
-            boolean ignored = isIgnored(status);
-            boolean failed = isFailure(status) || ignored;
+            boolean hasFailureReason = isFailure(status) || isIgnored(status);
 
             String message;
             if (logsMode == LogsMode.FULL) {
                 message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(stringifyResult(hr.getResult()), resultsStorage);
-            } else if (failed) {
+            } else if (hasFailureReason) {
                 message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult(), resultsStorage), resultsStorage);
             } else {
                 message = "[" + hr.getHost() + "] " + status;
             }
 
-            logs.add(new DynamicTaskRunLog(ignored ? Level.WARN : failed ? Level.ERROR : Level.INFO, message));
+            logs.add(new DynamicTaskRunLog(logLevel(status), message));
 
             if (logsMode != LogsMode.FULL) {
                 logs.addAll(failedItemLogs(hr, resultsStorage));
@@ -1831,6 +1830,13 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         }
 
         return logs;
+    }
+
+    private static Level logLevel(String status) {
+        if (isIgnored(status)) {
+            return Level.WARN;
+        }
+        return isFailure(status) ? Level.ERROR : Level.INFO;
     }
 
     private static List<DynamicTaskRunLog> failedItemLogs(AnsibleOutput.HostResult hr, ResultsStorage resultsStorage) {
@@ -1843,7 +1849,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .map(item -> (Map<?, ?>) item)
             .toList();
 
-        var level = isIgnored(hr.getStatus()) ? Level.WARN : Level.ERROR;
+        var level = logLevel(hr.getStatus());
         var logs = new ArrayList<DynamicTaskRunLog>();
         for (var item : failedItems.stream().limit(MAX_FAILED_ITEM_LOGS).toList()) {
             var status = Boolean.TRUE.equals(item.get("unreachable")) ? "unreachable" : "failed";
@@ -2051,7 +2057,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 title = "Ansible result payload for this host",
                 description = """
                     Structure directly from Ansible, without `stdout_lines`/`stderr_lines`.
-                    With `resultsStorage: STORE` (default) this is the light result: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB and, for failed or unreachable hosts, the last 1 KB of `stderr`, plus the whole output of `debug` tasks; the full result is in the file at `resultsUri`.
+                    With `resultsStorage: STORE` (default) this is the light result: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB and, for failed, unreachable or ignored hosts, the last 1 KB of `stderr`, plus the whole output of `debug` tasks; the full result is in the file at `resultsUri`.
                     If the task uses loops, Ansible returns the per-item results under `results` in this object.
                     """
             )
