@@ -564,7 +564,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Per-host task log verbosity",
         description = """
-            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable` hosts, with the return code and the last 1 KB of `stderr` when present. A loop task also logs one extra ERROR line per failed item (at most 50 per host and task, then a line counting the rest), whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
+            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable`/`ignored` hosts, with the return code and the last 1 KB of `stderr` when present. `ignored` hosts (failures tolerated by `ignore_errors`) are logged at WARN, not ERROR. A loop task also logs one extra line per failed item (ERROR, or WARN for an ignored host) (at most 50 per host and task, then a line counting the rest), whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
             This changes only what is logged, never what is captured: EXPLICIT-mode redaction happens upstream in the callback, so FULL is not an escape hatch from it.
             """
     )
@@ -1788,6 +1788,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         return "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
     }
 
+    private static boolean isIgnored(String status) {
+        return "ignored".equalsIgnoreCase(status);
+    }
+
     /**
      * Build the host-result log lines for a task.
      * SUMMARY (default) logs only the status for ok/skipped hosts, and the status plus the
@@ -1807,7 +1811,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             }
 
             String status = hr.getStatus();
-            boolean failed = isFailure(status);
+            boolean ignored = isIgnored(status);
+            boolean failed = isFailure(status) || ignored;
 
             String message;
             if (logsMode == LogsMode.FULL) {
@@ -1818,7 +1823,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 message = "[" + hr.getHost() + "] " + status;
             }
 
-            logs.add(new DynamicTaskRunLog(failed ? Level.ERROR : Level.INFO, message));
+            logs.add(new DynamicTaskRunLog(ignored ? Level.WARN : failed ? Level.ERROR : Level.INFO, message));
 
             if (logsMode != LogsMode.FULL) {
                 logs.addAll(failedItemLogs(hr, resultsStorage));
@@ -1838,13 +1843,14 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             .map(item -> (Map<?, ?>) item)
             .toList();
 
+        var level = isIgnored(hr.getStatus()) ? Level.WARN : Level.ERROR;
         var logs = new ArrayList<DynamicTaskRunLog>();
         for (var item : failedItems.stream().limit(MAX_FAILED_ITEM_LOGS).toList()) {
             var status = Boolean.TRUE.equals(item.get("unreachable")) ? "unreachable" : "failed";
             var label = itemLabel(item);
             logs.add(
                 new DynamicTaskRunLog(
-                    Level.ERROR,
+                    level,
                     "[" + hr.getHost() + "] " + status + label + " => " + truncateForLog(failureReason(item, resultsStorage), resultsStorage)
                 )
             );
@@ -1854,7 +1860,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             var fullResults = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
             logs.add(
                 new DynamicTaskRunLog(
-                    Level.ERROR,
+                    level,
                     "[" + hr.getHost() + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items, see " + fullResults
                 )
             );
@@ -2036,7 +2042,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             @Schema(
                 title = "Execution status",
-                description = "Typical values: ok, failed, skipped, unreachable.",
+                description = "Typical values: ok, failed, skipped, unreachable, ignored (a failure tolerated by `ignore_errors` or `ignore_unreachable`).",
                 example = "ok"
             )
             private String status;

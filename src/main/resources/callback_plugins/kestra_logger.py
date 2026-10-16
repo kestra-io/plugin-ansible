@@ -53,6 +53,9 @@ class CallbackModule(CallbackBase):
     LIGHT_RESULT_LIMIT = 1024
     ITEM_LABEL_LIMIT = 256
 
+    # Host statuses that carry a failure payload (an `ignored` host failed but was tolerated).
+    FAILURE_STATUSES = ("failed", "unreachable", "ignored")
+
     # Characters kept inline per value of a debug task's result in store mode; the full value is in
     # the results file (`resultsUri`).
     DEBUG_VALUE_LIMIT = 64 * 1024
@@ -597,13 +600,17 @@ class CallbackModule(CallbackBase):
             # likely to carry a raw secret (cmd/stdout/facts stay dropped). Secrets
             # placed directly on a command line can still surface here.
             result_payload = {"changed": bool(result._result.get("changed", False))}
-            if status in ("failed", "unreachable"):
+            if status in self.FAILURE_STATUSES:
                 msg = result._result.get("msg")
                 if msg is not None:
                     result_payload["msg"] = msg
         else:
             result_payload = self._without_lines(result._result)
             self._mark_failed_items(result, host_name, result_payload)
+            if status == "ignored":
+                # Ansible drops `failed` from a result whose failure is ignored; keep it so the
+                # payload still shows the task failed.
+                result_payload.setdefault("failed", True)
 
         host_result = {
             "host": host_name,
@@ -613,7 +620,7 @@ class CallbackModule(CallbackBase):
         if self._results_store:
             is_debug = getattr(result._task, "action", None) in self.DEBUG_ACTIONS
             host_result["result"] = self._light_result(
-                result_payload, status in ("failed", "unreachable"), is_debug
+                result_payload, status in self.FAILURE_STATUSES, is_debug
             )
             host_result["_full"] = result_payload
         self._current_task["hosts"].append(host_result)
@@ -731,7 +738,9 @@ class CallbackModule(CallbackBase):
         # error reason. Keep this ordering if you change either call.
         self._clean_results(result._result, result._task.action)
 
-        self._add_host_result(result, "failed")
+        # An ignored failure keeps its payload but gets its own status (as in PLAY RECAP)
+        # so the task run is not reported as failed.
+        self._add_host_result(result, "ignored" if ignore_errors else "failed")
 
         if self._silent:
             return
@@ -779,7 +788,7 @@ class CallbackModule(CallbackBase):
             self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_runner_on_unreachable(self, result):
-        self._add_host_result(result, "unreachable")
+        self._add_host_result(result, "ignored" if result._task.ignore_unreachable else "unreachable")
 
         if self._silent:
             return

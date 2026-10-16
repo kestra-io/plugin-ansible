@@ -1,0 +1,10 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Allowed to fail
+      ansible.builtin.command: /bin/false
+      ignore_errors: true
+
+    - name: Next task
+      ansible.builtin.debug:
+        msg: still running
