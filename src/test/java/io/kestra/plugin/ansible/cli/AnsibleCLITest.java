@@ -1275,6 +1275,57 @@ class AnsibleCLITest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void run_rescuedFailure_keepsTaskRunSuccessAndLogsWarn() throws Exception {
+        var execute = ignoreErrorsTask("playbook-rescued.yml");
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        var runOutput = execute.run(runContext);
+        assertThat(runOutput.getExitCode(), is(0));
+
+        var tasks = runOutput.getPlaybooks().getFirst().getPlays().getFirst().getTasks();
+        assertThat(tasks.get(0).getHosts().getFirst().getStatus(), is("ignored"));
+        assertThat(((Map<String, Object>) tasks.get(0).getHosts().getFirst().getResult()).get("failed"), is(true));
+        assertThat(tasks.get(1).getHosts().getFirst().getStatus(), is("ok"));
+
+        var states = runContext.dynamicWorkerResults().stream().map(r -> r.getTaskRun().getState().getCurrent()).toList();
+        assertThat(states, is(not(empty())));
+        assertThat(states.stream().allMatch(st -> st == State.Type.SUCCESS), is(true));
+
+        TestsUtils.awaitLog(logs, l -> l.getMessage() != null && l.getMessage().startsWith("[localhost] ignored"));
+        receive.blockLast();
+        var warn = logs.stream().filter(l -> l.getMessage() != null && l.getMessage().startsWith("[localhost] ignored")).findFirst().orElseThrow();
+        assertThat(warn.getLevel(), is(Level.WARN));
+    }
+
+    @Test
+    void run_failureInsideRescue_stillFails() throws Exception {
+        var execute = ignoreErrorsTask("playbook-rescue-fails.yml");
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        assertThrows(RunnableTaskException.class, () -> execute.run(runContext));
+
+        var states = runContext.dynamicWorkerResults().stream().map(r -> r.getTaskRun().getState().getCurrent()).toList();
+        assertThat(states.stream().filter(st -> st == State.Type.FAILED).count(), is(1L));
+        assertThat(states.stream().filter(st -> st == State.Type.SUCCESS).count(), is(1L));
+    }
+
+    @Test
+    void run_rescuedAndBlockWithoutRescue_onlyRealFailureTaskRunFails() throws Exception {
+        var execute = ignoreErrorsTask("playbook-rescue-mixed.yml");
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+
+        assertThrows(RunnableTaskException.class, () -> execute.run(runContext));
+
+        var states = runContext.dynamicWorkerResults().stream().map(r -> r.getTaskRun().getState().getCurrent()).toList();
+        assertThat(states.stream().filter(st -> st == State.Type.FAILED).count(), is(1L));
+        assertThat(states.stream().filter(st -> st == State.Type.SUCCESS).count(), is(2L));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void run_withStructuredOutputs_multipleHosts() throws Exception {
         // inventory with 2 hosts
         String inventory = """

@@ -740,6 +740,9 @@ class CallbackModule(CallbackBase):
 
         # An ignored failure keeps its payload but gets its own status (as in PLAY RECAP)
         # so the task run is not reported as failed.
+        # A failure caught by block/rescue arrives with ignore_errors=False but the play carries on,
+        # so it is reported like an ignored one.
+        ignore_errors = ignore_errors or self._is_rescued(result._task)
         self._add_host_result(result, "ignored" if ignore_errors else "failed")
 
         if self._silent:
@@ -786,6 +789,26 @@ class CallbackModule(CallbackBase):
             if self._run_is_verbose(result):
                 msg += " => %s" % self._dump_host_result(result._result)
             self._display.display(msg, color=C.COLOR_SKIP)
+
+    @staticmethod
+    def _is_rescued(task):
+        """
+        True when a failure of this task is caught by an enclosing block's rescue section.
+        Walks up the parents: a task sitting in a block's `block:` list with a non-empty
+        `rescue:` is rescued. A task in a `rescue:` or `always:` list is not rescued by that
+        block, so the walk goes on to the outer block.
+        """
+        child = task
+        parent = getattr(task, "_parent", None)
+        while parent is not None:
+            if hasattr(parent, "rescue") and hasattr(parent, "always"):
+                # Ansible hands callbacks a copy of the task, so match on uuid rather than identity.
+                in_main = any(c._uuid == child._uuid for c in (parent.block or []))
+                if in_main and parent.rescue:
+                    return True
+            child = parent
+            parent = getattr(parent, "_parent", None)
+        return False
 
     @staticmethod
     def _ignores_unreachable(result):

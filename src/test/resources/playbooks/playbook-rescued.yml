@@ -1,0 +1,15 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Block with rescue
+      block:
+        - name: Fails but is rescued
+          ansible.builtin.command: /bin/false
+      rescue:
+        - name: Recovers
+          ansible.builtin.debug:
+            msg: recovered
+      always:
+        - name: Always runs
+          ansible.builtin.debug:
+            msg: done

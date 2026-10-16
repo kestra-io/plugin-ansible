@@ -564,7 +564,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Schema(
         title = "Per-host task log verbosity",
         description = """
-            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable`/`ignored` hosts, with the return code and the last 1 KB of `stderr` when present. `ignored` hosts (failures tolerated by `ignore_errors`) are logged at WARN, not ERROR. A loop task also logs one extra line per failed item, at ERROR (WARN for an ignored host), at most 50 per host and task, then a line counting the rest, whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
+            SUMMARY (default) logs one line per host: its status, plus the error reason for `failed`/`unreachable`/`ignored` hosts, with the return code and the last 1 KB of `stderr` when present. `ignored` hosts (failures tolerated by `ignore_errors` or `ignore_unreachable`, or caught by a block's `rescue` section) are logged at WARN, not ERROR. A loop task also logs one extra line per failed item, at ERROR (WARN for an ignored host), at most 50 per host and task, then a line counting the rest, whether or not `ignore_errors` is set. FULL logs the whole per-host result payload as captured in `playbooks` (truncated past a few KB); with `resultsStorage: STORE` that is the light result, and the full one is in the file at `resultsUri`.
             This changes only what is logged, never what is captured: EXPLICIT-mode redaction happens upstream in the callback, so FULL is not an escape hatch from it.
             """
     )
@@ -2048,7 +2048,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
             @Schema(
                 title = "Execution status",
-                description = "Typical values: ok, failed, skipped, unreachable, ignored (a failure tolerated by `ignore_errors` or `ignore_unreachable`).",
+                description = "Typical values: ok, failed, skipped, unreachable, ignored (a failure tolerated by `ignore_errors` or `ignore_unreachable`, or caught by a block's `rescue` section).",
                 example = "ok"
             )
             private String status;
