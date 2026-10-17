@@ -1,8 +1,13 @@
 group: io.kestra.plugin.ansible
 name: "ansible"
 title: "Ansible"
-description: "Tasks that orchestrate Ansible playbooks from Kestra flows."
-body: "Use this plugin set when you need to run Ansible automation inside Kestra with containerized runners; it supports Namespace Files or inline playbooks, injects a default ansible.cfg with the Kestra callback for structured outputs, and can expose execution logs on demand."
+description: "Tasks that orchestrate Ansible playbooks from Kestra flows using Ansible Runner or raw CLI."
+body: |
+  Use this plugin set when you need to run Ansible automation inside Kestra with containerized runners.
+  
+  **Which task to use?**
+  - Use `AnsibleRunner` for complex orchestrations. It uses `ansible-runner` to provide enterprise-grade execution environments, isolated working directories, structured JSON telemetry (status, job_events, rc), and automatic artifact archiving.
+  - Use `AnsibleCLI` to run raw `ansible-playbook` commands. It provides maximum flexibility with direct CLI arguments and supports Namespace Files, inline playbooks, and injects a custom callback for structured logs.
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"

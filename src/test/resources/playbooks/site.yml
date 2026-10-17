@@ -1,0 +1,9 @@
+---
+- name: Compliance check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Compliance ping
+      ansible.builtin.debug:
+        msg: "Compliance audit passed"
