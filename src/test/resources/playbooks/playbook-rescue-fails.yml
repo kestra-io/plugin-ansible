@@ -1,0 +1,10 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Block with rescue
+      block:
+        - name: Fails but is rescued
+          ansible.builtin.command: /bin/false
+      rescue:
+        - name: Rescue fails too
+          ansible.builtin.command: /bin/false

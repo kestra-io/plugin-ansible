@@ -1,0 +1,15 @@
+- hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_connection: ssh
+    ansible_host: 127.0.0.1
+    ansible_port: 1
+  tasks:
+    - name: Unreachable but tolerated
+      ansible.builtin.ping:
+      ignore_unreachable: true
+
+    - name: Next task
+      ansible.builtin.debug:
+        msg: still running
+      connection: local
