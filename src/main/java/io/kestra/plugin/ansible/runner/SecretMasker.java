@@ -32,7 +32,7 @@ final class SecretMasker {
     private static final int MIN_FRAGMENT_LENGTH = 4;
 
     private static final Pattern SENSITIVE_KEY = Pattern.compile(
-        "(?i).*(pass|secret|token|credential|private|api[_-]?key|access[_-]?key|auth|vault).*"
+        "(?i).*(pass|secret|token|credential|private|api[_-]?key|access[_-]?key|auth|vault|cert|key|dsn|connection[_-]?string).*"
     );
 
     private final Set<String> secrets = new LinkedHashSet<>();

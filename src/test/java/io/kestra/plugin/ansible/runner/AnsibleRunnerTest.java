@@ -24,6 +24,7 @@ import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
 
 import jakarta.inject.Inject;
+import lombok.Builder;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
 
@@ -42,9 +43,19 @@ class AnsibleRunnerTest {
     @Inject
     private StorageInterface storageInterface;
 
+    private RunContext newRunContext(Map<String, Object> vars) {
+        AnsibleRunner dummyTask = AnsibleRunner.builder().id("unit-test").type(AnsibleRunner.class.getName()).build();
+        io.kestra.core.runners.DefaultRunContext runContext = (io.kestra.core.runners.DefaultRunContext) runContextFactory.of(dummyTask, vars != null ? vars : Map.of());
+        return runContextFactory.initializer().forExecutor(runContext);
+    }
+
+    private RunContext newRunContext() {
+        return newRunContext(Map.of());
+    }
+
     @Test
     void testRunnerDirectoryContractAndExecution() throws Exception {
-        RunContext runContext = runContextFactory.of(
+        RunContext runContext = newRunContext(
             Map.of(
                 "flowVar", "testValue",
                 "secretVault", "topSecret123"
@@ -129,7 +140,7 @@ class AnsibleRunnerTest {
 
     @Test
     void testInlinePlaybookExecution() throws Exception {
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
 
         String inlineYaml = """
@@ -178,6 +189,8 @@ class AnsibleRunnerTest {
     @SuperBuilder
     @NoArgsConstructor
     public static class MockAnsibleTaskRunner extends TaskRunner<TaskRunnerDetailResult> {
+        @Builder.Default
+        protected String type = MockAnsibleTaskRunner.class.getName();
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {

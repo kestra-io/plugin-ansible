@@ -11,6 +11,7 @@ import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.utils.IdUtils;
+import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.utils.ArchiveUtils;
@@ -102,7 +103,7 @@ class AnsibleRunnerSecurityTest {
             .taskRunner(new MockRunnerMissingStatus())
             .build();
 
-        RunContext runContext = runContextFactory.of();
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, java.util.Map.of());
         RuntimeException e = assertThrows(RuntimeException.class, () -> task.run(runContext));
         assertThat(e.getMessage(), containsString("failed"));
     }
@@ -165,7 +166,6 @@ class AnsibleRunnerSecurityTest {
 
     @Test
     void testSelectiveTaskRunnerTelemetrySync() throws Exception {
-        RunContext runContext = runContextFactory.of();
         io.kestra.core.models.tasks.runners.TaskRunner<?> selectiveRunner = new SelectiveMockRunner();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -176,6 +176,8 @@ class AnsibleRunnerSecurityTest {
             .inventory(Inventory.builder().inline(Property.of("localhost ansible_connection=local\n")).build())
             .build();
 
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, task, java.util.Map.of());
+
         AnsibleRunner.Output output = task.run(runContext);
         org.junit.jupiter.api.Assertions.assertNotNull(output);
         org.junit.jupiter.api.Assertions.assertEquals("successful", output.getStatus());
@@ -184,6 +186,11 @@ class AnsibleRunnerSecurityTest {
     }
 
     public static class SelectiveMockRunner extends io.kestra.core.models.tasks.runners.TaskRunner<io.kestra.core.models.tasks.runners.TaskRunnerDetailResult> {
+        public SelectiveMockRunner() {
+            super();
+            this.type = SelectiveMockRunner.class.getName();
+        }
+
         @Override
         public io.kestra.core.models.tasks.runners.TaskRunnerResult<io.kestra.core.models.tasks.runners.TaskRunnerDetailResult> run(
             RunContext runContext,
@@ -211,6 +218,7 @@ class AnsibleRunnerSecurityTest {
     public static class MockRunnerMissingStatus extends io.kestra.core.models.tasks.runners.TaskRunner<io.kestra.core.models.tasks.runners.TaskRunnerDetailResult> {
         public MockRunnerMissingStatus() {
             super();
+            this.type = MockRunnerMissingStatus.class.getName();
         }
 
         @Override

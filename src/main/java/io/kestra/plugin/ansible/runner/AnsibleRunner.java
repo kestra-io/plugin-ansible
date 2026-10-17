@@ -43,7 +43,6 @@ import io.kestra.core.models.tasks.OutputFilesInterface;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.runners.TaskRunner;
-import io.kestra.core.runners.DefaultRunContext;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
@@ -367,17 +366,6 @@ public class AnsibleRunner extends Task implements
 
     @Override
     public Output run(RunContext runContext) throws Exception {
-        if (runContext instanceof DefaultRunContext drc) {
-            try {
-                java.lang.reflect.Method initMethod = DefaultRunContext.class.getDeclaredMethod("init", io.micronaut.context.ApplicationContext.class);
-                initMethod.setAccessible(true);
-                Object appCtx = drc.getApplicationContext();
-                if (appCtx != null) {
-                    initMethod.invoke(drc, appCtx);
-                }
-            } catch (Exception ignored) {
-            }
-        }
         Path workingDir = runContext.workingDir().path();
         AnsibleRunnerLogConsumer logConsumer = null;
         Path logSpoolFile = Files.createTempFile("ansible-runner-log-tmp-", ".log");
@@ -605,13 +593,20 @@ public class AnsibleRunner extends Task implements
                 .summary(shouldOutputSummary ? telemetry.summary : null)
                 .build();
 
-            // Check output size against maxOutputsSize after storing results
+            // Check output size against maxOutputsSize after storing results; truncate stats and failedHosts to preserve URIs
             long maxSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
             byte[] outputBytes = JacksonMapper.ofJson().writeValueAsBytes(output);
             if (outputBytes.length > maxSize) {
-                runContext.logger()
-                    .error("Ansible task output exceeds configured maxOutputsSize of {} bytes. Results: {}, Artifacts: {}, Logs: {}", maxSize, resultsUri, artifactsUri, logFileUri);
-                throw new IllegalStateException("Ansible task output exceeds the configured maxOutputsSize of " + maxSize + " bytes.");
+                runContext.logger().warn(
+                    "Ansible task output ({} bytes) exceeds configured maxOutputsSize of {} bytes. " +
+                        "Truncating inline failedHosts and stats to fit limit and preserve resultsUri, artifactsUri, and outputLogFile. " +
+                        "Complete details remain stored in {}",
+                    outputBytes.length, maxSize, resultsUri
+                );
+                output = output.toBuilder()
+                    .failedHosts(List.of())
+                    .stats(Map.of())
+                    .build();
             }
 
             boolean failTask = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
@@ -1035,12 +1030,7 @@ public class AnsibleRunner extends Task implements
         if (rawPasswords == null || rawPasswords.isEmpty()) {
             return Map.of();
         }
-        Map<String, String> rendered = new HashMap<>();
-        for (Map.Entry<String, String> entry : rawPasswords.entrySet()) {
-            String val = entry.getValue() != null ? runContext.render(entry.getValue()) : null;
-            rendered.put(entry.getKey(), val);
-        }
-        return Map.copyOf(rendered);
+        return Map.copyOf(rawPasswords);
     }
 
     private void populateEnvDir(RunContext runContext, Path envDir, Map<String, String> renderedPasswords) throws Exception {
@@ -1331,7 +1321,7 @@ public class AnsibleRunner extends Task implements
         List<Map<String, Object>> failedTasks) {
     }
 
-    @Builder
+    @Builder(toBuilder = true)
     @Getter
     public static class Output implements io.kestra.core.models.tasks.Output {
         @Schema(

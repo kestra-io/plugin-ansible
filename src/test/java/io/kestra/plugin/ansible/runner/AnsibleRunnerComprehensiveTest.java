@@ -113,10 +113,20 @@ public class AnsibleRunnerComprehensiveTest {
         return "\"" + val.replace("\"", "\"\"") + "\"";
     }
 
+    private RunContext newRunContext(Map<String, Object> vars) {
+        AnsibleRunner dummyTask = AnsibleRunner.builder().id("unit-test").type(AnsibleRunner.class.getName()).build();
+        io.kestra.core.runners.DefaultRunContext runContext = (io.kestra.core.runners.DefaultRunContext) runContextFactory.of(dummyTask, vars != null ? vars : Map.of());
+        return runContextFactory.initializer().forExecutor(runContext);
+    }
+
+    private RunContext newRunContext() {
+        return newRunContext(Map.of());
+    }
+
     @Test
     void test01_InlinePlaybookBasic() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         String inlineYaml = """
@@ -165,7 +175,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test02_InlinePlaybookLeadingHyphensSanitization() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         String inlineYamlWithTypo = """
@@ -209,7 +219,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test03_ProjectZipArchiveStorage() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         // Create in-memory zip archive containing a playbook
@@ -264,7 +274,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test04_ProjectTarGzArchiveStorage() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         // Create in-memory tar.gz archive
@@ -319,7 +329,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test05_NamespaceFilesRolesTemplatesScriptsStructure() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
         Path workingDir = runContext.workingDir().path();
 
@@ -379,7 +389,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test06_InventoryInlineExecution() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         String inv = "db-primary ansible_host=10.0.1.50\ndb-replica ansible_host=10.0.1.51\n";
@@ -419,7 +429,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test07_InventoryStorageFile() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         Path tempInv = Files.createTempFile("hosts", ".ini");
@@ -460,7 +470,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test08_InventoryJsonDynamic() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         String jsonInv = """
@@ -512,7 +522,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test09_CheckModeAndDiff() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -550,7 +560,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test10_LimitAndTags() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -590,7 +600,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test11_VerbosityAndForks() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -628,7 +638,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test12_ExtraVarsSerialization() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         Map<String, Object> vars = Map.of(
@@ -676,7 +686,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test13_EnvVarsExport() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         Map<String, String> envs = Map.of(
@@ -722,14 +732,14 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test14_DynamicPasswordsSecrets() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of("secretVault", "vaultSuperSecret999"));
+        RunContext runContext = newRunContext(Map.of("secretVault", "vaultSuperSecret999"));
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
             .env(
                 RunnerEnv.builder()
-                    .passwords(Property.ofValue(Map.of("vault_password", "{{ secretVault }}")))
+                    .passwords(Property.ofExpression("{\"vault_password\": \"{{ secretVault }}\"}"))
                     .build()
             )
             .project(
@@ -763,7 +773,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test15_SshKeyPermissions() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         String key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA...\n-----END OPENSSH PRIVATE KEY-----\n";
@@ -811,7 +821,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test16_TimeoutSettings() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -850,7 +860,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test17_TelemetryFailureExtraction() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder()
             .simulateFailure(true)
             .build();
@@ -892,7 +902,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test18_FailOnErrorsExceptionThrow() {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder()
             .simulateFailure(true)
             .build();
@@ -928,7 +938,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test19_ArtifactsZipPackagingAndBlobStorage() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -968,7 +978,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test20_AutoCleanArtifactsPurge() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -1003,7 +1013,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test21_SimplifiedPlaybookAndInventoryPathResolution() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         // Create playbook and inventory directly in working directory (emulating namespaceFiles sync)
@@ -1051,7 +1061,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test22_StructuredHostsMapInventory() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         Map<String, Object> hosts = Map.of(
@@ -1093,7 +1103,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test23_StructuredGroupsMapInventory() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         Map<String, Object> groups = Map.of(
@@ -1137,7 +1147,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test24_MultipleInventorySources() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         Path src1 = runContext.workingDir().path().resolve("inv1.ini");
@@ -1176,7 +1186,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test25_OutputLogFileGenerationAndUpload() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -1215,7 +1225,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test26_StreamLogsAndLogsModeSummary() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -1248,9 +1258,9 @@ public class AnsibleRunnerComprehensiveTest {
     }
 
     @Test
-    void test27_MaxOutputsSizeValidation() {
+    void test27_MaxOutputsSizeValidation() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -1268,22 +1278,25 @@ public class AnsibleRunnerComprehensiveTest {
             )
             .build();
 
-        Exception thrown = assertThrows(IllegalStateException.class, () -> task.run(runContext));
+        AnsibleRunner.Output output = task.run(runContext);
         long dur = System.currentTimeMillis() - start;
 
-        assertThat(thrown.getMessage(), containsString("maxOutputsSize"));
+        assertNotNull(output);
+        assertNotNull(output.getResultsUri(), "resultsUri must be preserved even when maxOutputsSize is exceeded");
+        assertTrue(output.getStats().isEmpty(), "stats must be truncated when maxOutputsSize is exceeded");
+        assertTrue(output.getFailedHosts().isEmpty(), "failedHosts must be truncated when maxOutputsSize is exceeded");
 
         recordResult(
             "TC27", "Execution Guards", "maxOutputsSize guard against queue payload overflow",
-            "maxOutputsSize=5 bytes", "IllegalStateException thrown when telemetry exceeds limit",
-            "PASS", 0, dur, "Verified output payload size ceiling enforcement"
+            "maxOutputsSize=5 bytes", "Inline stats and failedHosts truncated while preserving resultsUri",
+            "PASS", 0, dur, "Verified output payload size ceiling enforcement without discarding resultsUri"
         );
     }
 
     @Test
     void test28_ConsolidatedResultsJsonStorage() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -1323,7 +1336,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test29_AutoInstallGalaxyAndPythonRequirements() throws Exception {
         long start = System.currentTimeMillis();
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
         AnsibleRunner task = AnsibleRunner.builder()
@@ -1367,7 +1380,7 @@ public class AnsibleRunnerComprehensiveTest {
         );
 
         for (Map.Entry<Integer, String> entry : expectedFlags.entrySet()) {
-            RunContext runContext = runContextFactory.of(Map.of());
+            RunContext runContext = newRunContext();
             TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
 
             AnsibleRunner task = AnsibleRunner.builder()
@@ -1399,7 +1412,7 @@ public class AnsibleRunnerComprehensiveTest {
         }
 
         // Test verbosity = 0 (no -v flag written)
-        RunContext runContextZero = runContextFactory.of(Map.of());
+        RunContext runContextZero = newRunContext();
         TaskRunner<?> runnerZero = ComprehensiveMockRunner.builder().build();
         AnsibleRunner taskZero = AnsibleRunner.builder()
             .taskRunner(runnerZero)
@@ -1426,7 +1439,7 @@ public class AnsibleRunnerComprehensiveTest {
 
     @Test
     void test31_LargeLogVolumeIsCappedButFullyCaptured() throws Exception {
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         Path spool = runContext.workingDir().path().resolve("big.log");
         int total = 50_000;
 
@@ -1452,7 +1465,7 @@ public class AnsibleRunnerComprehensiveTest {
 
     @Test
     void test32_SummaryModeDropsPerItemOkLines() throws Exception {
-        RunContext runContext = runContextFactory.of(Map.of());
+        RunContext runContext = newRunContext();
         Path spool = runContext.workingDir().path().resolve("summary.log");
 
         AnsibleRunnerLogConsumer consumer = new AnsibleRunnerLogConsumer(
@@ -1478,6 +1491,8 @@ public class AnsibleRunnerComprehensiveTest {
     @SuperBuilder
     @NoArgsConstructor
     public static class ComprehensiveMockRunner extends TaskRunner<TaskRunnerDetailResult> {
+        @Builder.Default
+        protected String type = ComprehensiveMockRunner.class.getName();
 
         @Builder.Default
         private boolean simulateFailure = false;
