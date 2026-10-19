@@ -16,7 +16,7 @@ public class RunnerEnv {
 
     @Schema(
         title = "Extra variables passed as JSON to /runner/env/extravars",
-        description = "Arbitrary variables passed to Ansible as extra variables. Note: values under keys matching sensitive patterns (pass, token, secret, credential, private, key, auth, vault, dsn) are automatically masked in logs, telemetry, and artifacts; for sensitive credentials, passing them via `passwords` is strongly recommended."
+        description = "Arbitrary variables passed to Ansible as extra variables. Note: values under keys matching sensitive patterns (pass, secret, token, credential, private, api_key, access_key, ssh_key, cert_pass, auth, vault, dsn, connection_string) are automatically masked in logs, telemetry, and artifacts; for sensitive credentials, passing them via `passwords` is strongly recommended."
     )
     private Property<Map<String, Object>> extraVars;
 

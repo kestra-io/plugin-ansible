@@ -51,4 +51,12 @@ class SecretMaskerTest {
         String sampleLog = "Port 8080 and pin 123";
         assertThat(masker.mask(sampleLog), is(sampleLog));
     }
+
+    @Test
+    void testMasksLongNumericSecret() {
+        var masker = new SecretMasker();
+        masker.addSensitiveValues(Map.of("vault_password", 84736251, "api_key_port", 8080));
+
+        assertThat(masker.mask("pwd 84736251 port 8080"), is("pwd *** port 8080"));
+    }
 }

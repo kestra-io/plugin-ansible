@@ -30,6 +30,7 @@ final class SecretMasker {
     // Lines of a multi-line secret (an SSH key) shorter than this carry no usable key material
     // and would mask unrelated text.
     private static final int MIN_FRAGMENT_LENGTH = 4;
+    private static final int MIN_NUMERIC_LENGTH = 6;
 
     private static final Pattern SENSITIVE_KEY = Pattern.compile(
         "(?i).*(pass|secret|token|credential|private|api[_-]?key|access[_-]?key|ssh[_-]?key|cert[_-]?pass|auth|vault|dsn|connection[_-]?string).*"
@@ -137,10 +138,15 @@ final class SecretMasker {
             map.values().forEach(this::addAllLeaves);
         } else if (value instanceof List<?> list) {
             list.forEach(this::addAllLeaves);
-        } else if (value instanceof Boolean || value instanceof Number) {
+        } else if (value instanceof Boolean) {
             return;
+        } else if (value instanceof Number number) {
+            var digits = number.toString();
+            if (digits.length() >= MIN_NUMERIC_LENGTH) {
+                add(digits);
+            }
         } else if (value != null) {
-            String str = value.toString().strip();
+            var str = value.toString().strip();
             if ("true".equalsIgnoreCase(str) || "false".equalsIgnoreCase(str) || str.length() < MIN_FRAGMENT_LENGTH) {
                 return;
             }

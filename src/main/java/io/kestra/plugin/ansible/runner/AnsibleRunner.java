@@ -20,7 +20,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -356,16 +355,23 @@ public class AnsibleRunner extends Task implements
     }
 
     @Override
+    public void kill() {
+        if (this.taskRunner != null) {
+            this.taskRunner.kill();
+        }
+    }
+
+    @Override
     public Output run(RunContext runContext) throws Exception {
-        Path workingDir = runContext.workingDir().path();
+        var workingDir = runContext.workingDir().path();
         AnsibleRunnerLogConsumer logConsumer = null;
-        Path logSpoolFile = Files.createTempFile("ansible-runner-log-tmp-", ".log");
+        var logSpoolFile = Files.createTempFile("ansible-runner-log-tmp-", ".log");
         try {
-            Path runnerDir = workingDir.resolve("runner");
-            Path projectDir = runnerDir.resolve("project");
-            Path inventoryDir = runnerDir.resolve("inventory");
-            Path envDir = runnerDir.resolve("env");
-            Path artifactsBaseDir = runnerDir.resolve("artifacts");
+            var runnerDir = workingDir.resolve("runner");
+            var projectDir = runnerDir.resolve("project");
+            var inventoryDir = runnerDir.resolve("inventory");
+            var envDir = runnerDir.resolve("env");
+            var artifactsBaseDir = runnerDir.resolve("artifacts");
 
             Files.createDirectories(projectDir);
             Files.createDirectories(inventoryDir);
@@ -397,10 +403,10 @@ public class AnsibleRunner extends Task implements
                     + "; __rc=$?; if [ -f ./runner/artifacts/" + ident + "/rc ]; then if [ $__rc -eq 2 ] || [ $__rc -eq 4 ]; then exit 0; fi; fi; exit $__rc"
             );
 
-            var shouldStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(true);
-            var resolvedLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.FULL);
-            var shouldOutputLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
-            var resolvedMaxLogLines = runContext.render(this.maxLogLines).as(Long.class).orElse(DEFAULT_MAX_LOG_LINES);
+            var rStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(true);
+            var rLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.FULL);
+            var rOutputLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
+            var rMaxLogLines = runContext.render(this.maxLogLines).as(Long.class).orElse(DEFAULT_MAX_LOG_LINES);
 
             // Full raw output is always spooled to disk (never kept in memory) so it can be uploaded without loss.
             // It lives in the system temp directory outside the container working directory to prevent Docker volume mount collisions.
@@ -414,9 +420,9 @@ public class AnsibleRunner extends Task implements
             var secretMasker = new SecretMasker();
             if (this.env != null) {
                 if (this.env.getSshKey() != null) {
-                    var k = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
-                    if (k != null && !k.isBlank()) {
-                        secretMasker.add(k);
+                    var rSshKey = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
+                    if (rSshKey != null && !rSshKey.isBlank()) {
+                        secretMasker.add(rSshKey);
                     }
                 }
                 if (rPasswords != null && !rPasswords.isEmpty()) {
@@ -427,21 +433,21 @@ public class AnsibleRunner extends Task implements
                     }
                 }
                 if (this.env.getExtraVars() != null) {
-                    var ev = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
-                    secretMasker.addSensitiveValues(ev);
+                    var rExtraVars = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
+                    secretMasker.addSensitiveValues(rExtraVars);
                 }
                 if (this.env.getEnvVars() != null) {
-                    var envV = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
-                    secretMasker.addSensitiveValues(envV);
+                    var rEnvVars = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
+                    secretMasker.addSensitiveValues(rEnvVars);
                 }
             }
 
             logConsumer = new AnsibleRunnerLogConsumer(
                 runContext,
-                shouldStreamLogs,
-                resolvedLogsMode,
+                rStreamLogs,
+                rLogsMode,
                 logSpoolFile,
-                resolvedMaxLogLines,
+                rMaxLogLines,
                 LOG_BATCH_SIZE,
                 secretMasker
             );
@@ -453,7 +459,6 @@ public class AnsibleRunner extends Task implements
                 .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
                 .withCommands(Property.ofValue(runnerCommand));
 
-            // Configure pre-execution dependency installations
             var preCommands = buildPreCommands(runContext, workingDir);
             if (!preCommands.isEmpty()) {
                 commandsWrapper = commandsWrapper.withBeforeCommands(Property.ofValue(preCommands));
@@ -499,14 +504,13 @@ public class AnsibleRunner extends Task implements
 
             var telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, secretMasker);
 
-            // Mask secrets inside artifacts directory before archiving
             if (Files.exists(identArtifactsDir)) {
                 secretMasker.maskTree(identArtifactsDir, runContext.logger());
             }
 
             URI resultsUri = null;
-            var shouldSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
-            if (shouldSaveResults && Files.exists(identArtifactsDir)) {
+            var rSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
+            if (rSaveResults && Files.exists(identArtifactsDir)) {
                 var consolidatedResults = new LinkedHashMap<String, Object>();
                 consolidatedResults.put("status", telemetry.status);
                 consolidatedResults.put("rc", telemetry.rc);
@@ -527,8 +531,8 @@ public class AnsibleRunner extends Task implements
 
             var zipFile = workingDir.resolve("artifacts-" + ident + ".zip");
             URI artifactsUri = null;
-            var shouldSaveArtifacts = runContext.render(this.saveArtifacts).as(Boolean.class).orElse(true);
-            if (shouldSaveArtifacts && Files.exists(identArtifactsDir)) {
+            var rSaveArtifacts = runContext.render(this.saveArtifacts).as(Boolean.class).orElse(true);
+            if (rSaveArtifacts && Files.exists(identArtifactsDir)) {
                 ArchiveUtils.zipDirectory(identArtifactsDir, zipFile);
                 artifactsUri = runContext.storage().putFile(zipFile.toFile());
             }
@@ -537,13 +541,13 @@ public class AnsibleRunner extends Task implements
                 logConsumer.close();
             }
             URI logFileUri = null;
-            if ((shouldOutputLogFile || logConsumer.wasTruncated()) && Files.exists(logSpoolFile)) {
+            if ((rOutputLogFile || logConsumer.wasTruncated()) && Files.exists(logSpoolFile)) {
                 logFileUri = runContext.storage().putFile(logSpoolFile.toFile());
             }
             Files.deleteIfExists(logSpoolFile);
 
-            var shouldClean = runContext.render(this.autoCleanArtifacts).as(Boolean.class).orElse(true);
-            if (shouldClean) {
+            var rAutoCleanArtifacts = runContext.render(this.autoCleanArtifacts).as(Boolean.class).orElse(true);
+            if (rAutoCleanArtifacts) {
                 FileUtils.deleteQuietly(artifactsBaseDir.toFile());
                 Files.deleteIfExists(zipFile);
             }
@@ -561,7 +565,7 @@ public class AnsibleRunner extends Task implements
                 }
             }
 
-            var shouldOutputSummary = runContext.render(this.outputSummary).as(Boolean.class).orElse(false);
+            var rOutputSummary = runContext.render(this.outputSummary).as(Boolean.class).orElse(false);
 
             var output = Output.builder()
                 .resultsUri(resultsUri)
@@ -571,21 +575,21 @@ public class AnsibleRunner extends Task implements
                 .status(telemetry.status)
                 .rc(telemetry.rc)
                 .failures(telemetry.summary.getFailures())
-                .changed(shouldOutputSummary ? telemetry.summary.getChanged() : null)
+                .changed(rOutputSummary ? telemetry.summary.getChanged() : null)
                 .failedHosts(telemetry.failedHosts)
                 .stats(telemetry.stats)
-                .summary(shouldOutputSummary ? telemetry.summary : null)
+                .summary(rOutputSummary ? telemetry.summary : null)
                 .build();
 
             // Check output size against maxOutputsSize after storing results; truncate stats and failedHosts to preserve URIs
-            var maxSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
+            var rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
             var outputBytes = JacksonMapper.ofJson().writeValueAsBytes(output);
-            if (outputBytes.length > maxSize) {
+            if (outputBytes.length > rMaxOutputsSize) {
                 runContext.logger().warn(
                     "Ansible task output ({} bytes) exceeds configured maxOutputsSize of {} bytes. " +
                         "Truncating inline failedHosts and stats to fit limit and preserve resultsUri, artifactsUri, and outputLogFile. " +
                         "Complete details remain stored in {}",
-                    outputBytes.length, maxSize, resultsUri
+                    outputBytes.length, rMaxOutputsSize, resultsUri
                 );
                 output = output.toBuilder()
                     .failedHosts(List.of())
@@ -593,8 +597,8 @@ public class AnsibleRunner extends Task implements
                     .build();
             }
 
-            var failTask = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
-            if (failTask && !"successful".equalsIgnoreCase(telemetry.status)) {
+            var rFailOnErrors = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
+            if (rFailOnErrors && !"successful".equalsIgnoreCase(telemetry.status)) {
                 runContext.logger().error("Ansible Runner failed. Results: {}, Artifacts: {}, Logs: {}", resultsUri, artifactsUri, logFileUri);
                 throw new IllegalStateException(
                     "Ansible Runner failed with status '" + telemetry.status + "' and exit code " + telemetry.rc +
@@ -619,14 +623,12 @@ public class AnsibleRunner extends Task implements
     private List<String> buildPreCommands(RunContext runContext, Path workingDir) throws IllegalVariableEvaluationException {
         List<String> cmds = new ArrayList<>();
 
-        // Explicit before commands from user
         if (this.beforeCommands != null) {
             cmds.addAll(runContext.render(this.beforeCommands).asList(String.class));
         }
 
-        // Auto-install Galaxy collections/roles
-        boolean autoGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
-        List<String> galaxyDeps = runContext.render(this.galaxyDependencies).asList(String.class);
+        var autoGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
+        var galaxyDeps = runContext.render(this.galaxyDependencies).asList(String.class);
         if (autoGalaxy) {
             cmds.add(
                 "if [ -f ./runner/project/requirements.yml ]; then ansible-galaxy install -r ./runner/project/requirements.yml; elif [ -f requirements.yml ]; then ansible-galaxy install -r requirements.yml; fi"
@@ -638,13 +640,12 @@ public class AnsibleRunner extends Task implements
                     throw new IllegalArgumentException("Invalid galaxy dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
             }
-            List<String> quotedGalaxyDeps = galaxyDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
+            var quotedGalaxyDeps = galaxyDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
             cmds.add("ansible-galaxy collection install " + String.join(" ", quotedGalaxyDeps));
         }
 
-        // Auto-install Python requirements
-        boolean autoPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElse(true);
-        List<String> pythonDeps = runContext.render(this.pythonDependencies).asList(String.class);
+        var autoPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElse(true);
+        var pythonDeps = runContext.render(this.pythonDependencies).asList(String.class);
         if (autoPython) {
             cmds.add(
                 "if [ -f ./runner/project/requirements.txt ]; then pip install --no-cache-dir -r ./runner/project/requirements.txt; elif [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi"
@@ -656,7 +657,7 @@ public class AnsibleRunner extends Task implements
                     throw new IllegalArgumentException("Invalid python dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
             }
-            List<String> quotedPythonDeps = pythonDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
+            var quotedPythonDeps = pythonDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
             cmds.add("pip install --no-cache-dir " + String.join(" ", quotedPythonDeps));
         }
 
@@ -698,7 +699,7 @@ public class AnsibleRunner extends Task implements
             }
 
             if (sourceStr.startsWith("kestra://")) {
-                URI sourceUri = URI.create(sourceStr);
+                var sourceUri = URI.create(sourceStr);
                 try (InputStream is = runContext.storage().getFile(sourceUri)) {
                     if (sourceStr.endsWith(".zip")) {
                         ArchiveUtils.unzip(is, projectDir);
@@ -713,8 +714,8 @@ public class AnsibleRunner extends Task implements
                     "Unsupported URI scheme for project source: " + sourceStr + ". Only kestra:// internal storage URIs or local workspace paths are supported."
                 );
             } else {
-                String relSource = sourceStr.startsWith("/") ? sourceStr.substring(1) : sourceStr;
-                Path localSource = secureResolve(workingDir, relSource);
+                var relSource = sourceStr.startsWith("/") ? sourceStr.substring(1) : sourceStr;
+                var localSource = secureResolve(workingDir, relSource);
                 if (Files.isDirectory(localSource)) {
                     FileUtils.copyDirectory(localSource.toFile(), projectDir.toFile());
                 } else if (Files.isRegularFile(localSource)) {
@@ -735,18 +736,17 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        // Auto-locate playbook in workingDir (e.g. from namespace files or current workspace)
-        Path targetPlaybook = secureResolve(projectDir, playbookName);
+        var targetPlaybook = secureResolve(projectDir, playbookName);
         if (!Files.exists(targetPlaybook)) {
-            Path directWorkingDirFile = workingDir.resolve(playbookName);
-            Path playbooksSubDirFile = workingDir.resolve("playbooks").resolve(playbookName);
+            var directWorkingDirFile = workingDir.resolve(playbookName);
+            var playbooksSubDirFile = workingDir.resolve("playbooks").resolve(playbookName);
             if (Files.exists(directWorkingDirFile)) {
                 Files.copy(directWorkingDirFile, targetPlaybook, StandardCopyOption.REPLACE_EXISTING);
             } else if (Files.exists(playbooksSubDirFile)) {
                 Files.copy(playbooksSubDirFile, targetPlaybook, StandardCopyOption.REPLACE_EXISTING);
             } else {
                 try (Stream<Path> stream = Files.walk(workingDir, 4)) {
-                    Optional<Path> found = stream
+                    var found = stream
                         .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equals(playbookName))
                         .filter(p -> !p.startsWith(projectDir))
                         .findFirst();
@@ -761,8 +761,7 @@ public class AnsibleRunner extends Task implements
             throw new IllegalArgumentException("Playbook not found: " + playbookName);
         }
 
-        // If workingDir has a playbooks directory, copy its entire contents to projectDir
-        Path playbooksDir = workingDir.resolve("playbooks");
+        var playbooksDir = workingDir.resolve("playbooks");
         if (Files.isDirectory(playbooksDir)) {
             try {
                 FileUtils.copyDirectory(playbooksDir.toFile(), projectDir.toFile());
@@ -771,28 +770,27 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        // Support standard Ansible project directories and files from workingDir into runner/project/
-        List<String> standardDirs = List.of(
+        var standardDirs = List.of(
             "roles", "templates", "scripts", "group_vars", "host_vars",
             "library", "lookup_plugins", "filter_plugins", "callback_plugins",
             "module_utils", "collections"
         );
         for (String dirName : standardDirs) {
-            Path srcDir = workingDir.resolve(dirName);
-            Path destDir = projectDir.resolve(dirName);
+            var srcDir = workingDir.resolve(dirName);
+            var destDir = projectDir.resolve(dirName);
             if (Files.isDirectory(srcDir) && !Files.exists(destDir)) {
                 FileUtils.copyDirectory(srcDir.toFile(), destDir.toFile());
             }
         }
 
-        Path ansibleCfg = workingDir.resolve("ansible.cfg");
+        var ansibleCfg = workingDir.resolve("ansible.cfg");
         if (Files.exists(ansibleCfg) && !Files.exists(projectDir.resolve("ansible.cfg"))) {
             Files.copy(ansibleCfg, projectDir.resolve("ansible.cfg"), StandardCopyOption.REPLACE_EXISTING);
         }
     }
 
     private void writePlaybookContent(Path projectDir, String playbookName, String content) throws IOException {
-        String sanitized = content.trim();
+        var sanitized = content.trim();
         if (sanitized.startsWith("{") && sanitized.endsWith("}")) {
             try {
                 Map<String, Object> map = JacksonMapper.ofJson().readValue(
@@ -802,11 +800,11 @@ public class AnsibleRunner extends Task implements
                 );
                 if (!map.isEmpty() && map.keySet().stream().anyMatch(k -> k.endsWith(".yml") || k.endsWith(".yaml") || k.contains("/"))) {
                     for (Map.Entry<String, Object> entry : map.entrySet()) {
-                        Path target = secureResolve(projectDir, entry.getKey());
+                        var target = secureResolve(projectDir, entry.getKey());
                         if (target.getParent() != null) {
                             Files.createDirectories(target.getParent());
                         }
-                        String fileVal = entry.getValue() != null ? entry.getValue().toString() : "";
+                        var fileVal = entry.getValue() != null ? entry.getValue().toString() : "";
                         writePlaybookContent(target.getParent() != null ? target.getParent() : projectDir, target.getFileName().toString(), fileVal);
                     }
                     return;
@@ -956,7 +954,7 @@ public class AnsibleRunner extends Task implements
                 runContext.logger().warn("Failed to auto-detect inventory directory: {}", e.getMessage());
             }
         }
-        Path inventoriesFolder = workingDir.resolve("inventories");
+        var inventoriesFolder = workingDir.resolve("inventories");
         if (Files.isDirectory(inventoriesFolder)) {
             try {
                 FileUtils.copyDirectory(inventoriesFolder.toFile(), inventoryDir.toFile());
@@ -971,24 +969,23 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        List<String> candidateInvs = List.of(
+        var candidateInvs = List.of(
             "inventory/hosts.ini", "inventory/hosts", "inventory/hosts.yml", "inventory/hosts.yaml",
             "hosts.ini", "hosts", "hosts.yml", "hosts.yaml", "inventory.ini"
         );
         for (String cand : candidateInvs) {
-            Path candPath = secureResolve(workingDir, cand);
+            var candPath = secureResolve(workingDir, cand);
             if (Files.isRegularFile(candPath)) {
                 Files.copy(candPath, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 return;
             }
         }
 
-        // No default inventory fallback. Ansible will fail if none provided and not implicit.
     }
 
     private void makeExecutable(Path path) {
         try {
-            Set<PosixFilePermission> perms = Files.getPosixFilePermissions(path);
+            var perms = Files.getPosixFilePermissions(path);
             perms.add(PosixFilePermission.OWNER_EXECUTE);
             perms.add(PosixFilePermission.GROUP_EXECUTE);
             perms.add(PosixFilePermission.OTHERS_EXECUTE);
@@ -1134,8 +1131,7 @@ public class AnsibleRunner extends Task implements
         }
 
         if (Files.exists(identArtifactsDir)) {
-            // Read status
-            Path statusFile = identArtifactsDir.resolve("status");
+            var statusFile = identArtifactsDir.resolve("status");
             if (Files.exists(statusFile)) {
                 try {
                     status = Files.readString(statusFile, StandardCharsets.UTF_8).trim();
@@ -1144,8 +1140,7 @@ public class AnsibleRunner extends Task implements
                 }
             }
 
-            // Read rc
-            Path rcFile = identArtifactsDir.resolve("rc");
+            var rcFile = identArtifactsDir.resolve("rc");
             if (Files.exists(rcFile)) {
                 try {
                     rc = Integer.parseInt(Files.readString(rcFile, StandardCharsets.UTF_8).trim());
@@ -1154,11 +1149,10 @@ public class AnsibleRunner extends Task implements
                 }
             }
 
-            // Read job_events
-            Path jobEventsDir = identArtifactsDir.resolve("job_events");
+            var jobEventsDir = identArtifactsDir.resolve("job_events");
             if (Files.isDirectory(jobEventsDir)) {
                 try (Stream<Path> stream = Files.list(jobEventsDir)) {
-                    List<Path> eventFiles = stream
+                    var eventFiles = stream
                         .filter(p -> p.toString().endsWith(".json"))
                         .sorted(Comparator.comparing(Path::getFileName))
                         .toList();
@@ -1166,12 +1160,12 @@ public class AnsibleRunner extends Task implements
                     for (Path eventFile : eventFiles) {
                         try {
                             JsonNode root = JacksonMapper.ofJson().readTree(eventFile.toFile());
-                            String event = root.path("event").asText("");
+                            var event = root.path("event").asText("");
                             JsonNode eventData = root.path("event_data");
 
-                            String host = eventData.path("remote_addr").asText(eventData.path("host").asText(""));
-                            String taskName = eventData.path("task").asText("");
-                            String playName = eventData.path("play").asText("");
+                            var host = eventData.path("remote_addr").asText(eventData.path("host").asText(""));
+                            var taskName = eventData.path("task").asText("");
+                            var playName = eventData.path("play").asText("");
 
                             if ("runner_on_failed".equals(event) || "runner_on_unreachable".equals(event)) {
                                 if (!host.isBlank()) {
@@ -1183,7 +1177,7 @@ public class AnsibleRunner extends Task implements
                                 failedTask.put("task", taskName);
                                 failedTask.put("play", playName);
                                 failedTask.put("event", event);
-                                String msg = eventData.path("res").path("msg").asText("");
+                                var msg = eventData.path("res").path("msg").asText("");
                                 if (!msg.isBlank()) {
                                     if (secretMasker != null) {
                                         msg = secretMasker.mask(msg);
@@ -1201,11 +1195,11 @@ public class AnsibleRunner extends Task implements
                                 JsonNode unreachableNode = eventData.path("dark");
                                 JsonNode skippedNode = eventData.path("skipped");
 
-                                int totChanged = sumJsonNode(changedNode);
-                                int totFailures = sumJsonNode(failuresNode);
-                                int totOk = sumJsonNode(okNode);
-                                int totUnreachable = sumJsonNode(unreachableNode);
-                                int totSkipped = sumJsonNode(skippedNode);
+                                var totChanged = sumJsonNode(changedNode);
+                                var totFailures = sumJsonNode(failuresNode);
+                                var totOk = sumJsonNode(okNode);
+                                var totUnreachable = sumJsonNode(unreachableNode);
+                                var totSkipped = sumJsonNode(skippedNode);
 
                                 summaryBuilder
                                     .changed(totChanged)
@@ -1257,7 +1251,7 @@ public class AnsibleRunner extends Task implements
     }
 
     private Path secureResolve(Path base, String userPath) {
-        Path resolved = base.resolve(userPath).normalize();
+        var resolved = base.resolve(userPath).normalize();
         if (!resolved.startsWith(base.normalize())) {
             throw new IllegalArgumentException("Path traversal blocked: " + userPath + " escapes the base directory.");
         }

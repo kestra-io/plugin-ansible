@@ -52,7 +52,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Inject
     private StorageInterface storageInterface;
 
-    private static final List<TestRecord> testRecords = Collections.synchronizedList(new ArrayList<>());
+    private static final List<TestRecord> testRecords = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     @Data
     @Builder
