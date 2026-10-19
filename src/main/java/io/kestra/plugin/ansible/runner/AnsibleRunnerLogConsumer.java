@@ -98,12 +98,12 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         if (rawLine == null) {
             return;
         }
-        boolean stderr = Boolean.TRUE.equals(isStdErr);
-        String line = masker.mask(rawLine);
+        var stderr = Boolean.TRUE.equals(isStdErr);
+        var line = masker.mask(rawLine);
 
         // Core parses outputs and metrics from marker lines without logging them; every other line is
         // logged only through the batched path below
-        String unterminated = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
+        var unterminated = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
         if (KESTRA_MARKER.matcher(unterminated).matches()) {
             super.accept(unterminated, stderr, instant);
             return;
@@ -122,7 +122,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         totalLines++;
 
         // Filter out raw event JSON telemetry dumps to satisfy the Tri-Layer Architecture requirement
-        String trimmed = line.trim();
+        var trimmed = line.trim();
         if (
             (trimmed.startsWith("{") && trimmed.endsWith("}")) &&
                 (trimmed.contains("\"event\"") || trimmed.contains("\"uuid\"") || trimmed.contains("\"counter\""))
@@ -134,7 +134,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
             return;
         }
 
-        boolean critical = isCriticalLine(trimmed, stderr);
+        var critical = isCriticalLine(trimmed, stderr);
 
         if (logsMode == LogsMode.SUMMARY && !isSummaryLine(trimmed, stderr)) {
             suppressedLines++;
@@ -191,7 +191,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         if (batchLines == 0) {
             return;
         }
-        String message = batch.toString();
+        var message = batch.toString();
         batch.setLength(0);
         batchLines = 0;
         if (batchIsStdErr) {

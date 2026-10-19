@@ -39,7 +39,7 @@ public class ArchiveUtils {
                         System.err.println("Warning: Skipping symlink in archive: " + file);
                         return FileVisitResult.CONTINUE;
                     }
-                    String relativePath = sourceDir.relativize(file).toString().replace("\\", "/");
+                    var relativePath = sourceDir.relativize(file).toString().replace("\\", "/");
                     ZipEntry zipEntry = new ZipEntry(relativePath);
                     zos.putNextEntry(zipEntry);
                     Files.copy(file, zos);
@@ -50,7 +50,7 @@ public class ArchiveUtils {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                     if (!sourceDir.equals(dir)) {
-                        String relativePath = sourceDir.relativize(dir).toString().replace("\\", "/") + "/";
+                        var relativePath = sourceDir.relativize(dir).toString().replace("\\", "/") + "/";
                         zos.putNextEntry(new ZipEntry(relativePath));
                         zos.closeEntry();
                     }
@@ -76,7 +76,7 @@ public class ArchiveUtils {
                 if (entryCount > MAX_ENTRIES) {
                     throw new IOException("Archive contains too many entries (exceeds " + MAX_ENTRIES + ").");
                 }
-                Path resolvedPath = targetDir.normalize().resolve(entry.getName()).normalize();
+                var resolvedPath = targetDir.normalize().resolve(entry.getName()).normalize();
                 if (!resolvedPath.startsWith(targetDir.normalize())) {
                     throw new IOException("Zip slip security exception: " + entry.getName());
                 }
@@ -127,7 +127,7 @@ public class ArchiveUtils {
                     continue;
                 }
 
-                Path resolvedPath = targetDir.normalize().resolve(entry.getName()).normalize();
+                var resolvedPath = targetDir.normalize().resolve(entry.getName()).normalize();
                 if (!resolvedPath.startsWith(targetDir.normalize())) {
                     throw new IOException("Tar slip security exception: " + entry.getName());
                 }

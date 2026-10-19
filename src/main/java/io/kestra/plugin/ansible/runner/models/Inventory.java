@@ -63,7 +63,7 @@ public class Inventory {
         if (value == null) {
             return null;
         }
-        String trimmed = value.trim();
+        var trimmed = value.trim();
         if (trimmed.contains("\n") || trimmed.startsWith("[") || trimmed.startsWith("---") || trimmed.contains("=") || trimmed.contains(" ")) {
             return Inventory.builder().content(Property.ofValue(value)).build();
         }

@@ -43,7 +43,7 @@ public class Project {
         if (value == null) {
             return null;
         }
-        String trimmed = value.trim();
+        var trimmed = value.trim();
         if (trimmed.contains("\n") || trimmed.startsWith("---") || trimmed.startsWith("- ")) {
             return Project.builder().content(Property.ofValue(value)).build();
         } else if (trimmed.endsWith(".zip") || trimmed.endsWith(".tar.gz") || trimmed.endsWith(".tgz") || trimmed.startsWith("kestra://")) {

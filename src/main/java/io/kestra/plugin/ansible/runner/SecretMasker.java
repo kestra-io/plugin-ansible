@@ -47,7 +47,7 @@ final class SecretMasker {
         addToken(value.strip());
         if (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
             for (String line : value.split("\\r?\\n|\\r")) {
-                String fragment = line.strip();
+                var fragment = line.strip();
                 if (fragment.length() >= MIN_FRAGMENT_LENGTH) {
                     addToken(fragment);
                 }
@@ -110,7 +110,7 @@ final class SecretMasker {
     }
 
     private void maskFile(Path file, Logger logger) throws IOException {
-        Path tmp = file.resolveSibling(file.getFileName() + ".masking");
+        var tmp = file.resolveSibling(file.getFileName() + ".masking");
         try (
             BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8);
             BufferedWriter writer = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)
@@ -160,7 +160,7 @@ final class SecretMasker {
         }
         secrets.add(token);
         // Job events are JSON, where quotes, backslashes and newlines in a secret are escaped
-        String escaped = jsonEscape(token);
+        var escaped = jsonEscape(token);
         if (!escaped.equals(token)) {
             secrets.add(escaped);
         }
@@ -168,7 +168,7 @@ final class SecretMasker {
 
     private static String jsonEscape(String token) {
         try {
-            String quoted = JacksonMapper.ofJson().writeValueAsString(token);
+            var quoted = JacksonMapper.ofJson().writeValueAsString(token);
             return quoted.substring(1, quoted.length() - 1);
         } catch (JsonProcessingException e) {
             return token;

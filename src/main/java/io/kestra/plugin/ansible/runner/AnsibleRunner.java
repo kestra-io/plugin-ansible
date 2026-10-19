@@ -627,37 +627,37 @@ public class AnsibleRunner extends Task implements
             cmds.addAll(runContext.render(this.beforeCommands).asList(String.class));
         }
 
-        var autoGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
-        var galaxyDeps = runContext.render(this.galaxyDependencies).asList(String.class);
-        if (autoGalaxy) {
+        var rAutoInstallGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
+        var rGalaxyDeps = runContext.render(this.galaxyDependencies).asList(String.class);
+        if (rAutoInstallGalaxy) {
             cmds.add(
                 "if [ -f ./runner/project/requirements.yml ]; then ansible-galaxy install -r ./runner/project/requirements.yml; elif [ -f requirements.yml ]; then ansible-galaxy install -r requirements.yml; fi"
             );
         }
-        if (!galaxyDeps.isEmpty()) {
-            for (String dep : galaxyDeps) {
+        if (!rGalaxyDeps.isEmpty()) {
+            for (String dep : rGalaxyDeps) {
                 if (!PKG_ALLOWLIST.matcher(dep).matches()) {
                     throw new IllegalArgumentException("Invalid galaxy dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
             }
-            var quotedGalaxyDeps = galaxyDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
+            var quotedGalaxyDeps = rGalaxyDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
             cmds.add("ansible-galaxy collection install " + String.join(" ", quotedGalaxyDeps));
         }
 
-        var autoPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElse(true);
-        var pythonDeps = runContext.render(this.pythonDependencies).asList(String.class);
-        if (autoPython) {
+        var rAutoInstallPython = runContext.render(this.autoInstallPythonRequirements).as(Boolean.class).orElse(true);
+        var rPythonDeps = runContext.render(this.pythonDependencies).asList(String.class);
+        if (rAutoInstallPython) {
             cmds.add(
                 "if [ -f ./runner/project/requirements.txt ]; then pip install --no-cache-dir -r ./runner/project/requirements.txt; elif [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi"
             );
         }
-        if (!pythonDeps.isEmpty()) {
-            for (String dep : pythonDeps) {
+        if (!rPythonDeps.isEmpty()) {
+            for (String dep : rPythonDeps) {
                 if (!PKG_ALLOWLIST.matcher(dep).matches()) {
                     throw new IllegalArgumentException("Invalid python dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
             }
-            var quotedPythonDeps = pythonDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
+            var quotedPythonDeps = rPythonDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
             cmds.add("pip install --no-cache-dir " + String.join(" ", quotedPythonDeps));
         }
 
@@ -1000,11 +1000,11 @@ public class AnsibleRunner extends Task implements
         if (this.env == null || this.env.getPasswords() == null) {
             return Map.of();
         }
-        Map<String, String> rawPasswords = runContext.render(this.env.getPasswords()).asMap(String.class, String.class);
-        if (rawPasswords == null || rawPasswords.isEmpty()) {
+        var rPasswords = runContext.render(this.env.getPasswords()).asMap(String.class, String.class);
+        if (rPasswords == null || rPasswords.isEmpty()) {
             return Map.of();
         }
-        return Map.copyOf(rawPasswords);
+        return Map.copyOf(rPasswords);
     }
 
     private void populateEnvDir(RunContext runContext, Path envDir, Map<String, String> rPasswords) throws Exception {
@@ -1057,16 +1057,16 @@ public class AnsibleRunner extends Task implements
         }
 
         if (this.env != null && this.env.getExtraVars() != null) {
-            var rawExtraVars = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
-            if (rawExtraVars != null && !rawExtraVars.isEmpty()) {
-                Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(rawExtraVars), StandardCharsets.UTF_8);
+            var rExtraVarsMap = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
+            if (rExtraVarsMap != null && !rExtraVarsMap.isEmpty()) {
+                Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(rExtraVarsMap), StandardCharsets.UTF_8);
             }
         }
 
         if (this.env != null && this.env.getEnvVars() != null) {
-            var rawEnvVars = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
-            if (rawEnvVars != null && !rawEnvVars.isEmpty()) {
-                Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rawEnvVars), StandardCharsets.UTF_8);
+            var rEnvVarsMap = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
+            if (rEnvVarsMap != null && !rEnvVarsMap.isEmpty()) {
+                Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rEnvVarsMap), StandardCharsets.UTF_8);
             }
         }
 
@@ -1075,14 +1075,14 @@ public class AnsibleRunner extends Task implements
         }
 
         // Written with secure 0600 POSIX permissions to protect private key
-        String rawKey = null;
+        String rSshKeyValue = null;
         if (this.env != null && this.env.getSshKey() != null) {
-            rawKey = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
+            rSshKeyValue = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
         }
 
-        if (rawKey != null && !rawKey.isBlank()) {
+        if (rSshKeyValue != null && !rSshKeyValue.isBlank()) {
             var sshKeyPath = envDir.resolve("ssh_key");
-            Files.writeString(sshKeyPath, rawKey.trim() + "\n", StandardCharsets.UTF_8);
+            Files.writeString(sshKeyPath, rSshKeyValue.trim() + "\n", StandardCharsets.UTF_8);
             try {
                 Files.setPosixFilePermissions(sshKeyPath, PosixFilePermissions.fromString("rw-------"));
             } catch (UnsupportedOperationException ignored) {
@@ -1094,15 +1094,15 @@ public class AnsibleRunner extends Task implements
 
         var settings = new HashMap<String, Object>();
         if (this.timeout != null) {
-            var dur = runContext.render(this.timeout).as(Duration.class).orElse(null);
-            if (dur != null) {
-                settings.put("job_timeout", dur.toSeconds());
+            var rDuration = runContext.render(this.timeout).as(Duration.class).orElse(null);
+            if (rDuration != null) {
+                settings.put("job_timeout", rDuration.toSeconds());
             }
         }
         if (this.idleTimeout != null) {
-            var dur = runContext.render(this.idleTimeout).as(Duration.class).orElse(null);
-            if (dur != null) {
-                settings.put("idle_timeout", dur.toSeconds());
+            var rDuration = runContext.render(this.idleTimeout).as(Duration.class).orElse(null);
+            if (rDuration != null) {
+                settings.put("idle_timeout", rDuration.toSeconds());
             }
         }
         if (!settings.isEmpty()) {
@@ -1159,9 +1159,9 @@ public class AnsibleRunner extends Task implements
 
                     for (Path eventFile : eventFiles) {
                         try {
-                            JsonNode root = JacksonMapper.ofJson().readTree(eventFile.toFile());
+                            var root = JacksonMapper.ofJson().readTree(eventFile.toFile());
                             var event = root.path("event").asText("");
-                            JsonNode eventData = root.path("event_data");
+                            var eventData = root.path("event_data");
 
                             var host = eventData.path("remote_addr").asText(eventData.path("host").asText(""));
                             var taskName = eventData.path("task").asText("");
@@ -1189,11 +1189,11 @@ public class AnsibleRunner extends Task implements
                             }
 
                             if ("playbook_on_stats".equals(event)) {
-                                JsonNode changedNode = eventData.path("changed");
-                                JsonNode failuresNode = eventData.path("failures");
-                                JsonNode okNode = eventData.path("ok");
-                                JsonNode unreachableNode = eventData.path("dark");
-                                JsonNode skippedNode = eventData.path("skipped");
+                                var changedNode = eventData.path("changed");
+                                var failuresNode = eventData.path("failures");
+                                var okNode = eventData.path("ok");
+                                var unreachableNode = eventData.path("dark");
+                                var skippedNode = eventData.path("skipped");
 
                                 var totChanged = sumJsonNode(changedNode);
                                 var totFailures = sumJsonNode(failuresNode);
