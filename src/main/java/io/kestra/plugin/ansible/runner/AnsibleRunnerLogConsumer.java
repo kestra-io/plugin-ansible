@@ -70,7 +70,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
             // Make sure slow/idle output is still delivered live (every second).
             this.flusher = Executors.newSingleThreadScheduledExecutor(r ->
             {
-                Thread t = new Thread(r, "ansible-runner-log-flusher");
+                var t = new Thread(r, "ansible-runner-log-flusher");
                 t.setDaemon(true);
                 return t;
             });
@@ -86,7 +86,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
     }
 
     private static SecretMasker toMasker(List<String> secrets) {
-        SecretMasker m = new SecretMasker();
+        var m = new SecretMasker();
         if (secrets != null) {
             secrets.forEach(m::add);
         }

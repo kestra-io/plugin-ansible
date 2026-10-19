@@ -40,7 +40,7 @@ public class ArchiveUtils {
                         return FileVisitResult.CONTINUE;
                     }
                     var relativePath = sourceDir.relativize(file).toString().replace("\\", "/");
-                    ZipEntry zipEntry = new ZipEntry(relativePath);
+                    var zipEntry = new ZipEntry(relativePath);
                     zos.putNextEntry(zipEntry);
                     Files.copy(file, zos);
                     zos.closeEntry();
@@ -69,8 +69,8 @@ public class ArchiveUtils {
         Files.createDirectories(targetDir);
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(inputStream))) {
             ZipEntry entry;
-            int entryCount = 0;
-            long totalBytes = 0;
+            var entryCount = 0;
+            var totalBytes = 0L;
             while ((entry = zis.getNextEntry()) != null) {
                 entryCount++;
                 if (entryCount > MAX_ENTRIES) {
@@ -110,12 +110,12 @@ public class ArchiveUtils {
     public static void untarGz(InputStream inputStream, Path targetDir) throws IOException {
         Files.createDirectories(targetDir);
         try (
-            GzipCompressorInputStream gzis = new GzipCompressorInputStream(new BufferedInputStream(inputStream));
-            TarArchiveInputStream tais = new TarArchiveInputStream(gzis)
+            var gzis = new GzipCompressorInputStream(new BufferedInputStream(inputStream));
+            var tais = new TarArchiveInputStream(gzis)
         ) {
             TarArchiveEntry entry;
-            int entryCount = 0;
-            long totalBytes = 0;
+            var entryCount = 0;
+            var totalBytes = 0L;
             while ((entry = tais.getNextTarEntry()) != null) {
                 entryCount++;
                 if (entryCount > MAX_ENTRIES) {

@@ -15,7 +15,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -621,7 +620,7 @@ public class AnsibleRunner extends Task implements
     }
 
     private List<String> buildPreCommands(RunContext runContext, Path workingDir) throws IllegalVariableEvaluationException {
-        List<String> cmds = new ArrayList<>();
+        var cmds = new ArrayList<String>();
 
         if (this.beforeCommands != null) {
             cmds.addAll(runContext.render(this.beforeCommands).asList(String.class));
@@ -635,7 +634,7 @@ public class AnsibleRunner extends Task implements
             );
         }
         if (!rGalaxyDeps.isEmpty()) {
-            for (String dep : rGalaxyDeps) {
+            for (var dep : rGalaxyDeps) {
                 if (!PKG_ALLOWLIST.matcher(dep).matches()) {
                     throw new IllegalArgumentException("Invalid galaxy dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
@@ -652,7 +651,7 @@ public class AnsibleRunner extends Task implements
             );
         }
         if (!rPythonDeps.isEmpty()) {
-            for (String dep : rPythonDeps) {
+            for (var dep : rPythonDeps) {
                 if (!PKG_ALLOWLIST.matcher(dep).matches()) {
                     throw new IllegalArgumentException("Invalid python dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
@@ -793,7 +792,7 @@ public class AnsibleRunner extends Task implements
         var sanitized = content.trim();
         if (sanitized.startsWith("{") && sanitized.endsWith("}")) {
             try {
-                Map<String, Object> map = JacksonMapper.ofJson().readValue(
+                var map = JacksonMapper.ofJson().readValue(
                     sanitized,
                     new TypeReference<Map<String, Object>>() {
                     }
@@ -1111,13 +1110,12 @@ public class AnsibleRunner extends Task implements
     }
 
     private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode, SecretMasker secretMasker) {
-        String status = "failed";
-        int rc = processExitCode;
-        Set<String> failedHostsSet = new LinkedHashSet<>();
-        List<Map<String, Object>> failedTasks = new ArrayList<>();
-        // tasks list removed to prevent memory exhaustion
-        Map<String, Object> stats = new HashMap<>();
-        RunnerSummary.RunnerSummaryBuilder summaryBuilder = RunnerSummary.builder()
+        var status = "failed";
+        var rc = processExitCode;
+        var failedHostsSet = new LinkedHashSet<String>();
+        var failedTasks = new ArrayList<Map<String, Object>>();
+        var stats = new HashMap<String, Object>();
+        var summaryBuilder = RunnerSummary.builder()
             .ok(0)
             .changed(0)
             .failures(0)
@@ -1172,7 +1170,7 @@ public class AnsibleRunner extends Task implements
                                     if (failedHostsSet.size() < 1000)
                                         failedHostsSet.add(host);
                                 }
-                                Map<String, Object> failedTask = new LinkedHashMap<>();
+                                var failedTask = new LinkedHashMap<String, Object>();
                                 failedTask.put("host", host);
                                 failedTask.put("task", taskName);
                                 failedTask.put("play", playName);
@@ -1208,7 +1206,7 @@ public class AnsibleRunner extends Task implements
                                     .unreachable(totUnreachable)
                                     .skipped(totSkipped);
 
-                                Set<String> allHosts = new HashSet<>();
+                                var allHosts = new HashSet<String>();
                                 addHostKeys(allHosts, changedNode);
                                 addHostKeys(allHosts, failuresNode);
                                 addHostKeys(allHosts, okNode);
@@ -1216,7 +1214,7 @@ public class AnsibleRunner extends Task implements
                                 addHostKeys(allHosts, skippedNode);
 
                                 for (String h : allHosts) {
-                                    Map<String, Object> hStat = new HashMap<>();
+                                    var hStat = new HashMap<String, Object>();
                                     hStat.put("ok", okNode.path(h).asInt(0));
                                     hStat.put("changed", changedNode.path(h).asInt(0));
                                     hStat.put("failures", failuresNode.path(h).asInt(0));
@@ -1259,9 +1257,9 @@ public class AnsibleRunner extends Task implements
     }
 
     private int sumJsonNode(JsonNode node) {
-        int sum = 0;
+        var sum = 0;
         if (node != null && node.isObject()) {
-            Iterator<JsonNode> it = node.elements();
+            var it = node.elements();
             while (it.hasNext()) {
                 sum += it.next().asInt(0);
             }
@@ -1271,7 +1269,7 @@ public class AnsibleRunner extends Task implements
 
     private void addHostKeys(Set<String> set, JsonNode node) {
         if (node != null && node.isObject()) {
-            Iterator<String> it = node.fieldNames();
+            var it = node.fieldNames();
             while (it.hasNext()) {
                 set.add(it.next());
             }

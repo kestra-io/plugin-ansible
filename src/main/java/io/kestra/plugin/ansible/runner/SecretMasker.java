@@ -1,7 +1,5 @@
 package io.kestra.plugin.ansible.runner;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
@@ -54,7 +52,7 @@ final class SecretMasker {
             }
         }
         // Longest first, so a secret containing another secret is masked whole
-        List<String> sorted = new ArrayList<>(secrets);
+        var sorted = new ArrayList<>(secrets);
         sorted.sort(Comparator.comparingInt(String::length).reversed());
         ordered = List.copyOf(sorted);
     }
@@ -65,7 +63,7 @@ final class SecretMasker {
             return;
         }
         for (Map.Entry<?, ?> entry : map.entrySet()) {
-            Object value = entry.getValue();
+            var value = entry.getValue();
             if (entry.getKey() != null && SENSITIVE_KEY.matcher(entry.getKey().toString()).matches()) {
                 addAllLeaves(value);
             } else if (value instanceof Map<?, ?> nested) {
@@ -88,7 +86,7 @@ final class SecretMasker {
         if (text == null || text.isEmpty() || ordered.isEmpty()) {
             return text;
         }
-        String masked = text;
+        var masked = text;
         for (String secret : ordered) {
             masked = masked.replace(secret, MASK);
         }
@@ -112,8 +110,8 @@ final class SecretMasker {
     private void maskFile(Path file, Logger logger) throws IOException {
         var tmp = file.resolveSibling(file.getFileName() + ".masking");
         try (
-            BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8);
-            BufferedWriter writer = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)
+            var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8);
+            var writer = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)
         ) {
             String line;
             boolean first = true;
