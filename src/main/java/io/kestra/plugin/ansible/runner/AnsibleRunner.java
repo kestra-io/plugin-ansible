@@ -1,7 +1,6 @@
 package io.kestra.plugin.ansible.runner;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -21,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 import org.apache.commons.io.FileUtils;
 
@@ -672,65 +670,65 @@ public class AnsibleRunner extends Task implements
 
     private void resolveProjectSource(RunContext runContext, Path workingDir, Path projectDir, String playbookName)
         throws Exception {
-        String inlineContent = null;
+        String rInlineContent = null;
         if (this.project != null) {
             if (this.project.getContent() != null) {
-                inlineContent = runContext.render(this.project.getContent()).as(String.class).orElse(null);
+                rInlineContent = runContext.render(this.project.getContent()).as(String.class).orElse(null);
             } else if (this.project.getInline() != null) {
-                inlineContent = runContext.render(this.project.getInline()).as(String.class).orElse(null);
+                rInlineContent = runContext.render(this.project.getInline()).as(String.class).orElse(null);
             }
         }
 
-        if (inlineContent != null && !inlineContent.isBlank()) {
-            writePlaybookContent(projectDir, playbookName, inlineContent);
+        if (rInlineContent != null && !rInlineContent.isBlank()) {
+            writePlaybookContent(projectDir, playbookName, rInlineContent);
             return;
         }
 
-        String sourceStr = null;
+        String rSourceStr = null;
         if (this.project != null && this.project.getSource() != null) {
-            sourceStr = runContext.render(this.project.getSource()).as(String.class).orElse(null);
+            rSourceStr = runContext.render(this.project.getSource()).as(String.class).orElse(null);
         }
 
-        if (sourceStr != null && !sourceStr.isBlank()) {
-            if (sourceStr.contains("\n") || sourceStr.trim().startsWith("---") || sourceStr.trim().startsWith("- ") || sourceStr.trim().startsWith("----")) {
-                writePlaybookContent(projectDir, playbookName, sourceStr);
+        if (rSourceStr != null && !rSourceStr.isBlank()) {
+            if (rSourceStr.contains("\n") || rSourceStr.trim().startsWith("---") || rSourceStr.trim().startsWith("- ") || rSourceStr.trim().startsWith("----")) {
+                writePlaybookContent(projectDir, playbookName, rSourceStr);
                 return;
             }
 
-            if (sourceStr.startsWith("kestra://")) {
-                var sourceUri = URI.create(sourceStr);
-                try (InputStream is = runContext.storage().getFile(sourceUri)) {
-                    if (sourceStr.endsWith(".zip")) {
+            if (rSourceStr.startsWith("kestra://")) {
+                var sourceUri = URI.create(rSourceStr);
+                try (var is = runContext.storage().getFile(sourceUri)) {
+                    if (rSourceStr.endsWith(".zip")) {
                         ArchiveUtils.unzip(is, projectDir);
-                    } else if (sourceStr.endsWith(".tar.gz") || sourceStr.endsWith(".tgz")) {
+                    } else if (rSourceStr.endsWith(".tar.gz") || rSourceStr.endsWith(".tgz")) {
                         ArchiveUtils.untarGz(is, projectDir);
                     } else {
                         Files.copy(is, secureResolve(projectDir, playbookName), StandardCopyOption.REPLACE_EXISTING);
                     }
                 }
-            } else if (sourceStr.contains("://")) {
+            } else if (rSourceStr.contains("://")) {
                 throw new IllegalArgumentException(
-                    "Unsupported URI scheme for project source: " + sourceStr + ". Only kestra:// internal storage URIs or local workspace paths are supported."
+                    "Unsupported URI scheme for project source: " + rSourceStr + ". Only kestra:// internal storage URIs or local workspace paths are supported."
                 );
             } else {
-                var relSource = sourceStr.startsWith("/") ? sourceStr.substring(1) : sourceStr;
+                var relSource = rSourceStr.startsWith("/") ? rSourceStr.substring(1) : rSourceStr;
                 var localSource = secureResolve(workingDir, relSource);
                 if (Files.isDirectory(localSource)) {
                     FileUtils.copyDirectory(localSource.toFile(), projectDir.toFile());
                 } else if (Files.isRegularFile(localSource)) {
                     if (relSource.endsWith(".zip")) {
-                        try (InputStream is = Files.newInputStream(localSource)) {
+                        try (var is = Files.newInputStream(localSource)) {
                             ArchiveUtils.unzip(is, projectDir);
                         }
                     } else if (relSource.endsWith(".tar.gz") || relSource.endsWith(".tgz")) {
-                        try (InputStream is = Files.newInputStream(localSource)) {
+                        try (var is = Files.newInputStream(localSource)) {
                             ArchiveUtils.untarGz(is, projectDir);
                         }
                     } else {
                         Files.copy(localSource, secureResolve(projectDir, playbookName), StandardCopyOption.REPLACE_EXISTING);
                     }
                 } else {
-                    throw new IllegalArgumentException("Project source not found: " + sourceStr);
+                    throw new IllegalArgumentException("Project source not found: " + rSourceStr);
                 }
             }
         }
@@ -744,7 +742,7 @@ public class AnsibleRunner extends Task implements
             } else if (Files.exists(playbooksSubDirFile)) {
                 Files.copy(playbooksSubDirFile, targetPlaybook, StandardCopyOption.REPLACE_EXISTING);
             } else {
-                try (Stream<Path> stream = Files.walk(workingDir, 4)) {
+                try (var stream = Files.walk(workingDir, 4)) {
                     var found = stream
                         .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equals(playbookName))
                         .filter(p -> !p.startsWith(projectDir))
@@ -774,7 +772,7 @@ public class AnsibleRunner extends Task implements
             "library", "lookup_plugins", "filter_plugins", "callback_plugins",
             "module_utils", "collections"
         );
-        for (String dirName : standardDirs) {
+        for (var dirName : standardDirs) {
             var srcDir = workingDir.resolve(dirName);
             var destDir = projectDir.resolve(dirName);
             if (Files.isDirectory(srcDir) && !Files.exists(destDir)) {
@@ -798,7 +796,7 @@ public class AnsibleRunner extends Task implements
                     }
                 );
                 if (!map.isEmpty() && map.keySet().stream().anyMatch(k -> k.endsWith(".yml") || k.endsWith(".yaml") || k.contains("/"))) {
-                    for (Map.Entry<String, Object> entry : map.entrySet()) {
+                    for (var entry : map.entrySet()) {
                         var target = secureResolve(projectDir, entry.getKey());
                         if (target.getParent() != null) {
                             Files.createDirectories(target.getParent());
@@ -821,17 +819,17 @@ public class AnsibleRunner extends Task implements
     }
 
     private void resolveInventory(RunContext runContext, Path workingDir, Path inventoryDir) throws Exception {
-        String invContent = null;
+        String rInvContent = null;
         if (this.inventory != null) {
             if (this.inventory.getContent() != null) {
-                invContent = runContext.render(this.inventory.getContent()).as(String.class).orElse(null);
+                rInvContent = runContext.render(this.inventory.getContent()).as(String.class).orElse(null);
             } else if (this.inventory.getInline() != null) {
-                invContent = runContext.render(this.inventory.getInline()).as(String.class).orElse(null);
+                rInvContent = runContext.render(this.inventory.getInline()).as(String.class).orElse(null);
             }
         }
 
-        if (invContent != null && !invContent.isBlank()) {
-            Files.writeString(inventoryDir.resolve("hosts"), invContent.trim() + "\n", StandardCharsets.UTF_8);
+        if (rInvContent != null && !rInvContent.isBlank()) {
+            Files.writeString(inventoryDir.resolve("hosts"), rInvContent.trim() + "\n", StandardCharsets.UTF_8);
             return;
         }
 
@@ -859,14 +857,14 @@ public class AnsibleRunner extends Task implements
         }
 
         if (this.inventory != null && this.inventory.getScript() != null) {
-            var scriptStr = runContext.render(this.inventory.getScript()).as(String.class).orElse(null);
-            if (scriptStr != null && !scriptStr.isBlank()) {
+            var rScriptStr = runContext.render(this.inventory.getScript()).as(String.class).orElse(null);
+            if (rScriptStr != null && !rScriptStr.isBlank()) {
                 var scriptTarget = inventoryDir.resolve("hosts");
-                var localScript = secureResolve(workingDir, scriptStr.startsWith("/") ? scriptStr.substring(1) : scriptStr);
+                var localScript = secureResolve(workingDir, rScriptStr.startsWith("/") ? rScriptStr.substring(1) : rScriptStr);
                 if (Files.isRegularFile(localScript)) {
                     Files.copy(localScript, scriptTarget, StandardCopyOption.REPLACE_EXISTING);
                 } else {
-                    Files.writeString(scriptTarget, scriptStr.trim() + "\n", StandardCharsets.UTF_8);
+                    Files.writeString(scriptTarget, rScriptStr.trim() + "\n", StandardCharsets.UTF_8);
                 }
                 makeExecutable(scriptTarget);
                 return;
@@ -904,20 +902,20 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        String invFile = null;
+        String rInvFile = null;
         if (this.inventory != null && this.inventory.getFile() != null) {
-            invFile = runContext.render(this.inventory.getFile()).as(String.class).orElse(null);
+            rInvFile = runContext.render(this.inventory.getFile()).as(String.class).orElse(null);
         }
 
-        if (invFile != null && !invFile.isBlank()) {
-            if (invFile.startsWith("kestra://")) {
-                try (var is = runContext.storage().getFile(URI.create(invFile))) {
+        if (rInvFile != null && !rInvFile.isBlank()) {
+            if (rInvFile.startsWith("kestra://")) {
+                try (var is = runContext.storage().getFile(URI.create(rInvFile))) {
                     Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 }
-            } else if (invFile.contains("://")) {
-                throw new IllegalArgumentException("Unsupported URI scheme for inventory file: " + invFile + ". Only kestra:// internal storage URIs or local workspace paths are supported.");
+            } else if (rInvFile.contains("://")) {
+                throw new IllegalArgumentException("Unsupported URI scheme for inventory file: " + rInvFile + ". Only kestra:// internal storage URIs or local workspace paths are supported.");
             } else {
-                var relInv = invFile.startsWith("/") ? invFile.substring(1) : invFile;
+                var relInv = rInvFile.startsWith("/") ? rInvFile.substring(1) : rInvFile;
                 var localInv = secureResolve(workingDir, relInv);
                 var localSubInv = secureResolve(workingDir.resolve("inventory"), relInv);
                 var localPluralInv = secureResolve(workingDir.resolve("inventories"), relInv);
@@ -930,10 +928,10 @@ public class AnsibleRunner extends Task implements
                     Files.copy(localSubInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 } else if (Files.isRegularFile(localPluralInv)) {
                     Files.copy(localPluralInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
-                } else if (invFile.contains("\n") || invFile.contains("[") || invFile.contains(",")) {
-                    Files.writeString(inventoryDir.resolve("hosts"), invFile.trim() + "\n", StandardCharsets.UTF_8);
+                } else if (rInvFile.contains("\n") || rInvFile.contains("[") || rInvFile.contains(",")) {
+                    Files.writeString(inventoryDir.resolve("hosts"), rInvFile.trim() + "\n", StandardCharsets.UTF_8);
                 } else {
-                    throw new IllegalArgumentException("Inventory file not found: " + invFile);
+                    throw new IllegalArgumentException("Inventory file not found: " + rInvFile);
                 }
             }
             return;
@@ -943,7 +941,7 @@ public class AnsibleRunner extends Task implements
         if (Files.isDirectory(inventoryFolder)) {
             try {
                 FileUtils.copyDirectory(inventoryFolder.toFile(), inventoryDir.toFile());
-                try (Stream<Path> invStream = Files.list(inventoryDir)) {
+                try (var invStream = Files.list(inventoryDir)) {
                     if (invStream.findAny().isPresent()) {
                         runContext.logger().info("Using auto-detected inventory directory: {}", inventoryFolder);
                         return;
@@ -957,7 +955,7 @@ public class AnsibleRunner extends Task implements
         if (Files.isDirectory(inventoriesFolder)) {
             try {
                 FileUtils.copyDirectory(inventoriesFolder.toFile(), inventoryDir.toFile());
-                try (Stream<Path> invStream = Files.list(inventoryDir)) {
+                try (var invStream = Files.list(inventoryDir)) {
                     if (invStream.findAny().isPresent()) {
                         runContext.logger().info("Using auto-detected inventory directory: {}", inventoriesFolder);
                         return;
@@ -972,7 +970,7 @@ public class AnsibleRunner extends Task implements
             "inventory/hosts.ini", "inventory/hosts", "inventory/hosts.yml", "inventory/hosts.yaml",
             "hosts.ini", "hosts", "hosts.yml", "hosts.yaml", "inventory.ini"
         );
-        for (String cand : candidateInvs) {
+        for (var cand : candidateInvs) {
             var candPath = secureResolve(workingDir, cand);
             if (Files.isRegularFile(candPath)) {
                 Files.copy(candPath, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
@@ -1149,13 +1147,13 @@ public class AnsibleRunner extends Task implements
 
             var jobEventsDir = identArtifactsDir.resolve("job_events");
             if (Files.isDirectory(jobEventsDir)) {
-                try (Stream<Path> stream = Files.list(jobEventsDir)) {
+                try (var stream = Files.list(jobEventsDir)) {
                     var eventFiles = stream
                         .filter(p -> p.toString().endsWith(".json"))
                         .sorted(Comparator.comparing(Path::getFileName))
                         .toList();
 
-                    for (Path eventFile : eventFiles) {
+                    for (var eventFile : eventFiles) {
                         try {
                             var root = JacksonMapper.ofJson().readTree(eventFile.toFile());
                             var event = root.path("event").asText("");
@@ -1213,7 +1211,7 @@ public class AnsibleRunner extends Task implements
                                 addHostKeys(allHosts, unreachableNode);
                                 addHostKeys(allHosts, skippedNode);
 
-                                for (String h : allHosts) {
+                                for (var h : allHosts) {
                                     var hStat = new HashMap<String, Object>();
                                     hStat.put("ok", okNode.path(h).asInt(0));
                                     hStat.put("changed", changedNode.path(h).asInt(0));

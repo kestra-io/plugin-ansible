@@ -114,7 +114,7 @@ final class SecretMasker {
             var writer = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)
         ) {
             String line;
-            boolean first = true;
+            var first = true;
             while ((line = reader.readLine()) != null) {
                 if (!first) {
                     writer.newLine();

@@ -4,20 +4,20 @@ import org.junit.jupiter.api.Test;
 
 import io.kestra.plugin.scripts.runner.docker.Docker;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 class AnsibleRunnerKillTest {
 
     @Test
-    void killDelegatesToTaskRunner() throws Exception {
+    void killDelegatesToTaskRunner() {
         var taskRunner = mock(Docker.class);
-        var task = AnsibleRunner.builder().id("kill").type(AnsibleRunner.class.getName()).build();
-        var field = AnsibleRunner.class.getDeclaredField("taskRunner");
-        field.setAccessible(true);
-        field.set(task, taskRunner);
+        var task = AnsibleRunner.builder()
+            .id("kill")
+            .type(AnsibleRunner.class.getName())
+            .taskRunner(taskRunner)
+            .build();
 
         task.kill();
 
@@ -26,8 +26,12 @@ class AnsibleRunnerKillTest {
 
     @Test
     void killWithoutTaskRunnerIsNoop() {
-        var task = AnsibleRunner.builder().id("kill").type(AnsibleRunner.class.getName()).build();
-        task.kill();
-        assertThat(task != null, is(true));
+        var task = AnsibleRunner.builder()
+            .id("kill")
+            .type(AnsibleRunner.class.getName())
+            .taskRunner(null)
+            .build();
+
+        assertDoesNotThrow(task::kill);
     }
 }

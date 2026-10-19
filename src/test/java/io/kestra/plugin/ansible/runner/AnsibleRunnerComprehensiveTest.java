@@ -9,6 +9,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -52,7 +53,7 @@ public class AnsibleRunnerComprehensiveTest {
     @Inject
     private StorageInterface storageInterface;
 
-    private static final List<TestRecord> testRecords = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static final List<TestRecord> testRecords = new CopyOnWriteArrayList<>();
 
     @Data
     @Builder
