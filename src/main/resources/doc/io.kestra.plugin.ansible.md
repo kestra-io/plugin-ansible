@@ -8,6 +8,9 @@ Run Ansible playbooks and ad-hoc commands from Kestra flows inside a container w
 
 ## Tasks
 
+
+`runner.AnsibleRunner` is the enterprise-grade orchestrator that runs playbooks within containerized Ansible Execution Environments (EEs). It enforces a strict tri-layer contract mapping Kestra inputs into isolated `/runner/project`, `/runner/inventory`, and `/runner/env` structures. By extracting execution telemetry and automatically masking multi-line secrets like SSH keys, `AnsibleRunner` is best suited for robust, traceable CI/CD workflows and multi-node Ansible automation.
+
 `cli.AnsibleCLI` runs one or more Ansible CLI commands set in `commands` (e.g. `ansible-playbook site.yml -i inventory.ini`). Use `beforeCommands` to run setup steps before the main commands, `env` to inject environment variables, and `outputFiles` to capture files produced during execution. Set `ansibleConfig` to supply a custom `ansible.cfg`; if omitted, Kestra generates one automatically with its structured output callback enabled.
 
 `galaxyDependencies` and `pythonDependencies` install Galaxy collections and pip packages before commands run, alongside the existing `requirements.yml`/`requirements.txt` auto-install (`autoInstallGalaxyRequirements`/`autoInstallPythonRequirements`, both default `true`). All of it installs into a working-directory subtree instead of the image's default `~/.ansible` and virtual environment, so every command in a multi-command task sees the same collections/packages, and the result is cached across runs (`dependencyCacheEnabled`, default `true`) keyed on the task runner, container image, and declared dependencies. Cached installs expire after `dependencyCacheTtl` (default 7 days): the key does not track the image digest or new releases of unpinned dependencies, so the TTL bounds how stale a floating tag like the default `latest` can get.

@@ -2,8 +2,8 @@
 
 ## What
 
-- Provides plugin components under `io.kestra.plugin.ansible.cli`.
-- Includes classes such as `AnsibleCLI`.
+- Provides plugin components under `io.kestra.plugin.ansible.cli` and `io.kestra.plugin.ansible.runner`.
+- Includes classes such as `AnsibleCLI` and `AnsibleRunner`.
 
 ## Why
 
@@ -22,12 +22,14 @@ Single-module plugin. Source packages under `io.kestra.plugin`:
 ### Key Plugin Classes
 
 - `io.kestra.plugin.ansible.cli.AnsibleCLI`
+- `io.kestra.plugin.ansible.runner.AnsibleRunner`
 
 ### Project Structure
 
 ```
 plugin-ansible/
 ├── src/main/java/io/kestra/plugin/ansible/cli/
+├── src/main/java/io/kestra/plugin/ansible/runner/
 ├── src/test/java/io/kestra/plugin/ansible/cli/
 ├── build.gradle
 └── README.md

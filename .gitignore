@@ -17,3 +17,5 @@ src/test/resources/application-test.yml
 .factorypath
 bin/
 __pycache__/
+kestra-plugins/
+*.jar

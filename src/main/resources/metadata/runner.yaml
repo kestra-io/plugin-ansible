@@ -1,0 +1,18 @@
+group: io.kestra.plugin.ansible.runner
+name: AnsibleRunner
+title: Execute Ansible playbooks using Ansible Runner
+description: Provides enterprise-grade Ansible orchestration with containerized Execution Environments and structured JSON telemetry.
+body: |
+  Provides enterprise-grade Ansible orchestration with containerized Execution Environments.
+
+  ### Key Features
+  - **Namespace Files Support**: Load playbooks, roles, and inventories seamlessly from Kestra's internal storage directly into the Execution Environment.
+  - **No UI Log Bloat**: Streams a configurable number of logs live to the Kestra UI and saves the complete execution log as an internal storage file, avoiding massive unreadable logs on large playbooks.
+  - **Structured Telemetry**: Parses Ansible job events in real-time, delivering a compact JSON telemetry report with host-by-host statistics and exact failure extraction.
+  - **Auto-dependency Management**: Can automatically run `ansible-galaxy install` and `pip install` based on requirements files in your project directory.
+
+  ### Execution Flow
+  1. The task provisions an ephemeral `/runner/` directory tree.
+  2. The playbook, inventory, and variables are mounted securely into the layout.
+  3. The chosen `TaskRunner` (e.g., Docker) executes `ansible-runner run`.
+  4. Telemetry is parsed, and the artifacts are cleaned up safely.
