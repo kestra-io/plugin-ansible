@@ -32,7 +32,7 @@ final class SecretMasker {
     private static final int MIN_FRAGMENT_LENGTH = 4;
 
     private static final Pattern SENSITIVE_KEY = Pattern.compile(
-        "(?i).*(pass|secret|token|credential|private|api[_-]?key|access[_-]?key|auth|vault|cert|key|dsn|connection[_-]?string).*"
+        "(?i).*(pass|secret|token|credential|private|api[_-]?key|access[_-]?key|ssh[_-]?key|cert[_-]?pass|auth|vault|dsn|connection[_-]?string).*"
     );
 
     private final Set<String> secrets = new LinkedHashSet<>();
@@ -137,8 +137,14 @@ final class SecretMasker {
             map.values().forEach(this::addAllLeaves);
         } else if (value instanceof List<?> list) {
             list.forEach(this::addAllLeaves);
+        } else if (value instanceof Boolean || value instanceof Number) {
+            return;
         } else if (value != null) {
-            add(value.toString());
+            String str = value.toString().strip();
+            if ("true".equalsIgnoreCase(str) || "false".equalsIgnoreCase(str) || str.length() < MIN_FRAGMENT_LENGTH) {
+                return;
+            }
+            add(str);
         }
     }
 

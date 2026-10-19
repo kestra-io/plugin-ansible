@@ -53,7 +53,6 @@ import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
 import io.kestra.plugin.ansible.runner.models.RunnerSummary;
 import io.kestra.plugin.ansible.runner.utils.ArchiveUtils;
-import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
 import io.kestra.plugin.scripts.runner.docker.Docker;
 
@@ -153,7 +152,6 @@ public class AnsibleRunner extends Task implements
     @Valid
     protected TaskRunner<?> taskRunner = Docker.instance();
 
-    // --- File & Namespace Interfaces ---
     @Schema(
         title = "Namespace files configuration",
         description = "Enables loading files from Kestra namespace storage directly into the execution environment."
@@ -175,7 +173,6 @@ public class AnsibleRunner extends Task implements
     @PluginProperty(group = "execution")
     private Property<List<String>> outputFiles;
 
-    // --- Dependency Management Controls ---
     @Schema(
         title = "Auto-install Ansible Galaxy collections and roles",
         description = "If true, automatically runs ansible-galaxy install -r requirements.yml if present before executing the playbook."
@@ -213,7 +210,6 @@ public class AnsibleRunner extends Task implements
     @PluginProperty(group = "execution")
     private Property<List<String>> beforeCommands;
 
-    // --- Logging & Output Controls ---
     @Schema(
         title = "Execution log verbosity mode",
         description = "Controls logging verbosity. SUMMARY streams task names, recap, and errors; FULL streams all stdout/stderr lines."
@@ -280,7 +276,6 @@ public class AnsibleRunner extends Task implements
     @PluginProperty(group = "advanced")
     private Property<Boolean> outputSummary = Property.ofValue(false);
 
-    // --- Enterprise Execution Controls ---
     @Schema(title = "Dry-run check mode (--check)")
     @Builder.Default
     @PluginProperty(group = "execution")
@@ -313,7 +308,6 @@ public class AnsibleRunner extends Task implements
     @PluginProperty(group = "execution")
     private Property<@Min(1) Integer> forks = Property.ofValue(5);
 
-    // --- Project Contract (Defaults to site.yml with auto-locating) ---
     @Schema(
         title = "Project playbook configuration",
         anyOf = { Project.class, String.class }
@@ -323,18 +317,15 @@ public class AnsibleRunner extends Task implements
         .playbook(Property.ofValue(DEFAULT_PLAYBOOK))
         .build();
 
-    // --- Inventory Contract (Nested & Flat support) ---
     @Schema(
         title = "Inventory configuration or file path",
         anyOf = { Inventory.class, String.class }
     )
     private Inventory inventory;
 
-    // --- Environment & Credentials (Nested & Flat support) ---
     @Schema(title = "Environment and credentials configuration")
     private RunnerEnv env;
 
-    // --- Engine Controls ---
     @Schema(title = "Execution timeout (maps to job_timeout)")
     private Property<Duration> timeout;
 
@@ -388,33 +379,28 @@ public class AnsibleRunner extends Task implements
                 NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
             }
 
-            // 1. Resolve Playbook & Project Source
-            String resolvedPlaybook = resolvePlaybook(runContext);
+            var resolvedPlaybook = resolvePlaybook(runContext);
             resolveProjectSource(runContext, workingDir, projectDir, resolvedPlaybook);
-
-            // 2. Resolve Inventory
             resolveInventory(runContext, workingDir, inventoryDir);
 
-            // 3. Populate /runner/env/ (cmdline, extravars, envvars, passwords, ssh_key, settings)
-            Map<String, String> renderedPasswords = renderPasswords(runContext);
-            populateEnvDir(runContext, envDir, renderedPasswords);
+            var rPasswords = renderPasswords(runContext);
+            populateEnvDir(runContext, envDir, rPasswords);
 
-            // 4. Configure Runner execution & Logging
-            String ident = IdUtils.create();
-            String renderedImage = runContext.render(this.containerImage).as(String.class).orElse(DEFAULT_CONTAINER_IMAGE);
+            var ident = IdUtils.create();
+            var rImage = runContext.render(this.containerImage).as(String.class).orElse(DEFAULT_CONTAINER_IMAGE);
 
             // Playbook-level failures (rc=2 failed hosts, rc=4 unreachable) must not make the task runner
             // throw before telemetry is parsed. If ansible-runner produced an rc artifact, exit 0 and let
             // failOnErrors decide; otherwise (runner never started) propagate the real exit code.
-            List<String> runnerCommand = List.of(
+            var runnerCommand = List.of(
                 "ansible-runner run ./runner -p '" + resolvedPlaybook.replace("'", "'\\''") + "' --ident " + ident
                     + "; __rc=$?; if [ -f ./runner/artifacts/" + ident + "/rc ]; then if [ $__rc -eq 2 ] || [ $__rc -eq 4 ]; then exit 0; fi; fi; exit $__rc"
             );
 
-            boolean shouldStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(true);
-            LogsMode resolvedLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.FULL);
-            boolean shouldOutputLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
-            long resolvedMaxLogLines = runContext.render(this.maxLogLines).as(Long.class).orElse(DEFAULT_MAX_LOG_LINES);
+            var shouldStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(true);
+            var resolvedLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.FULL);
+            var shouldOutputLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
+            var resolvedMaxLogLines = runContext.render(this.maxLogLines).as(Long.class).orElse(DEFAULT_MAX_LOG_LINES);
 
             // Full raw output is always spooled to disk (never kept in memory) so it can be uploaded without loss.
             // It lives in the system temp directory outside the container working directory to prevent Docker volume mount collisions.
@@ -425,27 +411,27 @@ public class AnsibleRunner extends Task implements
                 logSpoolFile.toFile().setWritable(true, true);
             }
 
-            SecretMasker secretMasker = new SecretMasker();
+            var secretMasker = new SecretMasker();
             if (this.env != null) {
                 if (this.env.getSshKey() != null) {
-                    String k = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
+                    var k = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
                     if (k != null && !k.isBlank()) {
                         secretMasker.add(k);
                     }
                 }
-                if (renderedPasswords != null && !renderedPasswords.isEmpty()) {
-                    for (String val : renderedPasswords.values()) {
+                if (rPasswords != null && !rPasswords.isEmpty()) {
+                    for (var val : rPasswords.values()) {
                         if (val != null && !val.isBlank()) {
                             secretMasker.add(val);
                         }
                     }
                 }
                 if (this.env.getExtraVars() != null) {
-                    Map<String, Object> ev = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
+                    var ev = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
                     secretMasker.addSensitiveValues(ev);
                 }
                 if (this.env.getEnvVars() != null) {
-                    Map<String, String> envV = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
+                    var envV = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
                     secretMasker.addSensitiveValues(envV);
                 }
             }
@@ -460,15 +446,15 @@ public class AnsibleRunner extends Task implements
                 secretMasker
             );
 
-            CommandsWrapper commandsWrapper = new CommandsWrapper(runContext)
+            var commandsWrapper = new CommandsWrapper(runContext)
                 .withLogConsumer(logConsumer)
                 .withTaskRunner(this.taskRunner)
-                .withContainerImage(renderedImage)
+                .withContainerImage(rImage)
                 .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
                 .withCommands(Property.ofValue(runnerCommand));
 
             // Configure pre-execution dependency installations
-            List<String> preCommands = buildPreCommands(runContext, workingDir);
+            var preCommands = buildPreCommands(runContext, workingDir);
             if (!preCommands.isEmpty()) {
                 commandsWrapper = commandsWrapper.withBeforeCommands(Property.ofValue(preCommands));
             }
@@ -477,10 +463,10 @@ public class AnsibleRunner extends Task implements
                 commandsWrapper = commandsWrapper.withInputFiles(this.inputFiles);
             }
 
-            List<String> outputPatterns = new ArrayList<>();
+            var outputPatterns = new ArrayList<String>();
             if (this.outputFiles != null) {
-                List<String> renderedOutputFiles = runContext.render(this.outputFiles).asList(String.class);
-                for (String pattern : renderedOutputFiles) {
+                var rOutputFiles = runContext.render(this.outputFiles).asList(String.class);
+                for (var pattern : rOutputFiles) {
                     outputPatterns.add(pattern);
                     if (!pattern.startsWith("/") && !pattern.startsWith("**/") && !pattern.startsWith("runner/")) {
                         outputPatterns.add("runner/project/" + pattern);
@@ -491,19 +477,19 @@ public class AnsibleRunner extends Task implements
             outputPatterns.add("runner/artifacts/" + ident + "/**");
             commandsWrapper = commandsWrapper.withOutputFiles(outputPatterns);
 
-            ScriptOutput scriptOutput = commandsWrapper.run();
-            int processExitCode = scriptOutput.getExitCode();
-            Map<String, URI> extractedOutputFiles = scriptOutput.getOutputFiles();
+            var scriptOutput = commandsWrapper.run();
+            var processExitCode = scriptOutput.getExitCode();
+            var extractedOutputFiles = scriptOutput.getOutputFiles();
 
-            Path identArtifactsDir = artifactsBaseDir.resolve(ident);
+            var identArtifactsDir = artifactsBaseDir.resolve(ident);
             if (extractedOutputFiles != null) {
-                String prefix = "runner/artifacts/" + ident + "/";
-                for (Map.Entry<String, URI> entry : extractedOutputFiles.entrySet()) {
+                var prefix = "runner/artifacts/" + ident + "/";
+                for (var entry : extractedOutputFiles.entrySet()) {
                     if (entry.getKey().startsWith(prefix)) {
-                        Path target = workingDir.resolve(entry.getKey());
+                        var target = workingDir.resolve(entry.getKey());
                         if (!Files.exists(target)) {
                             Files.createDirectories(target.getParent());
-                            try (InputStream is = runContext.storage().getFile(entry.getValue())) {
+                            try (var is = runContext.storage().getFile(entry.getValue())) {
                                 Files.copy(is, target, StandardCopyOption.REPLACE_EXISTING);
                             }
                         }
@@ -511,19 +497,17 @@ public class AnsibleRunner extends Task implements
                 }
             }
 
-            // 5. Parse Status, Return Code, and Job Events Telemetry
-            ExecutionTelemetry telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, secretMasker);
+            var telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, secretMasker);
 
             // Mask secrets inside artifacts directory before archiving
             if (Files.exists(identArtifactsDir)) {
                 secretMasker.maskTree(identArtifactsDir, runContext.logger());
             }
 
-            // 6. Generate single consolidated results.json file and upload to Internal Storage if saveResults is true
             URI resultsUri = null;
-            boolean shouldSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
+            var shouldSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
             if (shouldSaveResults && Files.exists(identArtifactsDir)) {
-                Map<String, Object> consolidatedResults = new LinkedHashMap<>();
+                var consolidatedResults = new LinkedHashMap<String, Object>();
                 consolidatedResults.put("status", telemetry.status);
                 consolidatedResults.put("rc", telemetry.rc);
                 consolidatedResults.put("summary", telemetry.summary);
@@ -531,7 +515,7 @@ public class AnsibleRunner extends Task implements
                 consolidatedResults.put("failedHosts", telemetry.failedHosts);
                 consolidatedResults.put("failedTasks", telemetry.failedTasks);
 
-                Path resultsFile = workingDir.resolve("results-" + ident + ".json");
+                var resultsFile = workingDir.resolve("results-" + ident + ".json");
                 Files.writeString(
                     resultsFile,
                     JacksonMapper.ofJson().writerWithDefaultPrettyPrinter().writeValueAsString(consolidatedResults),
@@ -541,9 +525,9 @@ public class AnsibleRunner extends Task implements
                 Files.deleteIfExists(resultsFile);
             }
 
-            Path zipFile = workingDir.resolve("artifacts-" + ident + ".zip");
+            var zipFile = workingDir.resolve("artifacts-" + ident + ".zip");
             URI artifactsUri = null;
-            boolean shouldSaveArtifacts = runContext.render(this.saveArtifacts).as(Boolean.class).orElse(true);
+            var shouldSaveArtifacts = runContext.render(this.saveArtifacts).as(Boolean.class).orElse(true);
             if (shouldSaveArtifacts && Files.exists(identArtifactsDir)) {
                 ArchiveUtils.zipDirectory(identArtifactsDir, zipFile);
                 artifactsUri = runContext.storage().putFile(zipFile.toFile());
@@ -558,7 +542,7 @@ public class AnsibleRunner extends Task implements
             }
             Files.deleteIfExists(logSpoolFile);
 
-            boolean shouldClean = runContext.render(this.autoCleanArtifacts).as(Boolean.class).orElse(true);
+            var shouldClean = runContext.render(this.autoCleanArtifacts).as(Boolean.class).orElse(true);
             if (shouldClean) {
                 FileUtils.deleteQuietly(artifactsBaseDir.toFile());
                 Files.deleteIfExists(zipFile);
@@ -567,7 +551,7 @@ public class AnsibleRunner extends Task implements
             Map<String, URI> finalOutputFiles = null;
             if (this.outputFiles != null && extractedOutputFiles != null && !extractedOutputFiles.isEmpty()) {
                 finalOutputFiles = new HashMap<>();
-                for (Map.Entry<String, URI> entry : extractedOutputFiles.entrySet()) {
+                for (var entry : extractedOutputFiles.entrySet()) {
                     if (!entry.getKey().startsWith("runner/artifacts/")) {
                         finalOutputFiles.put(entry.getKey(), entry.getValue());
                     }
@@ -577,9 +561,9 @@ public class AnsibleRunner extends Task implements
                 }
             }
 
-            boolean shouldOutputSummary = runContext.render(this.outputSummary).as(Boolean.class).orElse(false);
+            var shouldOutputSummary = runContext.render(this.outputSummary).as(Boolean.class).orElse(false);
 
-            Output output = Output.builder()
+            var output = Output.builder()
                 .resultsUri(resultsUri)
                 .artifactsUri(artifactsUri)
                 .outputLogFile(logFileUri)
@@ -594,8 +578,8 @@ public class AnsibleRunner extends Task implements
                 .build();
 
             // Check output size against maxOutputsSize after storing results; truncate stats and failedHosts to preserve URIs
-            long maxSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
-            byte[] outputBytes = JacksonMapper.ofJson().writeValueAsBytes(output);
+            var maxSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
+            var outputBytes = JacksonMapper.ofJson().writeValueAsBytes(output);
             if (outputBytes.length > maxSize) {
                 runContext.logger().warn(
                     "Ansible task output ({} bytes) exceeds configured maxOutputsSize of {} bytes. " +
@@ -609,7 +593,7 @@ public class AnsibleRunner extends Task implements
                     .build();
             }
 
-            boolean failTask = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
+            var failTask = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
             if (failTask && !"successful".equalsIgnoreCase(telemetry.status)) {
                 runContext.logger().error("Ansible Runner failed. Results: {}, Artifacts: {}, Logs: {}", resultsUri, artifactsUri, logFileUri);
                 throw new IllegalStateException(
@@ -840,7 +824,6 @@ public class AnsibleRunner extends Task implements
     }
 
     private void resolveInventory(RunContext runContext, Path workingDir, Path inventoryDir) throws Exception {
-        // 1. Inline INI/YAML content
         String invContent = null;
         if (this.inventory != null) {
             if (this.inventory.getContent() != null) {
@@ -855,37 +838,34 @@ public class AnsibleRunner extends Task implements
             return;
         }
 
-        // 2. Structured hosts map (serialized to JSON inventory)
         if (this.inventory != null && this.inventory.getHosts() != null) {
-            Map<String, Object> renderedHosts = runContext.render(this.inventory.getHosts()).asMap(String.class, Object.class);
-            if (!renderedHosts.isEmpty()) {
-                Map<String, Object> jsonInventory = new HashMap<>();
-                Map<String, Object> allGroup = new HashMap<>();
-                allGroup.put("hosts", new ArrayList<>(renderedHosts.keySet()));
+            var rHosts = runContext.render(this.inventory.getHosts()).asMap(String.class, Object.class);
+            if (!rHosts.isEmpty()) {
+                var jsonInventory = new HashMap<String, Object>();
+                var allGroup = new HashMap<String, Object>();
+                allGroup.put("hosts", new ArrayList<>(rHosts.keySet()));
                 jsonInventory.put("all", allGroup);
-                Map<String, Object> meta = new HashMap<>();
-                meta.put("hostvars", renderedHosts);
+                var meta = new HashMap<String, Object>();
+                meta.put("hostvars", rHosts);
                 jsonInventory.put("_meta", meta);
                 Files.writeString(inventoryDir.resolve("hosts.json"), JacksonMapper.ofJson().writeValueAsString(jsonInventory), StandardCharsets.UTF_8);
                 return;
             }
         }
 
-        // 3. Structured groups map (serialized to JSON inventory)
         if (this.inventory != null && this.inventory.getGroups() != null) {
-            Map<String, Object> renderedGroups = runContext.render(this.inventory.getGroups()).asMap(String.class, Object.class);
-            if (!renderedGroups.isEmpty()) {
-                Files.writeString(inventoryDir.resolve("hosts.json"), JacksonMapper.ofJson().writeValueAsString(renderedGroups), StandardCharsets.UTF_8);
+            var rGroups = runContext.render(this.inventory.getGroups()).asMap(String.class, Object.class);
+            if (!rGroups.isEmpty()) {
+                Files.writeString(inventoryDir.resolve("hosts.json"), JacksonMapper.ofJson().writeValueAsString(rGroups), StandardCharsets.UTF_8);
                 return;
             }
         }
 
-        // 4. Dynamic inventory script
         if (this.inventory != null && this.inventory.getScript() != null) {
-            String scriptStr = runContext.render(this.inventory.getScript()).as(String.class).orElse(null);
+            var scriptStr = runContext.render(this.inventory.getScript()).as(String.class).orElse(null);
             if (scriptStr != null && !scriptStr.isBlank()) {
-                Path scriptTarget = inventoryDir.resolve("hosts");
-                Path localScript = secureResolve(workingDir, scriptStr.startsWith("/") ? scriptStr.substring(1) : scriptStr);
+                var scriptTarget = inventoryDir.resolve("hosts");
+                var localScript = secureResolve(workingDir, scriptStr.startsWith("/") ? scriptStr.substring(1) : scriptStr);
                 if (Files.isRegularFile(localScript)) {
                     Files.copy(localScript, scriptTarget, StandardCopyOption.REPLACE_EXISTING);
                 } else {
@@ -896,17 +876,16 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        // 5. Multiple inventory sources
         if (this.inventory != null && this.inventory.getSources() != null) {
-            List<String> renderedSources = runContext.render(this.inventory.getSources()).asList(String.class);
-            if (!renderedSources.isEmpty()) {
-                for (String src : renderedSources) {
+            var rSources = runContext.render(this.inventory.getSources()).asList(String.class);
+            if (!rSources.isEmpty()) {
+                for (var src : rSources) {
                     if (src.startsWith("kestra://")) {
-                        URI uri = URI.create(src);
-                        String path = uri.getPath();
-                        String fileName = path != null ? Paths.get(path).getFileName().toString() : "inventory";
-                        Path target = secureResolve(inventoryDir, fileName);
-                        try (InputStream is = runContext.storage().getFile(uri)) {
+                        var uri = URI.create(src);
+                        var path = uri.getPath();
+                        var fileName = path != null ? Paths.get(path).getFileName().toString() : "inventory";
+                        var target = secureResolve(inventoryDir, fileName);
+                        try (var is = runContext.storage().getFile(uri)) {
                             Files.copy(is, target, StandardCopyOption.REPLACE_EXISTING);
                         }
                     } else if (src.contains("://")) {
@@ -914,7 +893,7 @@ public class AnsibleRunner extends Task implements
                             "Unsupported URI scheme for inventory source: " + src + ". Only kestra:// internal storage URIs or local workspace paths are supported."
                         );
                     } else {
-                        Path localSrc = secureResolve(workingDir, src.startsWith("/") ? src.substring(1) : src);
+                        var localSrc = secureResolve(workingDir, src.startsWith("/") ? src.substring(1) : src);
                         if (Files.isDirectory(localSrc)) {
                             FileUtils.copyDirectory(localSrc.toFile(), inventoryDir.toFile());
                         } else if (Files.isRegularFile(localSrc)) {
@@ -928,7 +907,6 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        // 6. Single inventory file or string path
         String invFile = null;
         if (this.inventory != null && this.inventory.getFile() != null) {
             invFile = runContext.render(this.inventory.getFile()).as(String.class).orElse(null);
@@ -936,16 +914,16 @@ public class AnsibleRunner extends Task implements
 
         if (invFile != null && !invFile.isBlank()) {
             if (invFile.startsWith("kestra://")) {
-                try (InputStream is = runContext.storage().getFile(URI.create(invFile))) {
+                try (var is = runContext.storage().getFile(URI.create(invFile))) {
                     Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 }
             } else if (invFile.contains("://")) {
                 throw new IllegalArgumentException("Unsupported URI scheme for inventory file: " + invFile + ". Only kestra:// internal storage URIs or local workspace paths are supported.");
             } else {
-                String relInv = invFile.startsWith("/") ? invFile.substring(1) : invFile;
-                Path localInv = secureResolve(workingDir, relInv);
-                Path localSubInv = secureResolve(workingDir.resolve("inventory"), relInv);
-                Path localPluralInv = secureResolve(workingDir.resolve("inventories"), relInv);
+                var relInv = invFile.startsWith("/") ? invFile.substring(1) : invFile;
+                var localInv = secureResolve(workingDir, relInv);
+                var localSubInv = secureResolve(workingDir.resolve("inventory"), relInv);
+                var localPluralInv = secureResolve(workingDir.resolve("inventories"), relInv);
 
                 if (Files.isDirectory(localInv)) {
                     FileUtils.copyDirectory(localInv.toFile(), inventoryDir.toFile());
@@ -964,8 +942,7 @@ public class AnsibleRunner extends Task implements
             return;
         }
 
-        // 7. Auto-detect inventory from workingDir if present (e.g. from namespace files)
-        Path inventoryFolder = workingDir.resolve("inventory");
+        var inventoryFolder = workingDir.resolve("inventory");
         if (Files.isDirectory(inventoryFolder)) {
             try {
                 FileUtils.copyDirectory(inventoryFolder.toFile(), inventoryDir.toFile());
@@ -1033,36 +1010,35 @@ public class AnsibleRunner extends Task implements
         return Map.copyOf(rawPasswords);
     }
 
-    private void populateEnvDir(RunContext runContext, Path envDir, Map<String, String> renderedPasswords) throws Exception {
-        // A. cmdline
-        List<String> cmdArgs = new ArrayList<>();
+    private void populateEnvDir(RunContext runContext, Path envDir, Map<String, String> rPasswords) throws Exception {
+        var cmdArgs = new ArrayList<String>();
         if (Boolean.TRUE.equals(runContext.render(this.checkMode).as(Boolean.class).orElse(false))) {
             cmdArgs.add("--check");
         }
         if (Boolean.TRUE.equals(runContext.render(this.diff).as(Boolean.class).orElse(false))) {
             cmdArgs.add("--diff");
         }
-        String renderedLimit = runContext.render(this.limit).as(String.class).orElse(null);
-        if (renderedLimit != null && !renderedLimit.isBlank()) {
-            validateCmdlineArg(renderedLimit);
+        var rLimit = runContext.render(this.limit).as(String.class).orElse(null);
+        if (rLimit != null && !rLimit.isBlank()) {
+            validateCmdlineArg(rLimit);
             cmdArgs.add("--limit");
-            cmdArgs.add(renderedLimit);
+            cmdArgs.add(rLimit);
         }
-        List<String> renderedTags = runContext.render(this.tags).asList(String.class);
-        if (!renderedTags.isEmpty()) {
-            for (String t : renderedTags)
+        var rTags = runContext.render(this.tags).asList(String.class);
+        if (!rTags.isEmpty()) {
+            for (var t : rTags)
                 validateCmdlineArg(t);
             cmdArgs.add("--tags");
-            cmdArgs.add(String.join(",", renderedTags));
+            cmdArgs.add(String.join(",", rTags));
         }
-        List<String> renderedSkipTags = runContext.render(this.skipTags).asList(String.class);
-        if (!renderedSkipTags.isEmpty()) {
-            for (String t : renderedSkipTags)
+        var rSkipTags = runContext.render(this.skipTags).asList(String.class);
+        if (!rSkipTags.isEmpty()) {
+            for (var t : rSkipTags)
                 validateCmdlineArg(t);
             cmdArgs.add("--skip-tags");
-            cmdArgs.add(String.join(",", renderedSkipTags));
+            cmdArgs.add(String.join(",", rSkipTags));
         }
-        Integer rForks = runContext.render(this.forks).as(Integer.class).orElse(5);
+        var rForks = runContext.render(this.forks).as(Integer.class).orElse(5);
         if (rForks != null) {
             if (rForks < 1) {
                 throw new IllegalArgumentException("forks must be greater than or equal to 1");
@@ -1070,7 +1046,7 @@ public class AnsibleRunner extends Task implements
             cmdArgs.add("-f");
             cmdArgs.add(String.valueOf(rForks));
         }
-        Integer rVerbosity = runContext.render(this.verbosity).as(Integer.class).orElse(0);
+        var rVerbosity = runContext.render(this.verbosity).as(Integer.class).orElse(0);
         if (rVerbosity != null) {
             if (rVerbosity < 0 || rVerbosity > 4) {
                 throw new IllegalArgumentException("verbosity must be between 0 and 4");
@@ -1083,35 +1059,32 @@ public class AnsibleRunner extends Task implements
             Files.writeString(envDir.resolve("cmdline"), String.join(" ", cmdArgs) + "\n", StandardCharsets.UTF_8);
         }
 
-        // B. extravars
         if (this.env != null && this.env.getExtraVars() != null) {
-            Map<String, Object> rawExtraVars = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
+            var rawExtraVars = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
             if (rawExtraVars != null && !rawExtraVars.isEmpty()) {
                 Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(rawExtraVars), StandardCharsets.UTF_8);
             }
         }
 
-        // C. envvars
         if (this.env != null && this.env.getEnvVars() != null) {
-            Map<String, String> rawEnvVars = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
+            var rawEnvVars = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
             if (rawEnvVars != null && !rawEnvVars.isEmpty()) {
                 Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rawEnvVars), StandardCharsets.UTF_8);
             }
         }
 
-        // D. passwords (secure secret mapping rendered at point of write)
-        if (renderedPasswords != null && !renderedPasswords.isEmpty()) {
-            Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(renderedPasswords), StandardCharsets.UTF_8);
+        if (rPasswords != null && !rPasswords.isEmpty()) {
+            Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(rPasswords), StandardCharsets.UTF_8);
         }
 
-        // E. ssh_key (written with secure 0600 POSIX permissions)
+        // Written with secure 0600 POSIX permissions to protect private key
         String rawKey = null;
         if (this.env != null && this.env.getSshKey() != null) {
             rawKey = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
         }
 
         if (rawKey != null && !rawKey.isBlank()) {
-            Path sshKeyPath = envDir.resolve("ssh_key");
+            var sshKeyPath = envDir.resolve("ssh_key");
             Files.writeString(sshKeyPath, rawKey.trim() + "\n", StandardCharsets.UTF_8);
             try {
                 Files.setPosixFilePermissions(sshKeyPath, PosixFilePermissions.fromString("rw-------"));
@@ -1122,16 +1095,15 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        // F. settings (execution timeout & idle timeout)
-        Map<String, Object> settings = new HashMap<>();
+        var settings = new HashMap<String, Object>();
         if (this.timeout != null) {
-            Duration dur = runContext.render(this.timeout).as(Duration.class).orElse(null);
+            var dur = runContext.render(this.timeout).as(Duration.class).orElse(null);
             if (dur != null) {
                 settings.put("job_timeout", dur.toSeconds());
             }
         }
         if (this.idleTimeout != null) {
-            Duration dur = runContext.render(this.idleTimeout).as(Duration.class).orElse(null);
+            var dur = runContext.render(this.idleTimeout).as(Duration.class).orElse(null);
             if (dur != null) {
                 settings.put("idle_timeout", dur.toSeconds());
             }
