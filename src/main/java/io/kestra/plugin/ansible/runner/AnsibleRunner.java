@@ -68,16 +68,9 @@ import lombok.experimental.SuperBuilder;
 @EqualsAndHashCode
 @Getter
 @NoArgsConstructor
-@Schema(
-    title = "Execute Ansible playbooks using Ansible Runner",
-    description = "Provides enterprise-grade Ansible orchestration with containerized Execution Environments, structured telemetry, and zero UI log bloat."
-)
-@Plugin(
-    examples = {
-        @Example(
-            title = "Execute an inline Ansible playbook and inventory with zero external dependencies.",
-            full = true,
-            code = """
+@Schema(title = "Execute Ansible playbooks using Ansible Runner", description = "Provides enterprise-grade Ansible orchestration with containerized Execution Environments, structured telemetry, and zero UI log bloat.")
+@Plugin(examples = {
+        @Example(title = "Execute an inline Ansible playbook and inventory with zero external dependencies.", full = true, code = """
                 id: run_ansible_inline
                 namespace: dev
 
@@ -94,12 +87,8 @@ import lombok.experimental.SuperBuilder;
                       content: |
                         localhost ansible_connection=local
                     verbosity: 1
-                """
-        ),
-        @Example(
-            title = "Execute an Ansible playbook using Namespace Files for project and inventory with live log streaming and telemetry output.",
-            full = true,
-            code = """
+                """),
+        @Example(title = "Execute an Ansible playbook using Namespace Files for project and inventory with live log streaming and telemetry output.", full = true, code = """
                 id: run_ansible_playbook
                 namespace: dev
 
@@ -116,15 +105,13 @@ import lombok.experimental.SuperBuilder;
                     streamLogs: true
                     outputLogFile: true
                     verbosity: 1
-                """
-        )
-    }
-)
+                """)
+})
 public class AnsibleRunner extends Task implements
-    RunnableTask<AnsibleRunner.Output>,
-    NamespaceFilesInterface,
-    InputFilesInterface,
-    OutputFilesInterface {
+        RunnableTask<AnsibleRunner.Output>,
+        NamespaceFilesInterface,
+        InputFilesInterface,
+        OutputFilesInterface {
 
     private static final String DEFAULT_CONTAINER_IMAGE = "quay.io/ansible/ansible-runner:stable-2.12-latest";
     private static final Pattern PKG_ALLOWLIST = Pattern.compile("^[a-zA-Z0-9_][a-zA-Z0-9_\\-\\.\\=\\>\\<\\~]*$");
@@ -139,135 +126,86 @@ public class AnsibleRunner extends Task implements
     @PluginProperty(group = "execution")
     private Property<String> containerImage = Property.ofValue(DEFAULT_CONTAINER_IMAGE);
 
-    @Schema(
-        title = "Task runner",
-        description = "Runner implementation to execute the runner container; defaults to Docker."
-    )
+    @Schema(title = "Task runner", description = "Runner implementation to execute the runner container; defaults to Docker.")
     @PluginProperty(group = "execution")
     @Builder.Default
     @Valid
     protected TaskRunner<?> taskRunner = Docker.instance();
 
-    @Schema(
-        title = "Namespace files configuration",
-        description = "Enables loading files from Kestra namespace storage directly into the execution environment."
-    )
+    @Schema(title = "Namespace files configuration", description = "Enables loading files from Kestra namespace storage directly into the execution environment.")
     @PluginProperty(group = "execution")
     private NamespaceFiles namespaceFiles;
 
-    @Schema(
-        title = "Input files to inject into the working directory",
-        description = "Map of additional files to create in the container environment before execution."
-    )
+    @Schema(title = "Input files to inject into the working directory", description = "Map of additional files to create in the container environment before execution.")
     @PluginProperty(group = "execution")
     private Object inputFiles;
 
-    @Schema(
-        title = "Output files to capture and store in internal storage",
-        description = "List of glob patterns for files to extract from the execution directory and make available as task outputs."
-    )
+    @Schema(title = "Output files to capture and store in internal storage", description = "List of glob patterns for files to extract from the execution directory and make available as task outputs.")
     @PluginProperty(group = "execution")
     private Property<List<String>> outputFiles;
 
-    @Schema(
-        title = "Auto-install Ansible Galaxy collections and roles",
-        description = "If true, automatically runs ansible-galaxy install -r requirements.yml if present before executing the playbook."
-    )
+    @Schema(title = "Auto-install Ansible Galaxy collections and roles", description = "If true, automatically runs ansible-galaxy install -r requirements.yml if present before executing the playbook.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> autoInstallGalaxyRequirements = Property.ofValue(true);
 
-    @Schema(
-        title = "Auto-install Python requirements",
-        description = "If true, automatically runs pip install --no-cache-dir -r requirements.txt if present before executing the playbook."
-    )
+    @Schema(title = "Auto-install Python requirements", description = "If true, automatically runs pip install --no-cache-dir -r requirements.txt if present before executing the playbook.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> autoInstallPythonRequirements = Property.ofValue(true);
 
-    @Schema(
-        title = "Explicit Ansible Galaxy collections or roles to install",
-        description = "List of collection or role specifiers passed to ansible-galaxy install before execution."
-    )
+    @Schema(title = "Explicit Ansible Galaxy collections or roles to install", description = "List of collection or role specifiers passed to ansible-galaxy install before execution.")
     @PluginProperty(group = "advanced")
     private Property<List<String>> galaxyDependencies;
 
-    @Schema(
-        title = "Explicit Python packages to install",
-        description = "List of pip package specifiers passed to pip install before execution."
-    )
+    @Schema(title = "Explicit Python packages to install", description = "List of pip package specifiers passed to pip install before execution.")
     @PluginProperty(group = "advanced")
     private Property<List<String>> pythonDependencies;
 
-    @Schema(
-        title = "Commands to execute before the runner process",
-        description = "Custom shell commands to run inside the container prior to ansible-runner execution."
-    )
+    @Schema(title = "Commands to execute before the runner process", description = "Custom shell commands to run inside the container prior to ansible-runner execution.")
     @PluginProperty(group = "execution")
     private Property<List<String>> beforeCommands;
 
-    @Schema(
-        title = "Execution log verbosity mode",
-        description = "Controls logging verbosity. SUMMARY streams task names, recap, and errors; FULL streams all stdout/stderr lines."
-    )
+    @Schema(title = "Execution log verbosity mode", description = "Controls logging verbosity. SUMMARY streams task names, recap, and errors; FULL streams all stdout/stderr lines.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<LogsMode> logsMode = Property.ofValue(LogsMode.FULL);
 
-    @Schema(
-        title = "Stream container logs to Kestra logger in real time",
-        description = "Whether to stream container stdout and stderr to the live execution logger (default true)."
-    )
+    @Schema(title = "Stream container logs to Kestra logger in real time", description = "Whether to stream container stdout and stderr to the live execution logger (default true).")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> streamLogs = Property.ofValue(true);
 
-    @Schema(
-        title = "Maximum number of log lines streamed to the Kestra UI",
-        description = "Protects the Kestra UI and log repository on very large runs. Lines are also batched into few log entries. " +
-            "Once the limit is reached only failures, unreachable hosts and the play recap are still streamed, and the complete " +
-            "log is automatically stored in `outputLogFile`. Set to 0 for unlimited (not recommended for huge playbooks)."
-    )
+    @Schema(title = "Maximum number of log lines streamed to the Kestra UI", description = "Protects the Kestra UI and log repository on very large runs. Lines are also batched into few log entries. "
+            +
+            "Once the limit is reached only failures, unreachable hosts and the play recap are still streamed, and the complete "
+            +
+            "log is automatically stored in `outputLogFile`. Set to 0 for unlimited (not recommended for huge playbooks).")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<@Min(0) Long> maxLogLines = Property.ofValue(DEFAULT_MAX_LOG_LINES);
 
-    @Schema(
-        title = "Whether to write the execution logs to a file in internal storage",
-        description = "If true, stores the complete execution log as a file in Kestra storage and returns its URI."
-    )
+    @Schema(title = "Whether to write the execution logs to a file in internal storage", description = "If true, stores the complete execution log as a file in Kestra storage and returns its URI.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> outputLogFile = Property.ofValue(false);
 
-    @Schema(
-        title = "Maximum allowed byte size for task outputs",
-        description = "Guards against excessively large JSON telemetry exceeding the queue limit (default 10MB)."
-    )
+    @Schema(title = "Maximum allowed byte size for task outputs", description = "Guards against excessively large JSON telemetry exceeding the queue limit (default 10MB).")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<@Min(0) Long> maxOutputsSize = Property.ofValue(DEFAULT_MAX_OUTPUTS_SIZE);
 
-    @Schema(
-        title = "Generate and upload consolidated results.json report",
-        description = "Whether to parse telemetry into a single structured results.json uploaded to internal storage (default true). Set to false to omit resultsUri from outputs."
-    )
+    @Schema(title = "Generate and upload consolidated results.json report", description = "Whether to parse telemetry into a single structured results.json uploaded to internal storage (default true). Set to false to omit resultsUri from outputs.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> saveResults = Property.ofValue(true);
 
-    @Schema(
-        title = "Package and upload raw runner artifacts directory as a zip archive",
-        description = "Whether to package the full /runner/artifacts/<ident>/ folder into a .zip archive (default true). Set to false to omit artifactsUri from outputs."
-    )
+    @Schema(title = "Package and upload raw runner artifacts directory as a zip archive", description = "Whether to package the full /runner/artifacts/<ident>/ folder into a .zip archive (default true). Set to false to omit artifactsUri from outputs.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> saveArtifacts = Property.ofValue(true);
 
-    @Schema(
-        title = "Include summary metrics and changed count in task outputs",
-        description = "Whether to include summary metrics (ok, changed, failures, unreachable, skipped) and changed host count in outputs (default false). When false, outputs are kept minimal."
-    )
+    @Schema(title = "Include summary metrics and changed count in task outputs", description = "Whether to include summary metrics (ok, changed, failures, unreachable, skipped) and changed host count in outputs (default false). When false, outputs are kept minimal.")
     @Builder.Default
     @PluginProperty(group = "advanced")
     private Property<Boolean> outputSummary = Property.ofValue(false);
@@ -304,19 +242,13 @@ public class AnsibleRunner extends Task implements
     @PluginProperty(group = "execution")
     private Property<@Min(1) Integer> forks = Property.ofValue(5);
 
-    @Schema(
-        title = "Project playbook configuration",
-        anyOf = { Project.class, String.class }
-    )
+    @Schema(title = "Project playbook configuration", anyOf = { Project.class, String.class })
     @Builder.Default
     private Project project = Project.builder()
-        .playbook(Property.ofValue(DEFAULT_PLAYBOOK))
-        .build();
+            .playbook(Property.ofValue(DEFAULT_PLAYBOOK))
+            .build();
 
-    @Schema(
-        title = "Inventory configuration or file path",
-        anyOf = { Inventory.class, String.class }
-    )
+    @Schema(title = "Inventory configuration or file path", anyOf = { Inventory.class, String.class })
     private Inventory inventory;
 
     @Schema(title = "Environment and credentials configuration")
@@ -376,9 +308,11 @@ public class AnsibleRunner extends Task implements
             Files.createDirectories(artifactsBaseDir);
 
             // Pre-load namespace files directly into the working directory if configured.
-            // Loaded once here so playbooks, inventories, and roles are available in workingDir before resolution;
+            // Loaded once here so playbooks, inventories, and roles are available in
+            // workingDir before resolution;
             // not passed to CommandsWrapper to prevent duplicate loading.
-            if (this.namespaceFiles != null && !Boolean.FALSE.equals(runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
+            if (this.namespaceFiles != null && !Boolean.FALSE
+                    .equals(runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
                 NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
             }
 
@@ -392,21 +326,26 @@ public class AnsibleRunner extends Task implements
             var ident = IdUtils.create();
             var rImage = runContext.render(this.containerImage).as(String.class).orElse(DEFAULT_CONTAINER_IMAGE);
 
-            // Playbook-level failures (rc=2 failed hosts, rc=4 unreachable) must not make the task runner
-            // throw before telemetry is parsed. If ansible-runner produced an rc artifact, exit 0 and let
-            // failOnErrors decide; otherwise (runner never started) propagate the real exit code.
+            // Playbook-level failures (rc=2 failed hosts, rc=4 unreachable) must not make
+            // the task runner
+            // throw before telemetry is parsed. If ansible-runner produced an rc artifact,
+            // exit 0 and let
+            // failOnErrors decide; otherwise (runner never started) propagate the real exit
+            // code.
             var runnerCommand = List.of(
-                "ansible-runner run ./runner -p '" + resolvedPlaybook.replace("'", "'\\''") + "' --ident " + ident
-                    + "; __rc=$?; if [ -f ./runner/artifacts/" + ident + "/rc ]; then if [ $__rc -eq 2 ] || [ $__rc -eq 4 ]; then exit 0; fi; fi; exit $__rc"
-            );
+                    "ansible-runner run ./runner -p '" + resolvedPlaybook.replace("'", "'\\''") + "' --ident " + ident
+                            + "; __rc=$?; if [ -f ./runner/artifacts/" + ident
+                            + "/rc ]; then if [ $__rc -eq 2 ] || [ $__rc -eq 4 ]; then exit 0; fi; fi; exit $__rc");
 
             var rStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(true);
             var rLogsMode = runContext.render(this.logsMode).as(LogsMode.class).orElse(LogsMode.FULL);
             var rOutputLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
             var rMaxLogLines = runContext.render(this.maxLogLines).as(Long.class).orElse(DEFAULT_MAX_LOG_LINES);
 
-            // Full raw output is always spooled to disk (never kept in memory) so it can be uploaded without loss.
-            // It lives in the system temp directory outside the container working directory to prevent Docker volume mount collisions.
+            // Full raw output is always spooled to disk (never kept in memory) so it can be
+            // uploaded without loss.
+            // It lives in the system temp directory outside the container working directory
+            // to prevent Docker volume mount collisions.
             try {
                 Files.setPosixFilePermissions(logSpoolFile, PosixFilePermissions.fromString("rw-------"));
             } catch (UnsupportedOperationException ignored) {
@@ -440,21 +379,20 @@ public class AnsibleRunner extends Task implements
             }
 
             logConsumer = new AnsibleRunnerLogConsumer(
-                runContext,
-                rStreamLogs,
-                rLogsMode,
-                logSpoolFile,
-                rMaxLogLines,
-                LOG_BATCH_SIZE,
-                secretMasker
-            );
+                    runContext,
+                    rStreamLogs,
+                    rLogsMode,
+                    logSpoolFile,
+                    rMaxLogLines,
+                    LOG_BATCH_SIZE,
+                    secretMasker);
 
             var commandsWrapper = new CommandsWrapper(runContext)
-                .withLogConsumer(logConsumer)
-                .withTaskRunner(this.taskRunner)
-                .withContainerImage(rImage)
-                .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
-                .withCommands(Property.ofValue(runnerCommand));
+                    .withLogConsumer(logConsumer)
+                    .withTaskRunner(this.taskRunner)
+                    .withContainerImage(rImage)
+                    .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
+                    .withCommands(Property.ofValue(runnerCommand));
 
             var preCommands = buildPreCommands(runContext, workingDir);
             if (!preCommands.isEmpty()) {
@@ -518,10 +456,9 @@ public class AnsibleRunner extends Task implements
 
                 var resultsFile = workingDir.resolve("results-" + ident + ".json");
                 Files.writeString(
-                    resultsFile,
-                    JacksonMapper.ofJson().writerWithDefaultPrettyPrinter().writeValueAsString(consolidatedResults),
-                    StandardCharsets.UTF_8
-                );
+                        resultsFile,
+                        JacksonMapper.ofJson().writerWithDefaultPrettyPrinter().writeValueAsString(consolidatedResults),
+                        StandardCharsets.UTF_8);
                 resultsUri = runContext.storage().putFile(resultsFile.toFile());
                 Files.deleteIfExists(resultsFile);
             }
@@ -565,42 +502,44 @@ public class AnsibleRunner extends Task implements
             var rOutputSummary = runContext.render(this.outputSummary).as(Boolean.class).orElse(false);
 
             var output = Output.builder()
-                .resultsUri(resultsUri)
-                .artifactsUri(artifactsUri)
-                .outputLogFile(logFileUri)
-                .outputFiles(finalOutputFiles)
-                .status(telemetry.status)
-                .rc(telemetry.rc)
-                .failures(telemetry.summary.getFailures())
-                .changed(rOutputSummary ? telemetry.summary.getChanged() : null)
-                .failedHosts(telemetry.failedHosts)
-                .stats(telemetry.stats)
-                .summary(rOutputSummary ? telemetry.summary : null)
-                .build();
+                    .resultsUri(resultsUri)
+                    .artifactsUri(artifactsUri)
+                    .outputLogFile(logFileUri)
+                    .outputFiles(finalOutputFiles)
+                    .status(telemetry.status)
+                    .rc(telemetry.rc)
+                    .failures(telemetry.summary.getFailures())
+                    .changed(rOutputSummary ? telemetry.summary.getChanged() : null)
+                    .failedHosts(telemetry.failedHosts)
+                    .stats(telemetry.stats)
+                    .summary(rOutputSummary ? telemetry.summary : null)
+                    .build();
 
-            // Check output size against maxOutputsSize after storing results; truncate stats and failedHosts to preserve URIs
-            var rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class).orElse(DEFAULT_MAX_OUTPUTS_SIZE);
+            // Check output size against maxOutputsSize after storing results; truncate
+            // stats and failedHosts to preserve URIs
+            var rMaxOutputsSize = runContext.render(this.maxOutputsSize).as(Long.class)
+                    .orElse(DEFAULT_MAX_OUTPUTS_SIZE);
             var outputBytes = JacksonMapper.ofJson().writeValueAsBytes(output);
             if (outputBytes.length > rMaxOutputsSize) {
                 runContext.logger().warn(
-                    "Ansible task output ({} bytes) exceeds configured maxOutputsSize of {} bytes. " +
-                        "Truncating inline failedHosts and stats to fit limit and preserve resultsUri, artifactsUri, and outputLogFile. " +
-                        "Complete details remain stored in {}",
-                    outputBytes.length, rMaxOutputsSize, resultsUri
-                );
+                        "Ansible task output ({} bytes) exceeds configured maxOutputsSize of {} bytes. " +
+                                "Truncating inline failedHosts and stats to fit limit and preserve resultsUri, artifactsUri, and outputLogFile. "
+                                +
+                                "Complete details remain stored in {}",
+                        outputBytes.length, rMaxOutputsSize, resultsUri);
                 output = output.toBuilder()
-                    .failedHosts(List.of())
-                    .stats(Map.of())
-                    .build();
+                        .failedHosts(List.of())
+                        .stats(Map.of())
+                        .build();
             }
 
             var rFailOnErrors = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
             if (rFailOnErrors && !"successful".equalsIgnoreCase(telemetry.status)) {
-                runContext.logger().error("Ansible Runner failed. Results: {}, Artifacts: {}, Logs: {}", resultsUri, artifactsUri, logFileUri);
+                runContext.logger().error("Ansible Runner failed. Results: {}, Artifacts: {}, Logs: {}", resultsUri,
+                        artifactsUri, logFileUri);
                 throw new IllegalStateException(
-                    "Ansible Runner failed with status '" + telemetry.status + "' and exit code " + telemetry.rc +
-                        " on hosts: " + telemetry.failedHosts
-                );
+                        "Ansible Runner failed with status '" + telemetry.status + "' and exit code " + telemetry.rc +
+                                " on hosts: " + telemetry.failedHosts);
             }
 
             return output;
@@ -617,7 +556,8 @@ public class AnsibleRunner extends Task implements
         }
     }
 
-    private List<String> buildPreCommands(RunContext runContext, Path workingDir) throws IllegalVariableEvaluationException {
+    private List<String> buildPreCommands(RunContext runContext, Path workingDir)
+            throws IllegalVariableEvaluationException {
         var cmds = new ArrayList<String>();
 
         if (this.beforeCommands != null) {
@@ -628,13 +568,13 @@ public class AnsibleRunner extends Task implements
         var rGalaxyDeps = runContext.render(this.galaxyDependencies).asList(String.class);
         if (rAutoInstallGalaxy) {
             cmds.add(
-                "if [ -f ./runner/project/requirements.yml ]; then ansible-galaxy install -r ./runner/project/requirements.yml; elif [ -f requirements.yml ]; then ansible-galaxy install -r requirements.yml; fi"
-            );
+                    "if [ -f ./runner/project/requirements.yml ]; then ansible-galaxy install -r ./runner/project/requirements.yml; elif [ -f requirements.yml ]; then ansible-galaxy install -r requirements.yml; fi");
         }
         if (!rGalaxyDeps.isEmpty()) {
             for (var dep : rGalaxyDeps) {
                 if (!PKG_ALLOWLIST.matcher(dep).matches()) {
-                    throw new IllegalArgumentException("Invalid galaxy dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
+                    throw new IllegalArgumentException(
+                            "Invalid galaxy dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
             }
             var quotedGalaxyDeps = rGalaxyDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
@@ -645,13 +585,13 @@ public class AnsibleRunner extends Task implements
         var rPythonDeps = runContext.render(this.pythonDependencies).asList(String.class);
         if (rAutoInstallPython) {
             cmds.add(
-                "if [ -f ./runner/project/requirements.txt ]; then pip install --no-cache-dir -r ./runner/project/requirements.txt; elif [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi"
-            );
+                    "if [ -f ./runner/project/requirements.txt ]; then pip install --no-cache-dir -r ./runner/project/requirements.txt; elif [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi");
         }
         if (!rPythonDeps.isEmpty()) {
             for (var dep : rPythonDeps) {
                 if (!PKG_ALLOWLIST.matcher(dep).matches()) {
-                    throw new IllegalArgumentException("Invalid python dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
+                    throw new IllegalArgumentException(
+                            "Invalid python dependency: " + dep + ". Must match " + PKG_ALLOWLIST.pattern());
                 }
             }
             var quotedPythonDeps = rPythonDeps.stream().map(d -> "'" + d.replace("'", "'\\''") + "'").toList();
@@ -669,7 +609,7 @@ public class AnsibleRunner extends Task implements
     }
 
     private void resolveProjectSource(RunContext runContext, Path workingDir, Path projectDir, String playbookName)
-        throws Exception {
+            throws Exception {
         String rInlineContent = null;
         if (this.project != null) {
             if (this.project.getContent() != null) {
@@ -690,7 +630,8 @@ public class AnsibleRunner extends Task implements
         }
 
         if (rSourceStr != null && !rSourceStr.isBlank()) {
-            if (rSourceStr.contains("\n") || rSourceStr.trim().startsWith("---") || rSourceStr.trim().startsWith("- ") || rSourceStr.trim().startsWith("----")) {
+            if (rSourceStr.contains("\n") || rSourceStr.trim().startsWith("---") || rSourceStr.trim().startsWith("- ")
+                    || rSourceStr.trim().startsWith("----")) {
                 writePlaybookContent(projectDir, playbookName, rSourceStr);
                 return;
             }
@@ -708,8 +649,8 @@ public class AnsibleRunner extends Task implements
                 }
             } else if (rSourceStr.contains("://")) {
                 throw new IllegalArgumentException(
-                    "Unsupported URI scheme for project source: " + rSourceStr + ". Only kestra:// internal storage URIs or local workspace paths are supported."
-                );
+                        "Unsupported URI scheme for project source: " + rSourceStr
+                                + ". Only kestra:// internal storage URIs or local workspace paths are supported.");
             } else {
                 var relSource = rSourceStr.startsWith("/") ? rSourceStr.substring(1) : rSourceStr;
                 var localSource = secureResolve(workingDir, relSource);
@@ -725,7 +666,8 @@ public class AnsibleRunner extends Task implements
                             ArchiveUtils.untarGz(is, projectDir);
                         }
                     } else {
-                        Files.copy(localSource, secureResolve(projectDir, playbookName), StandardCopyOption.REPLACE_EXISTING);
+                        Files.copy(localSource, secureResolve(projectDir, playbookName),
+                                StandardCopyOption.REPLACE_EXISTING);
                     }
                 } else {
                     throw new IllegalArgumentException("Project source not found: " + rSourceStr);
@@ -744,9 +686,9 @@ public class AnsibleRunner extends Task implements
             } else {
                 try (var stream = Files.walk(workingDir, 4)) {
                     var found = stream
-                        .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equals(playbookName))
-                        .filter(p -> !p.startsWith(projectDir))
-                        .findFirst();
+                            .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equals(playbookName))
+                            .filter(p -> !p.startsWith(projectDir))
+                            .findFirst();
                     if (found.isPresent()) {
                         Files.copy(found.get(), targetPlaybook, StandardCopyOption.REPLACE_EXISTING);
                     }
@@ -768,10 +710,9 @@ public class AnsibleRunner extends Task implements
         }
 
         var standardDirs = List.of(
-            "roles", "templates", "scripts", "group_vars", "host_vars",
-            "library", "lookup_plugins", "filter_plugins", "callback_plugins",
-            "module_utils", "collections"
-        );
+                "roles", "templates", "scripts", "group_vars", "host_vars",
+                "library", "lookup_plugins", "filter_plugins", "callback_plugins",
+                "module_utils", "collections");
         for (var dirName : standardDirs) {
             var srcDir = workingDir.resolve(dirName);
             var destDir = projectDir.resolve(dirName);
@@ -791,18 +732,19 @@ public class AnsibleRunner extends Task implements
         if (sanitized.startsWith("{") && sanitized.endsWith("}")) {
             try {
                 var map = JacksonMapper.ofJson().readValue(
-                    sanitized,
-                    new TypeReference<Map<String, Object>>() {
-                    }
-                );
-                if (!map.isEmpty() && map.keySet().stream().anyMatch(k -> k.endsWith(".yml") || k.endsWith(".yaml") || k.contains("/"))) {
+                        sanitized,
+                        new TypeReference<Map<String, Object>>() {
+                        });
+                if (!map.isEmpty() && map.keySet().stream()
+                        .anyMatch(k -> k.endsWith(".yml") || k.endsWith(".yaml") || k.contains("/"))) {
                     for (var entry : map.entrySet()) {
                         var target = secureResolve(projectDir, entry.getKey());
                         if (target.getParent() != null) {
                             Files.createDirectories(target.getParent());
                         }
                         var fileVal = entry.getValue() != null ? entry.getValue().toString() : "";
-                        writePlaybookContent(target.getParent() != null ? target.getParent() : projectDir, target.getFileName().toString(), fileVal);
+                        writePlaybookContent(target.getParent() != null ? target.getParent() : projectDir,
+                                target.getFileName().toString(), fileVal);
                     }
                     return;
                 }
@@ -843,7 +785,8 @@ public class AnsibleRunner extends Task implements
                 var meta = new HashMap<String, Object>();
                 meta.put("hostvars", rHosts);
                 jsonInventory.put("_meta", meta);
-                Files.writeString(inventoryDir.resolve("hosts.json"), JacksonMapper.ofJson().writeValueAsString(jsonInventory), StandardCharsets.UTF_8);
+                Files.writeString(inventoryDir.resolve("hosts.json"),
+                        JacksonMapper.ofJson().writeValueAsString(jsonInventory), StandardCharsets.UTF_8);
                 return;
             }
         }
@@ -851,7 +794,8 @@ public class AnsibleRunner extends Task implements
         if (this.inventory != null && this.inventory.getGroups() != null) {
             var rGroups = runContext.render(this.inventory.getGroups()).asMap(String.class, Object.class);
             if (!rGroups.isEmpty()) {
-                Files.writeString(inventoryDir.resolve("hosts.json"), JacksonMapper.ofJson().writeValueAsString(rGroups), StandardCharsets.UTF_8);
+                Files.writeString(inventoryDir.resolve("hosts.json"),
+                        JacksonMapper.ofJson().writeValueAsString(rGroups), StandardCharsets.UTF_8);
                 return;
             }
         }
@@ -860,7 +804,8 @@ public class AnsibleRunner extends Task implements
             var rScriptStr = runContext.render(this.inventory.getScript()).as(String.class).orElse(null);
             if (rScriptStr != null && !rScriptStr.isBlank()) {
                 var scriptTarget = inventoryDir.resolve("hosts");
-                var localScript = secureResolve(workingDir, rScriptStr.startsWith("/") ? rScriptStr.substring(1) : rScriptStr);
+                var localScript = secureResolve(workingDir,
+                        rScriptStr.startsWith("/") ? rScriptStr.substring(1) : rScriptStr);
                 if (Files.isRegularFile(localScript)) {
                     Files.copy(localScript, scriptTarget, StandardCopyOption.REPLACE_EXISTING);
                 } else {
@@ -885,14 +830,15 @@ public class AnsibleRunner extends Task implements
                         }
                     } else if (src.contains("://")) {
                         throw new IllegalArgumentException(
-                            "Unsupported URI scheme for inventory source: " + src + ". Only kestra:// internal storage URIs or local workspace paths are supported."
-                        );
+                                "Unsupported URI scheme for inventory source: " + src
+                                        + ". Only kestra:// and nsfile:// internal storage URIs or local workspace paths are supported.");
                     } else {
                         var localSrc = secureResolve(workingDir, src.startsWith("/") ? src.substring(1) : src);
                         if (Files.isDirectory(localSrc)) {
                             FileUtils.copyDirectory(localSrc.toFile(), inventoryDir.toFile());
                         } else if (Files.isRegularFile(localSrc)) {
-                            Files.copy(localSrc, secureResolve(inventoryDir, localSrc.getFileName().toString()), StandardCopyOption.REPLACE_EXISTING);
+                            Files.copy(localSrc, secureResolve(inventoryDir, localSrc.getFileName().toString()),
+                                    StandardCopyOption.REPLACE_EXISTING);
                         } else {
                             throw new IllegalArgumentException("Inventory source not found: " + src);
                         }
@@ -908,12 +854,40 @@ public class AnsibleRunner extends Task implements
         }
 
         if (rInvFile != null && !rInvFile.isBlank()) {
+
             if (rInvFile.startsWith("kestra://")) {
                 try (var is = runContext.storage().getFile(URI.create(rInvFile))) {
                     Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                    runContext.logger().info("Namespace inventory copied to: {}", inventoryDir.resolve("hosts"));
+                }
+            } else if (rInvFile.startsWith("nsfile://")) {
+                var nsFilePath = rInvFile.substring("nsfile://".length());
+                var separator = nsFilePath.indexOf('/');
+
+                if (separator <= 0 || separator == nsFilePath.length() - 1) {
+                    throw new IllegalArgumentException("Invalid namespace file URI: " + rInvFile);
+                }
+
+                var namespace = nsFilePath.substring(0, separator);
+                var filePath = nsFilePath.substring(separator + 1);
+
+                var namespaceFiles = runContext.storage()
+                        .namespace(namespace)
+                        .findAllFilesMatching(List.of(filePath), List.of());
+
+                if (namespaceFiles.isEmpty()) {
+                    throw new IllegalArgumentException("Namespace inventory file not found: " + rInvFile);
+                }
+
+                var namespaceFile = namespaceFiles.get(0);
+
+                try (var is = runContext.storage().getFile(namespaceFile.uri())) {
+                    Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                    runContext.logger().info("Namespace inventory copied to: {}", inventoryDir.resolve("hosts"));
                 }
             } else if (rInvFile.contains("://")) {
-                throw new IllegalArgumentException("Unsupported URI scheme for inventory file: " + rInvFile + ". Only kestra:// internal storage URIs or local workspace paths are supported.");
+                throw new IllegalArgumentException("Unsupported URI scheme for inventory file: " + rInvFile
+                        + ". Only kestra:// and nsfile:// internal storage URIs or local workspace paths are supported.");
             } else {
                 var relInv = rInvFile.startsWith("/") ? rInvFile.substring(1) : rInvFile;
                 var localInv = secureResolve(workingDir, relInv);
@@ -967,9 +941,8 @@ public class AnsibleRunner extends Task implements
         }
 
         var candidateInvs = List.of(
-            "inventory/hosts.ini", "inventory/hosts", "inventory/hosts.yml", "inventory/hosts.yaml",
-            "hosts.ini", "hosts", "hosts.yml", "hosts.yaml", "inventory.ini"
-        );
+                "inventory/hosts.ini", "inventory/hosts", "inventory/hosts.yml", "inventory/hosts.yaml",
+                "hosts.ini", "hosts", "hosts.yml", "hosts.yaml", "inventory.ini");
         for (var cand : candidateInvs) {
             var candPath = secureResolve(workingDir, cand);
             if (Files.isRegularFile(candPath)) {
@@ -1056,19 +1029,22 @@ public class AnsibleRunner extends Task implements
         if (this.env != null && this.env.getExtraVars() != null) {
             var rExtraVarsMap = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
             if (rExtraVarsMap != null && !rExtraVarsMap.isEmpty()) {
-                Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(rExtraVarsMap), StandardCharsets.UTF_8);
+                Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(rExtraVarsMap),
+                        StandardCharsets.UTF_8);
             }
         }
 
         if (this.env != null && this.env.getEnvVars() != null) {
             var rEnvVarsMap = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
             if (rEnvVarsMap != null && !rEnvVarsMap.isEmpty()) {
-                Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rEnvVarsMap), StandardCharsets.UTF_8);
+                Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rEnvVarsMap),
+                        StandardCharsets.UTF_8);
             }
         }
 
         if (rPasswords != null && !rPasswords.isEmpty()) {
-            Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(rPasswords), StandardCharsets.UTF_8);
+            Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(rPasswords),
+                    StandardCharsets.UTF_8);
         }
 
         // Written with secure 0600 POSIX permissions to protect private key
@@ -1103,26 +1079,30 @@ public class AnsibleRunner extends Task implements
             }
         }
         if (!settings.isEmpty()) {
-            Files.writeString(envDir.resolve("settings"), JacksonMapper.ofJson().writeValueAsString(settings), StandardCharsets.UTF_8);
+            Files.writeString(envDir.resolve("settings"), JacksonMapper.ofJson().writeValueAsString(settings),
+                    StandardCharsets.UTF_8);
         }
     }
 
-    private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode, SecretMasker secretMasker) {
+    private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode,
+            SecretMasker secretMasker) {
         var status = "failed";
         var rc = processExitCode;
         var failedHostsSet = new LinkedHashSet<String>();
         var failedTasks = new ArrayList<Map<String, Object>>();
         var stats = new HashMap<String, Object>();
         var summaryBuilder = RunnerSummary.builder()
-            .ok(0)
-            .changed(0)
-            .failures(0)
-            .unreachable(0)
-            .skipped(0);
+                .ok(0)
+                .changed(0)
+                .failures(0)
+                .unreachable(0)
+                .skipped(0);
 
         if (!Files.exists(identArtifactsDir)) {
             if (processExitCode == 0) {
-                throw new IllegalStateException("Ansible runner execution failed: process completed with exit code 0, but artifacts directory was not found at: " + identArtifactsDir);
+                throw new IllegalStateException(
+                        "Ansible runner execution failed: process completed with exit code 0, but artifacts directory was not found at: "
+                                + identArtifactsDir);
             }
         }
 
@@ -1149,9 +1129,9 @@ public class AnsibleRunner extends Task implements
             if (Files.isDirectory(jobEventsDir)) {
                 try (var stream = Files.list(jobEventsDir)) {
                     var eventFiles = stream
-                        .filter(p -> p.toString().endsWith(".json"))
-                        .sorted(Comparator.comparing(Path::getFileName))
-                        .toList();
+                            .filter(p -> p.toString().endsWith(".json"))
+                            .sorted(Comparator.comparing(Path::getFileName))
+                            .toList();
 
                     for (var eventFile : eventFiles) {
                         try {
@@ -1198,11 +1178,11 @@ public class AnsibleRunner extends Task implements
                                 var totSkipped = sumJsonNode(skippedNode);
 
                                 summaryBuilder
-                                    .changed(totChanged)
-                                    .failures(totFailures)
-                                    .ok(totOk)
-                                    .unreachable(totUnreachable)
-                                    .skipped(totSkipped);
+                                        .changed(totChanged)
+                                        .failures(totFailures)
+                                        .ok(totOk)
+                                        .unreachable(totUnreachable)
+                                        .skipped(totSkipped);
 
                                 var allHosts = new HashSet<String>();
                                 addHostKeys(allHosts, changedNode);
@@ -1237,12 +1217,15 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        return new ExecutionTelemetry(status, rc, new ArrayList<>(failedHostsSet), stats, summaryBuilder.build(), failedTasks);
+        return new ExecutionTelemetry(status, rc, new ArrayList<>(failedHostsSet), stats, summaryBuilder.build(),
+                failedTasks);
     }
 
     private void validateCmdlineArg(String arg) {
-        if (arg == null || arg.indexOf('\0') != -1 || WHITESPACE_PATTERN.matcher(arg).matches() || arg.startsWith("-")) {
-            throw new IllegalArgumentException("Invalid cmdline argument: '" + arg + "'. Cannot contain whitespace, NUL bytes, or start with '-'.");
+        if (arg == null || arg.indexOf('\0') != -1 || WHITESPACE_PATTERN.matcher(arg).matches()
+                || arg.startsWith("-")) {
+            throw new IllegalArgumentException("Invalid cmdline argument: '" + arg
+                    + "'. Cannot contain whitespace, NUL bytes, or start with '-'.");
         }
     }
 
@@ -1275,39 +1258,27 @@ public class AnsibleRunner extends Task implements
     }
 
     private record ExecutionTelemetry(
-        String status,
-        int rc,
-        List<String> failedHosts,
-        Map<String, Object> stats,
-        RunnerSummary summary,
-        List<Map<String, Object>> failedTasks) {
+            String status,
+            int rc,
+            List<String> failedHosts,
+            Map<String, Object> stats,
+            RunnerSummary summary,
+            List<Map<String, Object>> failedTasks) {
     }
 
     @Builder(toBuilder = true)
     @Getter
     public static class Output implements io.kestra.core.models.tasks.Output {
-        @Schema(
-            title = "Structured JSON telemetry report",
-            description = "A compact JSON file containing task and host execution summaries. Note: this excludes individual loop items to prevent massive file sizes."
-        )
+        @Schema(title = "Structured JSON telemetry report", description = "A compact JSON file containing task and host execution summaries. Note: this excludes individual loop items to prevent massive file sizes.")
         private URI resultsUri;
 
-        @Schema(
-            title = "Internal Ansible job events zip archive",
-            description = "A ZIP file of the raw /runner/artifacts/ folder containing all uncompressed Ansible runner internal JSON events (including every loop iteration)."
-        )
+        @Schema(title = "Internal Ansible job events zip archive", description = "A ZIP file of the raw /runner/artifacts/ folder containing all uncompressed Ansible runner internal JSON events (including every loop iteration).")
         private URI artifactsUri;
 
-        @Schema(
-            title = "Complete raw terminal output log",
-            description = "The complete, raw text log of the playbook execution. This contains 100% of the log lines, even if UI streaming was capped."
-        )
+        @Schema(title = "Complete raw terminal output log", description = "The complete, raw text log of the playbook execution. This contains 100% of the log lines, even if UI streaming was capped.")
         private URI outputLogFile;
 
-        @Schema(
-            title = "Extracted custom output files",
-            description = "Specific files generated by your playbook (e.g. report.csv) that were captured by the task's outputFiles property."
-        )
+        @Schema(title = "Extracted custom output files", description = "Specific files generated by your playbook (e.g. report.csv) that were captured by the task's outputFiles property.")
         private Map<String, URI> outputFiles;
 
         @Schema(title = "Final execution status (successful, failed, timeout)")
