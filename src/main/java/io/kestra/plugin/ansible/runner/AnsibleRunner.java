@@ -1195,14 +1195,15 @@ public class AnsibleRunner extends Task implements
         }
 
         // 1. Check relative or absolute path in workingDir
-        var localPath = runContext.workingDir().path().resolve(fileRef);
-        if (Files.isRegularFile(localPath)) {
+        var workingDir = runContext.workingDir().path();
+        var localPath = resolveWithin(workingDir, fileRef);
+        if (localPath != null && Files.isRegularFile(localPath)) {
             return Files.newInputStream(localPath);
         }
 
         // 2. Check in runner/project directory
-        var projectPath = runContext.workingDir().path().resolve("runner/project").resolve(fileRef);
-        if (Files.isRegularFile(projectPath)) {
+        var projectPath = resolveWithin(workingDir.resolve("runner/project"), fileRef);
+        if (projectPath != null && Files.isRegularFile(projectPath)) {
             return Files.newInputStream(projectPath);
         }
 
@@ -1232,6 +1233,12 @@ public class AnsibleRunner extends Task implements
         }
 
         throw new FileNotFoundException("Could not resolve extraVarsFile '" + fileRef + "'. Checked working directory, project directory, namespace files, and internal storage.");
+    }
+
+    private static Path resolveWithin(Path base, String fileRef) {
+        var normalizedBase = base.toAbsolutePath().normalize();
+        var resolved = normalizedBase.resolve(fileRef).normalize();
+        return resolved.startsWith(normalizedBase) ? resolved : null;
     }
 
     private Map<String, Object> parseExtraVarsContent(String filename, InputStream is) throws IOException {
