@@ -1,0 +1,31 @@
+﻿---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Failure with visible details
+      block:
+        - name: Generate visible failure
+          ansible.builtin.shell: >-
+            { printf 'STDERR_PREFIX_CANARY_319';
+              head -c 1500 /dev/zero | tr '\000' 'X';
+              printf 'FAILURE_DETAIL_CANARY_721\n'; } >&2; exit 7
+      rescue:
+        - name: Recover from visible failure
+          ansible.builtin.debug:
+            msg: "Recovered"
+
+    - name: Failure with hidden details
+      block:
+        - name: Generate hidden failure
+          ansible.builtin.shell: echo "NO_LOG_CANARY_842"; exit 9
+          no_log: true
+      rescue:
+        - name: Recover from hidden failure
+          ansible.builtin.debug:
+            msg: "Recovered"
+
+    - name: Declare explicit outputs
+      kestra:
+        outputs:
+          done: true
