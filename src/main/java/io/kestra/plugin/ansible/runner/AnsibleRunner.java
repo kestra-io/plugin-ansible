@@ -37,6 +37,7 @@ import io.kestra.core.models.tasks.NamespaceFiles;
 import io.kestra.core.models.tasks.NamespaceFilesInterface;
 import io.kestra.core.models.tasks.OutputFilesInterface;
 import io.kestra.core.models.tasks.RunnableTask;
+import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.RunContext;
@@ -597,9 +598,11 @@ public class AnsibleRunner extends Task implements
             var rFailOnErrors = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
             if (rFailOnErrors && !"successful".equalsIgnoreCase(telemetry.status)) {
                 runContext.logger().error("Ansible Runner failed. Results: {}, Artifacts: {}, Logs: {}", resultsUri, artifactsUri, logFileUri);
-                throw new IllegalStateException(
+                throw new RunnableTaskException(
                     "Ansible Runner failed with status '" + telemetry.status + "' and exit code " + telemetry.rc +
-                        " on hosts: " + telemetry.failedHosts
+                        " on hosts: " + telemetry.failedHosts,
+                    null,
+                    output
                 );
             }
 

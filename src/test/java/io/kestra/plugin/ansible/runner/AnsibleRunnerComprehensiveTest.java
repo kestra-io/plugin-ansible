@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.models.tasks.runners.TaskCommands;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.models.tasks.runners.TaskRunnerDetailResult;
@@ -923,16 +924,24 @@ public class AnsibleRunnerComprehensiveTest {
             )
             .build();
 
-        Exception thrown = assertThrows(RuntimeException.class, () -> task.run(runContext));
+        RunnableTaskException thrown = assertThrows(RunnableTaskException.class, () -> task.run(runContext));
         long dur = System.currentTimeMillis() - start;
 
         assertThat(thrown.getMessage(), containsString("Ansible Runner failed with status"));
         assertThat(thrown.getMessage(), containsString("exit code 2"));
+        assertNotNull(thrown.getOutput());
+        assertTrue(thrown.getOutput() instanceof AnsibleRunner.Output);
+        var out = (AnsibleRunner.Output) thrown.getOutput();
+        assertEquals("failed", out.getStatus());
+        assertEquals(2, out.getRc());
+        assertNotNull(out.getResultsUri());
+        assertNotNull(out.getArtifactsUri());
+        assertThat(out.getFailedHosts(), hasItem("host-02"));
 
         recordResult(
             "TC18", "Engine Controls", "failOnErrors=true hard failure exception",
-            "failOnErrors=true, runner returns rc=2", "RuntimeException thrown with failed hosts list",
-            "PASS", 2, dur, "Verified exception raised with detailed error message"
+            "failOnErrors=true, runner returns rc=2", "RunnableTaskException thrown with attached Output object",
+            "PASS", 2, dur, "Verified exception raised with detailed error message and task outputs"
         );
     }
 
