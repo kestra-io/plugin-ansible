@@ -1,11 +1,13 @@
 package io.kestra.plugin.ansible.runner;
 
+import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -413,13 +415,6 @@ public class AnsibleRunner extends Task implements
             // not passed to CommandsWrapper to prevent duplicate loading.
             if (this.namespaceFiles != null && !Boolean.FALSE.equals(runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
                 NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
-            }
-            if (this.inputFiles != null) {
-                PluginUtilsService.createInputFilesRaw(
-                    runContext,
-                    workingDir,
-                    PluginUtilsService.transformInputFiles(runContext, this.inputFiles)
-                );
             }
 
             var resolvedPlaybook = resolvePlaybook(runContext);
@@ -1174,7 +1169,7 @@ public class AnsibleRunner extends Task implements
         }
     }
 
-    private InputStream resolveExtraVarsInputStream(RunContext runContext, String fileRef) throws IOException {
+    private InputStream resolveExtraVarsInputStream(RunContext runContext, String fileRef) throws Exception {
         if (fileRef.startsWith("kestra://")) {
             return runContext.storage().getFile(URI.create(fileRef));
         }
@@ -1187,52 +1182,95 @@ public class AnsibleRunner extends Task implements
             if (cleanPath.isBlank()) {
                 throw new FileNotFoundException("Invalid nsfile URI: missing path in '" + fileRef + "'");
             }
+            var normalizedPath = Path.of(cleanPath).normalize();
+            if (normalizedPath.startsWith("..") || cleanPath.contains("..")) {
+                throw new IllegalArgumentException("Path traversal blocked in namespace file URI: '" + fileRef + "' escapes the namespace root.");
+            }
             if (host != null && !host.isBlank()) {
-                return runContext.storage().namespace(host).getFileContent(Path.of(cleanPath));
+                return runContext.storage().namespace(host).getFileContent(normalizedPath);
             } else {
-                return runContext.storage().namespace().getFileContent(Path.of(cleanPath));
+                return runContext.storage().namespace().getFileContent(normalizedPath);
             }
         }
 
-        // 1. Check relative or absolute path in workingDir
+        // Block relative path traversal attempts
+        if (Path.of(fileRef).normalize().startsWith("..") || fileRef.contains("..")) {
+            throw new IllegalArgumentException("Path traversal blocked: '" + fileRef + "' escapes the base directory.");
+        }
+
+        // 1. Check if defined in task inputFiles in-memory without duplicate on-disk materialization
+        if (this.inputFiles != null) {
+            var transformed = PluginUtilsService.transformInputFiles(runContext, this.inputFiles);
+            if (transformed != null && transformed.containsKey(fileRef)) {
+                var contentOrUri = transformed.get(fileRef);
+                if (contentOrUri != null) {
+                    if (contentOrUri.startsWith("kestra://")) {
+                        return runContext.storage().getFile(URI.create(contentOrUri));
+                    }
+                    return new ByteArrayInputStream(contentOrUri.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+        }
+
+        // 2. Check relative or absolute path in workingDir
         var workingDir = runContext.workingDir().path();
         var localPath = resolveWithin(workingDir, fileRef);
         if (localPath != null && Files.isRegularFile(localPath)) {
             return Files.newInputStream(localPath);
         }
 
-        // 2. Check in runner/project directory
+        // 3. Check in runner/project directory
         var projectPath = resolveWithin(workingDir.resolve("runner/project"), fileRef);
         if (projectPath != null && Files.isRegularFile(projectPath)) {
             return Files.newInputStream(projectPath);
         }
 
-        // 3. Check namespace shorthand (e.g. "company.network/extra.json")
+        var suppressedExceptions = new ArrayList<Throwable>();
+
+        // 4. Check namespace shorthand (e.g. "company.network/extra.json")
         if (fileRef.contains("/")) {
             var firstSlash = fileRef.indexOf('/');
             var namespace = fileRef.substring(0, firstSlash);
             var relativePath = fileRef.substring(firstSlash + 1);
+            var normalizedRel = Path.of(relativePath).normalize();
+            if (normalizedRel.startsWith("..") || relativePath.contains("..")) {
+                throw new IllegalArgumentException("Path traversal blocked in namespace path: '" + fileRef + "' escapes the namespace root.");
+            }
             try {
-                var is = runContext.storage().namespace(namespace).getFileContent(Path.of(relativePath));
+                var is = runContext.storage().namespace(namespace).getFileContent(normalizedRel);
                 if (is != null) {
                     return is;
                 }
-            } catch (Exception ignored) {
-                // Not found in namespace
+            } catch (FileNotFoundException | NoSuchFileException e) {
+                runContext.logger().debug("File '{}' not found in namespace '{}'", relativePath, namespace);
+            } catch (Exception e) {
+                runContext.logger().debug("Failed to query namespace file '{}/{}': {}", namespace, relativePath, e.getMessage());
+                suppressedExceptions.add(e);
             }
         }
 
-        // 4. Check current namespace shorthand (e.g. "extra.json")
+        // 5. Check current namespace shorthand (e.g. "extra.json")
+        var normalizedCurrent = Path.of(fileRef).normalize();
+        if (normalizedCurrent.startsWith("..") || fileRef.contains("..")) {
+            throw new IllegalArgumentException("Path traversal blocked in namespace path: '" + fileRef + "' escapes the namespace root.");
+        }
         try {
-            var is = runContext.storage().namespace().getFileContent(Path.of(fileRef));
+            var is = runContext.storage().namespace().getFileContent(normalizedCurrent);
             if (is != null) {
                 return is;
             }
-        } catch (Exception ignored) {
-            // Not found in current namespace
+        } catch (FileNotFoundException | NoSuchFileException e) {
+            runContext.logger().debug("File '{}' not found in current namespace", fileRef);
+        } catch (Exception e) {
+            runContext.logger().debug("Failed to query file '{}' in current namespace: {}", fileRef, e.getMessage());
+            suppressedExceptions.add(e);
         }
 
-        throw new FileNotFoundException("Could not resolve extraVarsFile '" + fileRef + "'. Checked working directory, project directory, namespace files, and internal storage.");
+        var fnf = new FileNotFoundException("Could not resolve extraVarsFile '" + fileRef + "'. Checked working directory, project directory, namespace files, and internal storage.");
+        for (var suppressed : suppressedExceptions) {
+            fnf.addSuppressed(suppressed);
+        }
+        throw fnf;
     }
 
     private static Path resolveWithin(Path base, String fileRef) {
@@ -1252,8 +1290,14 @@ public class AnsibleRunner extends Task implements
                 });
                 return result != null ? result : Collections.emptyMap();
             }
+        } catch (JsonProcessingException e) {
+            var loc = e.getLocation();
+            var locationDetails = (loc != null && loc.getLineNr() > 0)
+                ? " (line " + loc.getLineNr() + ", column " + loc.getColumnNr() + ")"
+                : "";
+            throw new IllegalArgumentException("Failed to parse extra variables file '" + filename + "'" + locationDetails + ": expected a YAML or JSON mapping/dictionary.");
         } catch (Exception e) {
-            throw new IllegalArgumentException("Failed to parse extra variables file '" + filename + "': expected a YAML or JSON mapping/dictionary. Cause: " + e.getMessage(), e);
+            throw new IllegalArgumentException("Failed to parse extra variables file '" + filename + "': expected a YAML or JSON mapping/dictionary.");
         }
     }
 
