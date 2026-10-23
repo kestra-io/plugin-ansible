@@ -678,7 +678,66 @@ class AnsibleCLITest {
         assertThat(runOutput.getVars().containsKey("playbooks"), is(false));
         assertThat(runOutput.getVars().get("outputs"), is(Map.of()));
     }
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_withExplicitOutputs_logFailureDetails() throws Exception {
+        AnsibleCLI.AnsibleOutput defaults = runExplicitFailureDetails(false);
+        AnsibleCLI.AnsibleOutput enabled = runExplicitFailureDetails(true);
 
+        assertThat(defaults.getExitCode(), is(0));
+        assertThat(enabled.getExitCode(), is(0));
+
+        String defaultJson = JacksonMapper.ofJson().writeValueAsString(defaults.getPlaybooks());
+        String enabledJson = JacksonMapper.ofJson().writeValueAsString(enabled.getPlaybooks());
+
+        // By default, failure details remain redacted in EXPLICIT mode.
+        assertThat(defaultJson, not(containsString("FAILURE_DETAIL_CANARY_721")));
+        assertThat(defaultJson, not(containsString("\"rc\":7")));
+
+        // When enabled, the ordinary failure includes its return code and stderr.
+        assertThat(enabledJson, containsString("FAILURE_DETAIL_CANARY_721"));
+        assertThat(enabledJson, containsString("\"rc\":7"));
+        assertThat(enabledJson, not(containsString("STDERR_PREFIX_CANARY_319")));
+        // no_log must continue to protect the hidden failure, even when details are enabled.
+        assertThat(enabledJson, not(containsString("NO_LOG_CANARY_842")));
+        assertThat(enabledJson, not(containsString("\"rc\":9")));
+    }
+
+    private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(boolean enabled) throws Exception {
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image(ANSIBLE_IMAGE)
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .logFailureDetails(Property.ofValue(enabled))
+            .inputFiles(
+                Map.of(
+                    "playbooks/playbook-explicit-failure-details.yml", storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader()
+                            .getResourceAsStream("playbooks/playbook-explicit-failure-details.yml")
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-failure-details.yml"
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        return execute.run(runContext);
+    }
     @Test
     @SuppressWarnings("unchecked")
     void run_withExplicitOutputs() throws Exception {

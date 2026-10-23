@@ -68,6 +68,9 @@ class CallbackModule(CallbackBase):
         #   explicit -> only values declared via the kestra module are
         #               emitted; per-host result payloads are redacted
         self._outputs_mode = os.environ.get("KESTRA_OUTPUTS_MODE", "all").strip().lower()
+        self._log_failure_details = (
+            os.environ.get("KESTRA_LOG_FAILURE_DETAILS", "false").strip().lower() == "true"
+        )
         self._kestra_explicit = {}
         # -----------------------------------------------
 
@@ -419,9 +422,25 @@ class CallbackModule(CallbackBase):
         """
         if self._outputs_mode == "explicit" and hasattr(result, "get"):
             redacted = {"changed": bool(result.get("changed", False))}
-            msg = result.get("msg")
-            if msg is not None:
-                redacted["msg"] = msg
+            no_log = result.get("_ansible_no_log", False)
+
+            if not no_log:
+                msg = result.get("msg")
+                if msg is not None:
+                    redacted["msg"] = msg
+
+                is_failure = bool(
+                    result.get("failed") or result.get("unreachable")
+                )
+                if self._log_failure_details and is_failure:
+                    rc = result.get("rc")
+                    if rc is not None:
+                        redacted["rc"] = rc
+
+                    stderr = result.get("stderr")
+                    if isinstance(stderr, str) and stderr:
+                        redacted["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+
             result = redacted
 
         return self._dump_results(result, *args, **kwargs)
@@ -596,15 +615,75 @@ class CallbackModule(CallbackBase):
 
         if self._outputs_mode == "explicit":
             # Keep skip-vs-failure visibility, drop the (possibly sensitive) payload.
-            # On failures, keep only the human-readable error reason so the run can
-            # be debugged without switching to ALL mode. msg is the field least
-            # likely to carry a raw secret (cmd/stdout/facts stay dropped). Secrets
-            # placed directly on a command line can still surface here.
             result_payload = {"changed": bool(result._result.get("changed", False))}
             if status in self.FAILURE_STATUSES:
-                msg = result._result.get("msg")
-                if msg is not None:
-                    result_payload["msg"] = msg
+                raw_result = result._result
+                no_log = raw_result.get("_ansible_no_log", False)
+
+                if not no_log:
+                    msg = raw_result.get("msg")
+                    if msg is not None:
+                        result_payload["msg"] = msg
+
+                if (
+                    self._log_failure_details
+                    and status in ("failed", "unreachable")
+                    and not no_log
+                ):
+                    rc = raw_result.get("rc")
+                    if rc is not None:
+                        result_payload["rc"] = rc
+
+                    stderr = raw_result.get("stderr")
+                    if isinstance(stderr, str) and stderr:
+                        result_payload["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+                    # Preserve only safe details for failed loop items.
+                    # Successful items and no_log items remain redacted.
+                    items = raw_result.get("results")
+                    if isinstance(items, list):
+                        safe_items = []
+
+                        for item_result in items:
+                            if len(safe_items) >= 50:
+                                break
+
+                            if not isinstance(item_result, dict):
+                                continue
+
+                            if item_result.get("_ansible_no_log", False):
+                                continue
+
+                            if not (
+                                item_result.get("failed", False)
+                                or item_result.get("unreachable", False)
+                            ):
+                                continue
+
+                            safe_item = {
+                                "failed": bool(item_result.get("failed", False)),
+                                "unreachable": bool(
+                                    item_result.get("unreachable", False)
+                                ),
+                            }
+
+                            msg = item_result.get("msg")
+                            if isinstance(msg, str):
+                                safe_item["msg"] = msg[:self.LIGHT_RESULT_LIMIT]
+                            elif msg is not None:
+                                safe_item["msg"] = self._light_msg(msg)
+
+                            rc = item_result.get("rc")
+                            if rc is not None:
+                                safe_item["rc"] = rc
+
+                            stderr = item_result.get("stderr")
+                            if isinstance(stderr, str) and stderr:
+                                safe_item["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+
+                            safe_items.append(safe_item)
+
+                        if safe_items:
+                            result_payload["results"] = safe_items
         else:
             result_payload = self._without_lines(result._result)
             self._mark_failed_items(result, host_name, result_payload)
