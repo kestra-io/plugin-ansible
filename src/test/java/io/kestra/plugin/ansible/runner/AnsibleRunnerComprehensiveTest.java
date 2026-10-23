@@ -1812,6 +1812,39 @@ public class AnsibleRunnerComprehensiveTest {
     }
 
     @Test
+    void test39b_ExtraVarsFiles_SymlinkEscapeBlocked() throws Exception {
+        var runContext = newRunContext();
+        var outside = Files.createTempFile("outside-extravars", ".yml");
+        Files.writeString(outside, "leaked: true\n");
+        Files.createSymbolicLink(runContext.workingDir().path().resolve("link.yml"), outside);
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(ComprehensiveMockRunner.builder().build())
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("link.yml")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        try {
+            assertThrows(java.io.FileNotFoundException.class, () -> task.run(runContext));
+        } finally {
+            Files.deleteIfExists(outside);
+        }
+    }
+
+    @Test
     void test40_ExtraVarsFiles_NamespacePathTraversalBlocked() {
         var runContext = newRunContext();
         var runner = ComprehensiveMockRunner.builder().build();

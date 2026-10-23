@@ -1276,7 +1276,18 @@ public class AnsibleRunner extends Task implements
     private static Path resolveWithin(Path base, String fileRef) {
         var normalizedBase = base.toAbsolutePath().normalize();
         var resolved = normalizedBase.resolve(fileRef).normalize();
-        return resolved.startsWith(normalizedBase) ? resolved : null;
+        if (!resolved.startsWith(normalizedBase)) {
+            return null;
+        }
+        if (!Files.exists(resolved)) {
+            return resolved;
+        }
+        // reject symlinks pointing outside the base folder
+        try {
+            return resolved.toRealPath().startsWith(normalizedBase.toRealPath()) ? resolved : null;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     private Map<String, Object> parseExtraVarsContent(String filename, InputStream is) throws IOException {
