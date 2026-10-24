@@ -1,9 +1,13 @@
 package io.kestra.plugin.ansible.runner;
 
+import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -11,6 +15,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -39,6 +44,7 @@ import io.kestra.core.models.tasks.OutputFilesInterface;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.models.tasks.Task;
+import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.serializers.JacksonMapper;
@@ -117,6 +123,34 @@ import lombok.experimental.SuperBuilder;
                     streamLogs: true
                     outputLogFile: true
                     verbosity: 1
+                """
+        ),
+        @Example(
+            title = "Execute an Ansible playbook with external extra variables files (JSON/YAML) and inline overrides.",
+            full = true,
+            code = """
+                id: run_ansible_extravars
+                namespace: dev
+
+                tasks:
+                  - id: run_ansible
+                    type: io.kestra.plugin.ansible.runner.AnsibleRunner
+                    project:
+                      content: |
+                        - hosts: localhost
+                          tasks:
+                            - ansible.builtin.debug:
+                                var: app
+                    inventory:
+                      content: |
+                        localhost ansible_connection=local
+                    env:
+                      extraVarsFiles:
+                        - "company.network/vars/base.json"
+                        - "vars/prod.yml"
+                      extraVars:
+                        app:
+                          environment: production
                 """
         )
     }
@@ -388,7 +422,7 @@ public class AnsibleRunner extends Task implements
             resolveInventory(runContext, workingDir, inventoryDir);
 
             var rPasswords = renderPasswords(runContext);
-            populateEnvDir(runContext, envDir, rPasswords);
+            var mergedExtraVars = populateEnvDir(runContext, envDir, rPasswords);
 
             var ident = IdUtils.create();
             var rImage = runContext.render(this.containerImage).as(String.class).orElse(DEFAULT_CONTAINER_IMAGE);
@@ -430,9 +464,8 @@ public class AnsibleRunner extends Task implements
                         }
                     }
                 }
-                if (this.env.getExtraVars() != null) {
-                    var rExtraVars = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
-                    secretMasker.addSensitiveValues(rExtraVars);
+                if (mergedExtraVars != null && !mergedExtraVars.isEmpty()) {
+                    secretMasker.addSensitiveValues(mergedExtraVars);
                 }
                 if (this.env.getEnvVars() != null) {
                     var rEnvVars = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
@@ -1007,7 +1040,7 @@ public class AnsibleRunner extends Task implements
         return Map.copyOf(rPasswords);
     }
 
-    private void populateEnvDir(RunContext runContext, Path envDir, Map<String, String> rPasswords) throws Exception {
+    private Map<String, Object> populateEnvDir(RunContext runContext, Path envDir, Map<String, String> rPasswords) throws Exception {
         var cmdArgs = new ArrayList<String>();
         if (Boolean.TRUE.equals(runContext.render(this.checkMode).as(Boolean.class).orElse(false))) {
             cmdArgs.add("--check");
@@ -1056,11 +1089,30 @@ public class AnsibleRunner extends Task implements
             Files.writeString(envDir.resolve("cmdline"), String.join(" ", cmdArgs) + "\n", StandardCharsets.UTF_8);
         }
 
-        if (this.env != null && this.env.getExtraVars() != null) {
-            var rExtraVarsMap = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
-            if (rExtraVarsMap != null && !rExtraVarsMap.isEmpty()) {
-                Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(rExtraVarsMap), StandardCharsets.UTF_8);
+        var mergedExtraVars = new HashMap<String, Object>();
+        if (this.env != null) {
+            if (this.env.getExtraVarsFiles() != null) {
+                var rExtraVarsFiles = runContext.render(this.env.getExtraVarsFiles()).asList(String.class);
+                if (rExtraVarsFiles != null && !rExtraVarsFiles.isEmpty()) {
+                    for (var fileRef : rExtraVarsFiles) {
+                        if (fileRef != null && !fileRef.isBlank()) {
+                            var fileVars = loadExtraVarsFile(runContext, fileRef.trim());
+                            if (fileVars != null && !fileVars.isEmpty()) {
+                                deepMerge(mergedExtraVars, fileVars);
+                            }
+                        }
+                    }
+                }
             }
+            if (this.env.getExtraVars() != null) {
+                var rExtraVarsMap = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
+                if (rExtraVarsMap != null && !rExtraVarsMap.isEmpty()) {
+                    deepMerge(mergedExtraVars, rExtraVarsMap);
+                }
+            }
+        }
+        if (!mergedExtraVars.isEmpty()) {
+            Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(mergedExtraVars), StandardCharsets.UTF_8);
         }
 
         if (this.env != null && this.env.getEnvVars() != null) {
@@ -1107,6 +1159,176 @@ public class AnsibleRunner extends Task implements
         }
         if (!settings.isEmpty()) {
             Files.writeString(envDir.resolve("settings"), JacksonMapper.ofJson().writeValueAsString(settings), StandardCharsets.UTF_8);
+        }
+        return mergedExtraVars;
+    }
+
+    private Map<String, Object> loadExtraVarsFile(RunContext runContext, String fileRef) throws Exception {
+        try (var is = resolveExtraVarsInputStream(runContext, fileRef)) {
+            return parseExtraVarsContent(fileRef, is);
+        }
+    }
+
+    private InputStream resolveExtraVarsInputStream(RunContext runContext, String fileRef) throws Exception {
+        if (fileRef.startsWith("kestra://")) {
+            return runContext.storage().getFile(URI.create(fileRef));
+        }
+
+        if (fileRef.startsWith("nsfile://")) {
+            var uri = URI.create(fileRef);
+            var host = uri.getHost();
+            var rawPath = uri.getPath();
+            var cleanPath = (rawPath != null && rawPath.startsWith("/")) ? rawPath.substring(1) : (rawPath != null ? rawPath : "");
+            if (cleanPath.isBlank()) {
+                throw new FileNotFoundException("Invalid nsfile URI: missing path in '" + fileRef + "'");
+            }
+            var normalizedPath = Path.of(cleanPath).normalize();
+            if (normalizedPath.startsWith("..") || cleanPath.contains("..")) {
+                throw new IllegalArgumentException("Path traversal blocked in namespace file URI: '" + fileRef + "' escapes the namespace root.");
+            }
+            if (host != null && !host.isBlank()) {
+                return runContext.storage().namespace(host).getFileContent(normalizedPath);
+            } else {
+                return runContext.storage().namespace().getFileContent(normalizedPath);
+            }
+        }
+
+        // Block relative path traversal attempts
+        if (Path.of(fileRef).normalize().startsWith("..") || fileRef.contains("..")) {
+            throw new IllegalArgumentException("Path traversal blocked: '" + fileRef + "' escapes the base directory.");
+        }
+
+        // 1. Check if defined in task inputFiles in-memory without duplicate on-disk materialization
+        if (this.inputFiles != null) {
+            var transformed = PluginUtilsService.transformInputFiles(runContext, this.inputFiles);
+            if (transformed != null && transformed.containsKey(fileRef)) {
+                var contentOrUri = transformed.get(fileRef);
+                if (contentOrUri != null) {
+                    if (contentOrUri.startsWith("kestra://")) {
+                        return runContext.storage().getFile(URI.create(contentOrUri));
+                    }
+                    return new ByteArrayInputStream(contentOrUri.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+        }
+
+        // 2. Check relative or absolute path in workingDir
+        var workingDir = runContext.workingDir().path();
+        var localPath = resolveWithin(workingDir, fileRef);
+        if (localPath != null && Files.isRegularFile(localPath)) {
+            return Files.newInputStream(localPath);
+        }
+
+        // 3. Check in runner/project directory
+        var projectPath = resolveWithin(workingDir.resolve("runner/project"), fileRef);
+        if (projectPath != null && Files.isRegularFile(projectPath)) {
+            return Files.newInputStream(projectPath);
+        }
+
+        var suppressedExceptions = new ArrayList<Throwable>();
+
+        // 4. Check namespace shorthand (e.g. "company.network/extra.json")
+        if (fileRef.contains("/")) {
+            var firstSlash = fileRef.indexOf('/');
+            var namespace = fileRef.substring(0, firstSlash);
+            var relativePath = fileRef.substring(firstSlash + 1);
+            var normalizedRel = Path.of(relativePath).normalize();
+            if (normalizedRel.startsWith("..") || relativePath.contains("..")) {
+                throw new IllegalArgumentException("Path traversal blocked in namespace path: '" + fileRef + "' escapes the namespace root.");
+            }
+            try {
+                var is = runContext.storage().namespace(namespace).getFileContent(normalizedRel);
+                if (is != null) {
+                    return is;
+                }
+            } catch (FileNotFoundException | NoSuchFileException e) {
+                runContext.logger().debug("File '{}' not found in namespace '{}'", relativePath, namespace);
+            } catch (Exception e) {
+                runContext.logger().debug("Failed to query namespace file '{}/{}': {}", namespace, relativePath, e.getMessage());
+                suppressedExceptions.add(e);
+            }
+        }
+
+        // 5. Check current namespace shorthand (e.g. "extra.json")
+        var normalizedCurrent = Path.of(fileRef).normalize();
+        if (normalizedCurrent.startsWith("..") || fileRef.contains("..")) {
+            throw new IllegalArgumentException("Path traversal blocked in namespace path: '" + fileRef + "' escapes the namespace root.");
+        }
+        try {
+            var is = runContext.storage().namespace().getFileContent(normalizedCurrent);
+            if (is != null) {
+                return is;
+            }
+        } catch (FileNotFoundException | NoSuchFileException e) {
+            runContext.logger().debug("File '{}' not found in current namespace", fileRef);
+        } catch (Exception e) {
+            runContext.logger().debug("Failed to query file '{}' in current namespace: {}", fileRef, e.getMessage());
+            suppressedExceptions.add(e);
+        }
+
+        var fnf = new FileNotFoundException("Could not resolve extraVarsFile '" + fileRef + "'. Checked working directory, project directory, namespace files, and internal storage.");
+        for (var suppressed : suppressedExceptions) {
+            fnf.addSuppressed(suppressed);
+        }
+        throw fnf;
+    }
+
+    private static Path resolveWithin(Path base, String fileRef) {
+        var normalizedBase = base.toAbsolutePath().normalize();
+        var resolved = normalizedBase.resolve(fileRef).normalize();
+        if (!resolved.startsWith(normalizedBase)) {
+            return null;
+        }
+        if (!Files.exists(resolved)) {
+            return resolved;
+        }
+        // reject symlinks pointing outside the base folder
+        try {
+            return resolved.toRealPath().startsWith(normalizedBase.toRealPath()) ? resolved : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> parseExtraVarsContent(String filename, InputStream is) throws IOException {
+        try {
+            if (filename.toLowerCase().endsWith(".json")) {
+                var result = JacksonMapper.ofJson().readValue(is, new TypeReference<Map<String, Object>>() {
+                });
+                return result != null ? result : Collections.emptyMap();
+            } else {
+                var result = JacksonMapper.ofYaml().readValue(is, new TypeReference<Map<String, Object>>() {
+                });
+                return result != null ? result : Collections.emptyMap();
+            }
+        } catch (JsonProcessingException e) {
+            var loc = e.getLocation();
+            var locationDetails = (loc != null && loc.getLineNr() > 0)
+                ? " (line " + loc.getLineNr() + ", column " + loc.getColumnNr() + ")"
+                : "";
+            throw new IllegalArgumentException("Failed to parse extra variables file '" + filename + "'" + locationDetails + ": expected a YAML or JSON mapping/dictionary.");
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Failed to parse extra variables file '" + filename + "': expected a YAML or JSON mapping/dictionary.");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void deepMerge(Map<String, Object> target, Map<String, Object> source) {
+        if (source == null) {
+            return;
+        }
+        for (var entry : source.entrySet()) {
+            var key = entry.getKey();
+            var sourceVal = entry.getValue();
+            var targetVal = target.get(key);
+
+            if (targetVal instanceof Map<?, ?> && sourceVal instanceof Map<?, ?>) {
+                var targetSubMap = new HashMap<String, Object>((Map<String, Object>) targetVal);
+                deepMerge(targetSubMap, (Map<String, Object>) sourceVal);
+                target.put(key, targetSubMap);
+            } else {
+                target.put(key, sourceVal);
+            }
         }
     }
 

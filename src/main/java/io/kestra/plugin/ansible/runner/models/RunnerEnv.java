@@ -1,5 +1,6 @@
 package io.kestra.plugin.ansible.runner.models;
 
+import java.util.List;
 import java.util.Map;
 
 import io.kestra.core.models.annotations.PluginProperty;
@@ -19,6 +20,12 @@ public class RunnerEnv {
         description = "Arbitrary variables passed to Ansible as extra variables. Note: values under keys matching sensitive patterns (pass, secret, token, credential, private, api_key, access_key, ssh_key, cert_pass, auth, vault, dsn, connection_string) are automatically masked in logs, telemetry, and artifacts; for sensitive credentials, passing them via `passwords` is strongly recommended."
     )
     private Property<Map<String, Object>> extraVars;
+
+    @Schema(
+        title = "Files containing extra variables to be loaded into /runner/env/extravars",
+        description = "List of file URIs or paths (supports JSON and YAML, e.g. `kestra:///...`, `nsfile://company.network/...`, or relative workspace paths). Files are loaded and merged in sequence, with values from later files and inline `extraVars` overriding earlier keys."
+    )
+    private Property<List<String>> extraVarsFiles;
 
     @Schema(
         title = "Environment variables for /runner/env/envvars",
