@@ -678,6 +678,7 @@ class AnsibleCLITest {
         assertThat(runOutput.getVars().containsKey("playbooks"), is(false));
         assertThat(runOutput.getVars().get("outputs"), is(Map.of()));
     }
+
     @Test
     @SuppressWarnings("unchecked")
     void run_withExplicitOutputs_logFailureDetails() throws Exception {
@@ -703,7 +704,32 @@ class AnsibleCLITest {
         assertThat(enabledJson, not(containsString("\"rc\":9")));
     }
 
+    @Test
+    void run_withExplicitOutputs_logFailureDetails_loopItems() throws Exception {
+        AnsibleCLI.AnsibleOutput enabled = runExplicitFailureDetails(
+            true,
+            "playbook-explicit-loop-failure-details.yml"
+        );
+
+        assertThat(enabled.getExitCode(), is(0));
+
+        String json = JacksonMapper.ofJson().writeValueAsString(enabled.getPlaybooks());
+
+        assertThat(json, containsString("LOOP_FAILURE_DETAIL_CANARY_001"));
+        assertThat(json, containsString("LOOP_FAILURE_DETAIL_CANARY_050"));
+        assertThat(json, not(containsString("LOOP_FAILURE_DETAIL_CANARY_051")));
+        assertThat(json, not(containsString("NO_LOG_LOOP_CANARY_842")));
+    }
+
     private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(boolean enabled) throws Exception {
+        return runExplicitFailureDetails(enabled, "playbook-explicit-failure-details.yml");
+    }
+
+    private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(
+        boolean enabled,
+        String playbook
+    ) throws Exception {
+
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
@@ -717,19 +743,19 @@ class AnsibleCLITest {
             .logFailureDetails(Property.ofValue(enabled))
             .inputFiles(
                 Map.of(
-                    "playbooks/playbook-explicit-failure-details.yml", storage.put(
+                    "playbooks/" + playbook, storage.put(
                         TenantService.MAIN_TENANT,
                         null,
                         URI.create("/" + IdUtils.create() + ".ion"),
                         this.getClass().getClassLoader()
-                            .getResourceAsStream("playbooks/playbook-explicit-failure-details.yml")
+                            .getResourceAsStream("playbooks/" + playbook)
                     ).toString()
                 )
             )
             .commands(
                 Property.ofValue(
                     List.of(
-                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-failure-details.yml"
+                        "ansible-playbook -i localhost -c local playbooks/" + playbook
                     )
                 )
             )
@@ -738,6 +764,7 @@ class AnsibleCLITest {
         RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
         return execute.run(runContext);
     }
+
     @Test
     @SuppressWarnings("unchecked")
     void run_withExplicitOutputs() throws Exception {
@@ -764,7 +791,7 @@ class AnsibleCLITest {
             .commands(
                 Property.ofValue(
                     List.of(
-                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-outputs.yml"
+                        "printf 'LIBRARY bytes: '; printf '%s' \"$ANSIBLE_LIBRARY\" | od -An -t x1; printf 'CALLBACK bytes: '; printf '%s' \"$ANSIBLE_CALLBACK_PLUGINS\" | od -An -t x1; printf 'PWD bytes: '; printf '%s' \"$PWD\" | od -An -t x1; ansible-config dump --only-changed; ansible-playbook -i localhost -c local playbooks/playbook-explicit-outputs.yml"
                     )
                 )
             )

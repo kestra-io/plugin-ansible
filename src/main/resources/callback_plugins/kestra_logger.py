@@ -409,6 +409,16 @@ class CallbackModule(CallbackBase):
         if isinstance(declared, dict):
             self._kestra_explicit.update(declared)
 
+    def _add_failure_details(self, source, target):
+        """Add the safe return-code and stderr details shared by explicit-mode outputs and logs."""
+        rc = source.get("rc")
+        if rc is not None:
+            target["rc"] = rc
+
+        stderr = source.get("stderr")
+        if isinstance(stderr, str) and stderr:
+            target["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+
     def _dump_host_result(self, result, *args, **kwargs):
         """
         Renders a per-host result for display. The outputs payload itself is built in
@@ -430,16 +440,12 @@ class CallbackModule(CallbackBase):
                     redacted["msg"] = msg
 
                 is_failure = bool(
-                    result.get("failed") or result.get("unreachable")
+                    result.get("failed")
+                    or result.get("unreachable")
+                    or result.get("ignored")
                 )
                 if self._log_failure_details and is_failure:
-                    rc = result.get("rc")
-                    if rc is not None:
-                        redacted["rc"] = rc
-
-                    stderr = result.get("stderr")
-                    if isinstance(stderr, str) and stderr:
-                        redacted["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+                    self._add_failure_details(result, redacted)
 
             result = redacted
 
@@ -627,16 +633,10 @@ class CallbackModule(CallbackBase):
 
                 if (
                     self._log_failure_details
-                    and status in ("failed", "unreachable")
+                    and status in ("failed", "unreachable", "ignored")
                     and not no_log
                 ):
-                    rc = raw_result.get("rc")
-                    if rc is not None:
-                        result_payload["rc"] = rc
-
-                    stderr = raw_result.get("stderr")
-                    if isinstance(stderr, str) and stderr:
-                        result_payload["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+                    self._add_failure_details(raw_result, result_payload)
                     # Preserve only safe details for failed loop items.
                     # Successful items and no_log items remain redacted.
                     items = raw_result.get("results")
@@ -672,13 +672,7 @@ class CallbackModule(CallbackBase):
                             elif msg is not None:
                                 safe_item["msg"] = self._light_msg(msg)
 
-                            rc = item_result.get("rc")
-                            if rc is not None:
-                                safe_item["rc"] = rc
-
-                            stderr = item_result.get("stderr")
-                            if isinstance(stderr, str) and stderr:
-                                safe_item["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
+                            self._add_failure_details(item_result, safe_item)
 
                             safe_items.append(safe_item)
 

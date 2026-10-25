@@ -1,0 +1,74 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Generate loop failures with one hidden item
+      block:
+        - name: Fail each loop item
+          ansible.builtin.shell: >-
+            printf '%s\n' '{{ item.id }}' >&2; exit 7
+          no_log: "{{ item.no_log | default(false) }}"
+          loop:
+            - id: NO_LOG_LOOP_CANARY_842
+              no_log: true
+            - id: LOOP_FAILURE_DETAIL_CANARY_001
+            - id: LOOP_FAILURE_DETAIL_CANARY_002
+            - id: LOOP_FAILURE_DETAIL_CANARY_003
+            - id: LOOP_FAILURE_DETAIL_CANARY_004
+            - id: LOOP_FAILURE_DETAIL_CANARY_005
+            - id: LOOP_FAILURE_DETAIL_CANARY_006
+            - id: LOOP_FAILURE_DETAIL_CANARY_007
+            - id: LOOP_FAILURE_DETAIL_CANARY_008
+            - id: LOOP_FAILURE_DETAIL_CANARY_009
+            - id: LOOP_FAILURE_DETAIL_CANARY_010
+            - id: LOOP_FAILURE_DETAIL_CANARY_011
+            - id: LOOP_FAILURE_DETAIL_CANARY_012
+            - id: LOOP_FAILURE_DETAIL_CANARY_013
+            - id: LOOP_FAILURE_DETAIL_CANARY_014
+            - id: LOOP_FAILURE_DETAIL_CANARY_015
+            - id: LOOP_FAILURE_DETAIL_CANARY_016
+            - id: LOOP_FAILURE_DETAIL_CANARY_017
+            - id: LOOP_FAILURE_DETAIL_CANARY_018
+            - id: LOOP_FAILURE_DETAIL_CANARY_019
+            - id: LOOP_FAILURE_DETAIL_CANARY_020
+            - id: LOOP_FAILURE_DETAIL_CANARY_021
+            - id: LOOP_FAILURE_DETAIL_CANARY_022
+            - id: LOOP_FAILURE_DETAIL_CANARY_023
+            - id: LOOP_FAILURE_DETAIL_CANARY_024
+            - id: LOOP_FAILURE_DETAIL_CANARY_025
+            - id: LOOP_FAILURE_DETAIL_CANARY_026
+            - id: LOOP_FAILURE_DETAIL_CANARY_027
+            - id: LOOP_FAILURE_DETAIL_CANARY_028
+            - id: LOOP_FAILURE_DETAIL_CANARY_029
+            - id: LOOP_FAILURE_DETAIL_CANARY_030
+            - id: LOOP_FAILURE_DETAIL_CANARY_031
+            - id: LOOP_FAILURE_DETAIL_CANARY_032
+            - id: LOOP_FAILURE_DETAIL_CANARY_033
+            - id: LOOP_FAILURE_DETAIL_CANARY_034
+            - id: LOOP_FAILURE_DETAIL_CANARY_035
+            - id: LOOP_FAILURE_DETAIL_CANARY_036
+            - id: LOOP_FAILURE_DETAIL_CANARY_037
+            - id: LOOP_FAILURE_DETAIL_CANARY_038
+            - id: LOOP_FAILURE_DETAIL_CANARY_039
+            - id: LOOP_FAILURE_DETAIL_CANARY_040
+            - id: LOOP_FAILURE_DETAIL_CANARY_041
+            - id: LOOP_FAILURE_DETAIL_CANARY_042
+            - id: LOOP_FAILURE_DETAIL_CANARY_043
+            - id: LOOP_FAILURE_DETAIL_CANARY_044
+            - id: LOOP_FAILURE_DETAIL_CANARY_045
+            - id: LOOP_FAILURE_DETAIL_CANARY_046
+            - id: LOOP_FAILURE_DETAIL_CANARY_047
+            - id: LOOP_FAILURE_DETAIL_CANARY_048
+            - id: LOOP_FAILURE_DETAIL_CANARY_049
+            - id: LOOP_FAILURE_DETAIL_CANARY_050
+            - id: LOOP_FAILURE_DETAIL_CANARY_051
+      rescue:
+        - name: Recover from loop failures
+          ansible.builtin.debug:
+            msg: "Recovered"
+
+    - name: Declare explicit outputs
+      kestra:
+        outputs:
+          done: true
