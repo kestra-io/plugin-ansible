@@ -3,15 +3,12 @@
   gather_facts: false
 
   tasks:
-    - name: Generate loop failures with one hidden item
+    - name: Generate loop failures
       block:
         - name: Fail each loop item
           ansible.builtin.shell: >-
             printf '%s\n' '{{ item.id }}' >&2; exit 7
-          no_log: "{{ item.no_log | default(false) }}"
           loop:
-            - id: NO_LOG_LOOP_CANARY_842
-              no_log: true
             - id: LOOP_FAILURE_DETAIL_CANARY_001
             - id: LOOP_FAILURE_DETAIL_CANARY_002
             - id: LOOP_FAILURE_DETAIL_CANARY_003
@@ -65,6 +62,19 @@
             - id: LOOP_FAILURE_DETAIL_CANARY_051
       rescue:
         - name: Recover from loop failures
+          ansible.builtin.debug:
+            msg: "Recovered"
+
+    - name: Generate a hidden failure
+      block:
+        - name: Fail a no_log task
+          ansible.builtin.shell: >-
+            printf '%s\n' 'NO_LOG_LOOP_CANARY_842' >&2; exit 7
+          no_log: true
+          loop:
+            - one
+      rescue:
+        - name: Recover from hidden failure
           ansible.builtin.debug:
             msg: "Recovered"
 
