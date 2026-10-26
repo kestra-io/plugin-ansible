@@ -553,7 +553,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         title = "Where full per-host results are kept",
         description = """
             STORE (default) writes the full per-host results to one JSON file in Kestra's internal storage, exposed as `resultsUri`, and keeps only a light result per host in `playbooks`: `changed`, `failed`, `skipped`, `unreachable`, `rc`, `msg` truncated to 1 KB (a list or map `msg` keeps its type and is cut to 1 KB of JSON only when larger) and, for failed, unreachable or ignored hosts only, the last 1 KB of `stderr`. Loop tasks keep the same subset per item under `results`; a failed item also keeps the item label (cut to 256 characters), `failed: true` and its `stderr` tail. The output of `debug` tasks (`msg` or `var`) is kept inline, since printing it is the purpose of the task, except that each value larger than 64 KB is cut to its first 64 KB followed by a pointer to `resultsUri`, where the full value is stored; `maxOutputsSize` still bounds the total. The file has the same shape as `playbooks`, so it can be read downstream with `{{ read(outputs.<taskId>.resultsUri) }}`. It is never loaded into the worker's memory, so it has no size limit.
-            With `outputsMode: EXPLICIT`, only `changed` and the failure message are captured per host by default, so the stored file is small. When `logFailureDetails` is true, failed, unreachable and ignoredhosts also retain `rc` and the last 1 KB of stderr, including details for failed loop items when available. These details may contain sensitive information. `resultsUri` is still set, and a null `resultsUri` means results storage failed.
+            With `outputsMode: EXPLICIT`, only `changed` and the failure message are captured per host by default, so the stored file is small. When `logFailureDetails` is true, failed, unreachable and ignored hosts also retain `rc` and the last 1 KB of stderr, including details for failed loop items when available. These details may contain sensitive information. `resultsUri` is still set, and a null `resultsUri` means results storage failed.
             INLINE keeps the full per-host results in `playbooks`, bounded by `maxOutputsSize`; choose it when you template `stdout` or other result fields directly and the outputs are small.
             In both modes `stdout_lines` and `stderr_lines` are dropped from captured results at every nesting level; split `stdout`/`stderr` on newlines downstream instead.
             """
@@ -585,6 +585,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Builder.Default
     @PluginProperty(group = "execution")
     protected Property<Boolean> streamLogs = Property.ofValue(false);
+
     @Schema(
         title = "Log failure details in EXPLICIT outputs mode",
         description = """
@@ -594,6 +595,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Builder.Default
     @PluginProperty(group = "execution")
     protected Property<Boolean> logFailureDetails = Property.ofValue(false);
+
     @Schema(
         title = "Publish Ansible log file",
         description = "If true, uploads the ansible log as output file `log`; multi-command runs concatenate per-command logs. Default is false."
@@ -738,10 +740,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         ResultsStorage rResultsStorage = runContext.render(this.resultsStorage).as(ResultsStorage.class).orElse(ResultsStorage.STORE);
 
         boolean rStreamLogs = runContext.render(this.streamLogs).as(Boolean.class).orElse(false);
+
         boolean rLogFailureDetails = rOutputsModeEnum == OutputsMode.EXPLICIT
             && runContext.render(this.logFailureDetails)
                 .as(Boolean.class)
                 .orElse(false);
+
         // Ansible warnings go to stderr, which core logs at ERROR. Reclassify them (issue #123).
         AnsibleLogConsumer logConsumer = new AnsibleLogConsumer(runContext);
 
@@ -814,7 +818,9 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
                 envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
                 envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
+
                 envForRun.put(LOG_FAILURE_DETAILS_ENV, String.valueOf(rLogFailureDetails));
+                
                 // Each command gets its own outputs file: the callback writes it once per
                 // ansible-playbook run, and a shared name would let a later command in a
                 // multi-command task overwrite an earlier one's payload before we read it back.
@@ -1362,9 +1368,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         } else {
             String config = runContext.render(this.ansibleConfig)
                 .as(String.class, Map.of("workingDir", workingDir))
-                .orElseThrow()
-                .replace("\r\n", "\n")
-                .replace("\r", "");
+                .orElseThrow();
             URI uri = runContext.storage().putFile(new ByteArrayInputStream(config.getBytes(StandardCharsets.UTF_8)), ANSIBLE_CFG);
             map.put(ANSIBLE_CFG, uri.toString());
         }

@@ -438,12 +438,7 @@ class CallbackModule(CallbackBase):
                 msg = result.get("msg")
                 if msg is not None:
                     redacted["msg"] = msg
-
-                is_failure = bool(
-                    result.get("failed")
-                    or result.get("unreachable")
-                    or result.get("ignored")
-                )
+                is_failure = bool(result.get("failed") or result.get("unreachable"))
                 if self._log_failure_details and is_failure:
                     self._add_failure_details(result, redacted)
 

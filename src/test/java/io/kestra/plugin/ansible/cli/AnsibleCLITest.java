@@ -791,7 +791,7 @@ class AnsibleCLITest {
             .commands(
                 Property.ofValue(
                     List.of(
-                        "printf 'LIBRARY bytes: '; printf '%s' \"$ANSIBLE_LIBRARY\" | od -An -t x1; printf 'CALLBACK bytes: '; printf '%s' \"$ANSIBLE_CALLBACK_PLUGINS\" | od -An -t x1; printf 'PWD bytes: '; printf '%s' \"$PWD\" | od -An -t x1; ansible-config dump --only-changed; ansible-playbook -i localhost -c local playbooks/playbook-explicit-outputs.yml"
+                        "ansible-playbook -i localhost -c local playbooks/playbook-explicit-outputs.yml"
                     )
                 )
             )
