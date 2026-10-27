@@ -195,7 +195,7 @@ class AnsibleRunnerTest {
         protected String type = MockAnsibleTaskRunner.class.getName();
 
         @Builder.Default
-        private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:latest";
+        private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:v26.10.1";
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
