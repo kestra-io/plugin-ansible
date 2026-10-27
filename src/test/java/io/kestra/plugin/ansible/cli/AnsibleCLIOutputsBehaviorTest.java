@@ -21,6 +21,7 @@ import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
+import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.storages.Storage;
 import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
@@ -171,6 +172,23 @@ class AnsibleCLIOutputsBehaviorTest {
         var real = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[2]}]");
 
         assertThat(merge(tempDir.resolve("merged.json"), unfinished, real), is("[{\"plays\":[2]}]"));
+    }
+
+    // the callback writes indented arrays with no trailing newline
+    @Test
+    void mergeResultsFiles_joinsIndentedFilesAndSkipsUnfinishedIndentedWrite(@TempDir Path tempDir) throws Exception {
+        var first = Files.writeString(tempDir.resolve("r0.json"), "[\n  {\n    \"plays\": [1]\n  }\n]");
+        // the non-atomic fallback writes the first byte last, so a killed write leaves a leading space
+        var unfinished = Files.writeString(tempDir.resolve("r1.json"), " \n  {\n    \"plays\": [9]\n  }\n]");
+        var second = Files.writeString(tempDir.resolve("r2.json"), "[\n  {\n    \"plays\": [2]\n  }\n]");
+
+        var merged = merge(tempDir.resolve("merged.json"), first, unfinished, second);
+
+        var plays = JacksonMapper.ofJson().readTree(merged);
+        assertThat(plays.size(), is(2));
+        assertThat(plays.get(0).get("plays").get(0).asInt(), is(1));
+        assertThat(plays.get(1).get("plays").get(0).asInt(), is(2));
+        assertThat(merged.lines().map(String::strip).anyMatch(","::equals), is(false));
     }
 
     // -------------------------------------------------------------------------

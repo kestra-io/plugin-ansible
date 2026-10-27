@@ -388,8 +388,8 @@ class AnsibleCLITest {
     }
 
     private String readResultsRaw(URI resultsUri) throws Exception {
-        try (InputStream is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
-            return new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        try (var is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 

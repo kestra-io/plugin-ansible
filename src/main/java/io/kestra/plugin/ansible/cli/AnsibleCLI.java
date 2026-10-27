@@ -1131,12 +1131,25 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                         continue;
                     }
 
+                    // drop the indentation before the closing `]` so that the join reads `},\n  {`
+                    long end = size - 1;
+                    while (end > 1) {
+                        edges.clear();
+                        in.read(edges, end - 1);
+                        if (!Character.isWhitespace(edges.get(0))) {
+                            break;
+                        }
+                        end--;
+                    }
+                    if (end <= 1) {
+                        continue;
+                    }
+
                     var mark = out.position();
                     if (merged > 0) {
                         out.write(ByteBuffer.wrap(new byte[] { ',' }));
                     }
                     long position = 1;
-                    long end = size - 1;
                     while (position < end) {
                         var copied = in.transferTo(position, end - position, out);
                         if (copied <= 0) {
