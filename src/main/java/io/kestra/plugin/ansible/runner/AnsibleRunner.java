@@ -113,7 +113,7 @@ import lombok.experimental.SuperBuilder;
                 tasks:
                   - id: run_ansible
                     type: io.kestra.plugin.ansible.runner.AnsibleRunner
-                    containerImage: quay.io/ansible/ansible-runner:latest
+                    containerImage: ghcr.io/ansible/community-ansible-dev-tools:latest
                     namespaceFiles:
                       enabled: true
                     project:
@@ -161,7 +161,7 @@ public class AnsibleRunner extends Task implements
     InputFilesInterface,
     OutputFilesInterface {
 
-    private static final String DEFAULT_CONTAINER_IMAGE = "quay.io/ansible/ansible-runner:stable-2.12-latest";
+    private static final String DEFAULT_CONTAINER_IMAGE = "ghcr.io/ansible/community-ansible-dev-tools:latest";
     private static final Pattern PKG_ALLOWLIST = Pattern.compile("^[a-zA-Z0-9_][a-zA-Z0-9_\\-\\.\\=\\>\\<\\~]*$");
     private static final Pattern WHITESPACE_PATTERN = Pattern.compile(".*\\s.*");
     private static final String DEFAULT_PLAYBOOK = "site.yml";

@@ -72,11 +72,13 @@ class AnsibleRunnerTest {
             """);
 
         // Create a custom mock TaskRunner to simulate ansible-runner inside container
-        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder()
+            .expectedContainerImage("custom-ansible:latest")
+            .build();
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(mockRunner)
-            .containerImage(Property.ofValue("quay.io/ansible/ansible-runner:latest"))
+            .containerImage(Property.ofValue("custom-ansible:latest"))
             .checkMode(Property.ofValue(true))
             .diff(Property.ofValue(true))
             .limit(Property.ofValue("webservers:&core"))
@@ -192,8 +194,12 @@ class AnsibleRunnerTest {
         @Builder.Default
         protected String type = MockAnsibleTaskRunner.class.getName();
 
+        @Builder.Default
+        private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:latest";
+
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
+            assertThat(taskCommands.getContainerImage(), is(expectedContainerImage));
             Path workingDir = taskCommands.getWorkingDirectory();
             Path runnerDir = workingDir.resolve("runner");
 
