@@ -173,7 +173,7 @@ public class AnsibleRunner extends Task implements
         title = "Execution Environment container image",
         description = """
             Defaults to `ghcr.io/ansible/community-ansible-dev-tools:v26.10.1`, a Fedora-based image that runs as root to allow package installation.
-            This replaces the CentOS 8 / Python 3.8 / ansible-core 2.12 image with Fedora 44, Python 3.14 and ansible-core 2.21.5.
+            The default image provides Python 3.14 and ansible-core 2.21.5.
             Check playbooks and pinned dependencies for compatibility, or set a custom image with the required Ansible and Python versions.
             """
     )
