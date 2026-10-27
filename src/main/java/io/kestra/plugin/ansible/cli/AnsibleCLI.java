@@ -1102,7 +1102,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     /**
      * Joins the JSON arrays written by the callback (one per command) into a single array by copying
      * bytes, never parsing them: the results can be hundreds of megabytes. The callback writes them
-     * without surrounding whitespace, so each file is `[` + elements + `]`; files that are missing,
+     * as indented arrays with no trailing newline, so each file is `[` + elements + `]`; files that are missing,
      * empty, hold an empty array or are not shaped that way (including an unfinished in-place write, see
      * kestra_logger.py) are skipped.
      *
