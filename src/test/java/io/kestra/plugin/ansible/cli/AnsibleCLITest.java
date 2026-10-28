@@ -387,6 +387,12 @@ class AnsibleCLITest {
         return execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()));
     }
 
+    private String readResultsRaw(URI resultsUri) throws Exception {
+        try (var is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
     private JsonNode readResults(URI resultsUri) throws Exception {
         try (InputStream is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
             return JacksonMapper.ofJson().readTree(is);
@@ -505,6 +511,16 @@ class AnsibleCLITest {
         var inline = JacksonMapper.ofJson().writeValueAsString(runOutput.getPlaybooks());
         assertThat(inline, not(containsString("hunter2-secret-token")));
         assertThat(JacksonMapper.ofJson().writeValueAsString(runOutput.getVars()), not(containsString("hunter2-secret-token")));
+    }
+
+    @Test
+    void run_storeMode_resultsFileIsIndented() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-large-loop.yml");
+
+        var raw = readResultsRaw(runOutput.getResultsUri());
+        assertThat(raw, startsWith("[\n  {"));
+        assertThat(raw, containsString("\n    \"plays\": ["));
+        assertThat(JacksonMapper.ofJson().readTree(raw).size(), is(1));
     }
 
     @Test
