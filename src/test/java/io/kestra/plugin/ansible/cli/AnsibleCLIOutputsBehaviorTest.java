@@ -135,7 +135,7 @@ class AnsibleCLIOutputsBehaviorTest {
 
         var merged = merge(tempDir.resolve("merged.json"), first, second);
 
-        assertThat(merged, is("[{\"plays\":[1]},{\"plays\":[2]},{\"plays\":[3]}]"));
+        assertThat(merged, is("[{\"plays\":[1]},{\"plays\":[2]},{\"plays\":[3]}\n]"));
     }
 
     @Test
@@ -147,7 +147,7 @@ class AnsibleCLIOutputsBehaviorTest {
 
         var merged = merge(tempDir.resolve("merged.json"), emptyList, placeholder, missing, real);
 
-        assertThat(merged, is("[{\"plays\":[]}]"));
+        assertThat(merged, is("[{\"plays\":[]}\n]"));
     }
 
     @Test
@@ -162,7 +162,7 @@ class AnsibleCLIOutputsBehaviorTest {
         var truncated = Files.writeString(tempDir.resolve("r0.json"), "[{\"plays\":[1]}");
         var real = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[2]}]");
 
-        assertThat(merge(tempDir.resolve("merged.json"), truncated, real), is("[{\"plays\":[2]}]"));
+        assertThat(merge(tempDir.resolve("merged.json"), truncated, real), is("[{\"plays\":[2]}\n]"));
     }
 
     // a callback killed during its in-place write leaves the first byte unwritten, but the tail can still be `]`
@@ -171,7 +171,7 @@ class AnsibleCLIOutputsBehaviorTest {
         var unfinished = Files.writeString(tempDir.resolve("r0.json"), " {\"plays\":[1,2]}]");
         var real = Files.writeString(tempDir.resolve("r1.json"), "[{\"plays\":[2]}]");
 
-        assertThat(merge(tempDir.resolve("merged.json"), unfinished, real), is("[{\"plays\":[2]}]"));
+        assertThat(merge(tempDir.resolve("merged.json"), unfinished, real), is("[{\"plays\":[2]}\n]"));
     }
 
     // the callback writes indented arrays with no trailing newline
@@ -189,6 +189,7 @@ class AnsibleCLIOutputsBehaviorTest {
         assertThat(plays.get(0).get("plays").get(0).asInt(), is(1));
         assertThat(plays.get(1).get("plays").get(0).asInt(), is(2));
         assertThat(merged.lines().map(String::strip).anyMatch(","::equals), is(false));
+        assertThat(merged, endsWith("  }\n]"));
     }
 
     // -------------------------------------------------------------------------

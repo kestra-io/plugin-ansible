@@ -1102,7 +1102,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     /**
      * Joins the JSON arrays written by the callback (one per command) into a single array by copying
      * bytes, never parsing them: the results can be hundreds of megabytes. The callback writes them
-     * as indented arrays with no trailing newline, so each file is `[` + elements + `]`; files that are missing,
+     * as indented arrays with no trailing newline, so each file is `[` + elements + `]`, and the merged file ends with `\n]`; files that are missing,
      * empty, hold an empty array or are not shaped that way (including an unfinished in-place write, see
      * kestra_logger.py) are skipped.
      *
@@ -1132,7 +1132,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     }
 
                     // drop the indentation before the closing `]` so that the join reads `},\n  {`
-                    long end = size - 1;
+                    var end = size - 1;
                     while (end > 1) {
                         edges.clear();
                         in.read(edges, end - 1);
@@ -1168,7 +1168,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 }
             }
 
-            out.write(ByteBuffer.wrap(new byte[] { ']' }));
+            // put the closing `]` on its own line, like the indented sources
+            out.write(ByteBuffer.wrap(merged > 0 ? new byte[] { '\n', ']' } : new byte[] { ']' }));
         }
 
         return merged > 0;
