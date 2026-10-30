@@ -1,6 +1,6 @@
 group: io.kestra.plugin.ansible.runner
 name: AnsibleRunner
-title: Execute Ansible playbooks using Ansible Runner
+title: "Ansible Runner"
 description: Provides enterprise-grade Ansible orchestration with containerized Execution Environments and structured JSON telemetry.
 body: |
   Provides enterprise-grade Ansible orchestration with containerized Execution Environments.

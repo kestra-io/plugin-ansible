@@ -1121,7 +1121,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     /**
      * Joins the JSON arrays written by the callback (one per command) into a single array by copying
      * bytes, never parsing them: the results can be hundreds of megabytes. The callback writes them
-     * without surrounding whitespace, so each file is `[` + elements + `]`; files that are missing,
+     * as indented arrays with no trailing newline, so each file is `[` + elements + `]`, and the merged file ends with `\n]`; files that are missing,
      * empty, hold an empty array or are not shaped that way (including an unfinished in-place write, see
      * kestra_logger.py) are skipped.
      *
@@ -1150,12 +1150,25 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                         continue;
                     }
 
+                    // drop the indentation before the closing `]` so that the join reads `},\n  {`
+                    var end = size - 1;
+                    while (end > 1) {
+                        edges.clear();
+                        in.read(edges, end - 1);
+                        if (!Character.isWhitespace(edges.get(0))) {
+                            break;
+                        }
+                        end--;
+                    }
+                    if (end <= 1) {
+                        continue;
+                    }
+
                     var mark = out.position();
                     if (merged > 0) {
                         out.write(ByteBuffer.wrap(new byte[] { ',' }));
                     }
                     long position = 1;
-                    long end = size - 1;
                     while (position < end) {
                         var copied = in.transferTo(position, end - position, out);
                         if (copied <= 0) {
@@ -1174,7 +1187,8 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 }
             }
 
-            out.write(ByteBuffer.wrap(new byte[] { ']' }));
+            // put the closing `]` on its own line, like the indented sources
+            out.write(ByteBuffer.wrap(merged > 0 ? new byte[] { '\n', ']' } : new byte[] { ']' }));
         }
 
         return merged > 0;

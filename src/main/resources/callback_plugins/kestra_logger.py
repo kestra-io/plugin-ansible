@@ -176,9 +176,11 @@ class CallbackModule(CallbackBase):
             fallback_vars = dict(payload, _kestra_outputs_fallback=True)
             print("::" + json.dumps({"outputs": fallback_vars}, default=str) + "::")
 
-    def _write_private_json(self, path, content):
+    def _write_private_json(self, path, content, indent=None):
         directory = os.path.dirname(path)
         os.makedirs(directory, exist_ok=True)
+        # compact unless indented: the outputs file counts against maxOutputsSize
+        separators = (",", ": ") if indent else (",", ":")
         # 0600: these files hold raw per-host results (registered vars, stdout/msg, gathered
         # facts) which may carry secrets a playbook fetched. AnsibleCLI deletes the file as soon
         # as it has consumed it.
@@ -190,14 +192,14 @@ class CallbackModule(CallbackBase):
         # Replacing the pre-created file keeps its owner only if we can restore it, else truncate in place.
         if existing is None or existing.st_uid == os.geteuid() or os.geteuid() == 0:
             try:
-                self._write_atomically(path, directory, content, existing)
+                self._write_atomically(path, directory, content, existing, indent, separators)
                 return
             except OSError:
                 pass
 
         # Not atomic: the first byte is written last, so a run killed mid-write leaves a file that
         # does not start with "[" or "{" and AnsibleCLI skips it.
-        chunks = json.JSONEncoder(default=str, separators=(",", ":")).iterencode(content)
+        chunks = json.JSONEncoder(default=str, indent=indent, separators=separators).iterencode(content)
         first = next(chunks)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
@@ -213,12 +215,12 @@ class CallbackModule(CallbackBase):
             os.pwrite(fh.fileno(), first[:1].encode("ascii"), 0)
 
     @staticmethod
-    def _write_atomically(path, directory, content, existing):
+    def _write_atomically(path, directory, content, existing, indent, separators):
         """Temp file renamed over the target, so a run killed mid-write leaves no truncated file."""
         fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".kestra-tmp-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(content, fh, default=str, separators=(",", ":"))
+                json.dump(content, fh, default=str, indent=indent, separators=separators)
             if existing is not None and existing.st_uid != os.geteuid():
                 os.chown(tmp_path, existing.st_uid, existing.st_gid)
             os.replace(tmp_path, path)
@@ -230,7 +232,7 @@ class CallbackModule(CallbackBase):
             raise
 
     def _write_results_file(self):
-        """Writes the full per-host results as a whitespace-free JSON array (merged by byte copy), never to stdout (issue #126)."""
+        """Writes the full per-host results as an indented JSON array (merged by byte copy), never to stdout (issue #126)."""
         full_playbooks = []
         try:
             for playbook in self._kestra_playbooks:
@@ -262,7 +264,7 @@ class CallbackModule(CallbackBase):
             return
 
         try:
-            self._write_private_json(self._results_file_path, full_playbooks)
+            self._write_private_json(self._results_file_path, full_playbooks, indent=2)
         except Exception as e:
             self._display.warning(
                 "Unable to write Kestra results file '%s': %s. This usually means the working "
