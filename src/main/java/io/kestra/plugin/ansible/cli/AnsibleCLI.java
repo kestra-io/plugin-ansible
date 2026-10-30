@@ -820,7 +820,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
 
                 envForRun.put(LOG_FAILURE_DETAILS_ENV, String.valueOf(rLogFailureDetails));
-                
+
                 // Each command gets its own outputs file: the callback writes it once per
                 // ansible-playbook run, and a shared name would let a later command in a
                 // multi-command task overwrite an earlier one's payload before we read it back.
@@ -1366,9 +1366,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         if (map.containsKey(ANSIBLE_CFG)) {
             runContext.logger().warn("Found an existing ansible.cfg file. Ignoring creation of a new ansible.cfg file.");
         } else {
-            String config = runContext.render(this.ansibleConfig)
-                .as(String.class, Map.of("workingDir", workingDir))
-                .orElseThrow();
+            String config = runContext.render(this.ansibleConfig).as(String.class, Map.of("workingDir", workingDir)).orElseThrow();
             URI uri = runContext.storage().putFile(new ByteArrayInputStream(config.getBytes(StandardCharsets.UTF_8)), ANSIBLE_CFG);
             map.put(ANSIBLE_CFG, uri.toString());
         }

@@ -366,8 +366,11 @@ class CallbackModule(CallbackBase):
         return light
 
     def _track_item_event(self, result, failed):
-        # _mark_failed_items, the only consumer and the only place state is popped, runs in "all" mode only.
-        if self._outputs_mode == "explicit" or isinstance(result._task, TaskInclude):
+        # _mark_failed_items, the only consumer and the only place state is popped, runs in "all" mode
+        # and in explicit mode when failure details are enabled; elsewhere nothing would pop the state.
+        if (
+            self._outputs_mode == "explicit" and not self._log_failure_details
+        ) or isinstance(result._task, TaskInclude):
             return
         state = self._item_events.setdefault(
             (result._task._uuid, result._host.get_name()), {"count": 0, "failed": set()}
@@ -419,7 +422,7 @@ class CallbackModule(CallbackBase):
         if isinstance(stderr, str) and stderr:
             target["stderr"] = stderr[-self.LIGHT_RESULT_LIMIT:]
 
-    def _dump_host_result(self, result, *args, **kwargs):
+    def _dump_host_result(self, result, *args, item_failed=False, **kwargs):
         """
         Renders a per-host result for display. The outputs payload itself is built in
         _add_host_result. Explicit mode must not print per-host payloads, and v2_runner_on_failed
@@ -438,7 +441,8 @@ class CallbackModule(CallbackBase):
                 msg = result.get("msg")
                 if msg is not None:
                     redacted["msg"] = msg
-                is_failure = bool(result.get("failed") or result.get("unreachable"))
+                # Ansible strips `failed` from item results, so the item callback passes it explicitly.
+                is_failure = bool(item_failed or result.get("failed") or result.get("unreachable"))
                 if self._log_failure_details and is_failure:
                     self._add_failure_details(result, redacted)
 
@@ -620,6 +624,9 @@ class CallbackModule(CallbackBase):
             if status in self.FAILURE_STATUSES:
                 raw_result = result._result
                 no_log = raw_result.get("_ansible_no_log", False)
+                if self._log_failure_details:
+                    # Restore the `failed` flag Ansible strips from loop items.
+                    self._mark_failed_items(result, host_name, raw_result)
 
                 if not no_log:
                     msg = raw_result.get("msg")
@@ -1089,7 +1096,7 @@ class CallbackModule(CallbackBase):
         self._display.display(
             msg + " (item=%s) => %s" % (
                 self._get_item_label(result._result),
-                self._dump_host_result(result._result)
+                self._dump_host_result(result._result, item_failed=True)
             ),
             color=C.COLOR_ERROR,
             stderr=self.get_option('display_failed_stderr')
