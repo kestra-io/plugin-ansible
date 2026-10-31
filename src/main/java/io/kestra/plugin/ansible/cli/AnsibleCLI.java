@@ -80,6 +80,7 @@ import lombok.experimental.SuperBuilder;
         Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one, and merges outputs across multiple commands.
         A `requirements.txt` or `requirements.yml` present in the working directory is installed before commands run; see `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
         Declared `galaxyDependencies`/`pythonDependencies`, and requirements files already present before commands run, install into a working-directory subtree shared by every command and cached across runs; see `dependencyCacheEnabled`.
+        When the task runner has monitoring enabled (`taskRunner.monitoring.enabled: true`), kotlp sets `OTEL_EXPORTER_OTLP_ENDPOINT` and the `community.general.opentelemetry` callback is enabled automatically, so the playbook run, each task and each host result are captured as OpenTelemetry spans (task name, host, status, duration) and stored in Kestra's traces. The image needs the `community.general` collection (included in the full `ansible` package, or add it to `galaxyDependencies`) and the `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp` Python packages (add them to `pythonDependencies`). Enabling it sets `ANSIBLE_CALLBACKS_ENABLED`, which takes precedence over `callbacks_enabled` in a custom `ansibleConfig`: list any extra callbacks in that variable through `env` instead.
         """
 )
 @Plugin(
@@ -378,6 +379,18 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     private static final List<String> CALLBACK_PATH_EXPORTS = List.of(
         "export ANSIBLE_CALLBACK_PLUGINS=\"$PWD/callback_plugins${ANSIBLE_CALLBACK_PLUGINS:+:$ANSIBLE_CALLBACK_PLUGINS}\"",
         "export ANSIBLE_LIBRARY=\"$PWD/library${ANSIBLE_LIBRARY:+:$ANSIBLE_LIBRARY}\""
+    );
+
+    // When the task runner wraps the process with kotlp (taskRunner monitoring enabled), kotlp exports
+    // OTEL_EXPORTER_OTLP_ENDPOINT. Enable Ansible's community.general.opentelemetry callback alongside the
+    // Kestra one so plays, tasks and per-host results become spans. kotlp defaults the traces protocol to
+    // http/json, which the callback does not support (only grpc and http/protobuf), so switch an unset or
+    // http/json value to http/protobuf; an explicit user choice is kept.
+    static final List<String> OTEL_EXPORTS = List.of(
+        "if [ -n \"${OTEL_EXPORTER_OTLP_ENDPOINT:-}\" ]; then "
+            + "export ANSIBLE_CALLBACKS_ENABLED=\"${ANSIBLE_CALLBACKS_ENABLED:-kestra_logger},community.general.opentelemetry\"; "
+            + "case \"${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:-}\" in \"\"|http/json) export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf;; esac; "
+            + "fi"
     );
 
     private static final String REQUIREMENTS_YML = "requirements.yml";
@@ -856,6 +869,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 boolean isFirstCommand = !beforeDone;
                 List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
                 beforeForRun.addAll(dependencyInstall.pathExports());
+                beforeForRun.addAll(OTEL_EXPORTS);
                 if (isFirstCommand) {
                     // User beforeCommands can configure the environment
                     // (e.g. private pip index, proxy, auth) before auto-install fires.
