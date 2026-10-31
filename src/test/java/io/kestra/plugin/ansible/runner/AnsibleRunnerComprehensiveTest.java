@@ -1615,6 +1615,453 @@ public class AnsibleRunnerComprehensiveTest {
         }
     }
 
+    @Test
+    void test33_ExtraVarsFiles_JsonAndYamlMerging() throws Exception {
+        long start = System.currentTimeMillis();
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var baseJson = runContext.workingDir().path().resolve("base.json");
+        Files.writeString(baseJson, """
+            {
+                "env_name": "staging",
+                "app": {
+                    "name": "payment-service",
+                    "port": 8080
+                },
+                "retries": 3
+            }
+            """);
+
+        var overrideYaml = runContext.workingDir().path().resolve("override.yml");
+        Files.writeString(overrideYaml, """
+            env_name: production
+            app:
+                port: 9000
+            db_pool: 20
+            """);
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("base.json", "override.yml")))
+                    .extraVars(
+                        Property.ofValue(
+                            Map.of(
+                                "app", Map.of("port", 9443),
+                                "cluster", "us-east-1"
+                            )
+                        )
+                    )
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: var=app\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var output = task.run(runContext);
+        var dur = System.currentTimeMillis() - start;
+
+        var extravars = runContext.workingDir().path().resolve("runner/env_backup/extravars");
+        assertTrue(Files.exists(extravars));
+        var content = Files.readString(extravars);
+
+        assertThat(content, containsString("\"env_name\":\"production\""));
+        assertThat(content, containsString("\"name\":\"payment-service\""));
+        assertThat(content, containsString("\"port\":9443"));
+        assertThat(content, containsString("\"retries\":3"));
+        assertThat(content, containsString("\"db_pool\":20"));
+        assertThat(content, containsString("\"cluster\":\"us-east-1\""));
+
+        recordResult(
+            "TC33", "Environment & Secrets", "Extra variables files JSON + YAML deep merge",
+            "extraVarsFiles: [base.json, override.yml] + inline extraVars", "Deep merged in order to runner/env_backup/extravars",
+            "PASS", output.getRc(), dur, "Verified JSON and YAML deep merging with precedence"
+        );
+    }
+
+    @Test
+    void test34_ExtraVarsFiles_InternalStorageUri() throws Exception {
+        long start = System.currentTimeMillis();
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var tempYaml = Files.createTempFile("kestra-vars-", ".yml");
+        Files.writeString(tempYaml, "region: eu-west-1\nreplicas: 5\n");
+        var storageUri = runContext.storage().putFile(tempYaml.toFile());
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of(storageUri.toString())))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var output = task.run(runContext);
+        var dur = System.currentTimeMillis() - start;
+
+        var extravars = runContext.workingDir().path().resolve("runner/env_backup/extravars");
+        assertTrue(Files.exists(extravars));
+        var content = Files.readString(extravars);
+        assertThat(content, containsString("\"region\":\"eu-west-1\""));
+        assertThat(content, containsString("\"replicas\":5"));
+
+        recordResult(
+            "TC34", "Environment & Secrets", "Extra variables file from internal storage URI",
+            "extraVarsFiles: [kestra://...]", "Loaded from storage and serialized to runner/env_backup/extravars",
+            "PASS", output.getRc(), dur, "Verified internal storage URI resolution for extra vars"
+        );
+    }
+
+    @Test
+    void test35_ExtraVarsFiles_NamespaceFiles() throws Exception {
+        long start = System.currentTimeMillis();
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var jsonContent = "{\"tier\":\"frontend\",\"traffic\":\"canary\"}";
+        runContext.storage().namespace("company.network").putFile(
+            Path.of("extra.json"),
+            new ByteArrayInputStream(jsonContent.getBytes(StandardCharsets.UTF_8))
+        );
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("nsfile://company.network/extra.json")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var output = task.run(runContext);
+        var dur = System.currentTimeMillis() - start;
+
+        var extravars = runContext.workingDir().path().resolve("runner/env_backup/extravars");
+        assertTrue(Files.exists(extravars));
+        var content = Files.readString(extravars);
+        assertThat(content, containsString("\"tier\":\"frontend\""));
+        assertThat(content, containsString("\"traffic\":\"canary\""));
+
+        recordResult(
+            "TC35", "Environment & Secrets", "Extra variables file from namespace storage (nsfile://)",
+            "extraVarsFiles: [nsfile://company.network/extra.json]", "Loaded from namespace storage and serialized",
+            "PASS", output.getRc(), dur, "Verified cross-namespace extra vars resolution"
+        );
+    }
+
+    @Test
+    void test36_ExtraVarsFiles_SensitiveMasking() throws Exception {
+        long start = System.currentTimeMillis();
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder()
+            .linesToLog(
+                List.of(
+                    "TASK [debug] ok: [localhost] => {\"vault_password\": \"superSecretToken12345\", \"api_key\": \"secretKeyXYZ\"}"
+                )
+            )
+            .build();
+
+        var secretJson = runContext.workingDir().path().resolve("secrets.json");
+        Files.writeString(secretJson, """
+            {
+                "vault_password": "superSecretToken12345",
+                "api_key": "secretKeyXYZ"
+            }
+            """);
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .outputLogFile(Property.ofValue(true))
+            .streamLogs(Property.ofValue(true))
+            .logsMode(Property.ofValue(LogsMode.FULL))
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("secrets.json")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: var=vault_password\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var output = task.run(runContext);
+        var dur = System.currentTimeMillis() - start;
+
+        var extravars = runContext.workingDir().path().resolve("runner/env_backup/extravars");
+        assertTrue(Files.exists(extravars));
+
+        assertNotNull(output.getOutputLogFile(), "outputLogFile URI must not be null when outputLogFile=true");
+        try (InputStream is = runContext.storage().getFile(output.getOutputLogFile())) {
+            var logContent = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(logContent, not(containsString("superSecretToken12345")));
+            assertThat(logContent, not(containsString("secretKeyXYZ")));
+            assertThat(logContent, containsString("***"));
+        }
+
+        recordResult(
+            "TC36", "Environment & Secrets", "Extra variables file sensitive key masking",
+            "extraVarsFiles: [secrets.json] containing vault_password", "Registered sensitive keys in SecretMasker and verified masking in logs",
+            "PASS", output.getRc(), dur, "Verified automatic secret masking from extra vars files in execution logs"
+        );
+    }
+
+    @Test
+    void test37_ExtraVarsFiles_FileNotFound() {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("non_existent_vars.yml")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var ex = assertThrows(FileNotFoundException.class, () -> task.run(runContext));
+        assertThat(ex.getMessage(), containsString("Could not resolve extraVarsFile 'non_existent_vars.yml'"));
+    }
+
+    @Test
+    void test38_ExtraVarsFiles_InvalidFormat() throws Exception {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var badYaml = runContext.workingDir().path().resolve("invalid.yml");
+        Files.writeString(badYaml, "- item1\n- item2\n");
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("invalid.yml")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var ex = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(ex.getMessage(), containsString("expected a YAML or JSON mapping/dictionary"));
+    }
+
+    @Test
+    void test39_ExtraVarsFiles_PathTraversalBlocked() {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("../../../../etc/passwd")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var ex = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(ex.getMessage(), containsString("Path traversal blocked"));
+    }
+
+    @Test
+    void test39b_ExtraVarsFiles_SymlinkEscapeBlocked() throws Exception {
+        var runContext = newRunContext();
+        var outside = Files.createTempFile("outside-extravars", ".yml");
+        Files.writeString(outside, "leaked: true\n");
+        Files.createSymbolicLink(runContext.workingDir().path().resolve("link.yml"), outside);
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(ComprehensiveMockRunner.builder().build())
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("link.yml")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        try {
+            assertThrows(java.io.FileNotFoundException.class, () -> task.run(runContext));
+        } finally {
+            Files.deleteIfExists(outside);
+        }
+    }
+
+    @Test
+    void test40_ExtraVarsFiles_NamespacePathTraversalBlocked() {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("nsfile://company.network/../../etc/passwd")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var ex = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(ex.getMessage(), containsString("Path traversal blocked in namespace"));
+    }
+
+    @Test
+    void test41_ExtraVarsFiles_FromInputFiles_ResolvedInMemory() throws Exception {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .inputFiles(Map.of("injected_vars.yml", "app_env: staging\nworkers: 8\n"))
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("injected_vars.yml")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var output = task.run(runContext);
+        var extravars = runContext.workingDir().path().resolve("runner/env_backup/extravars");
+        assertTrue(Files.exists(extravars));
+        var content = Files.readString(extravars);
+        assertThat(content, containsString("\"app_env\":\"staging\""));
+        assertThat(content, containsString("\"workers\":8"));
+
+        // File is materialized once by CommandsWrapper
+        assertTrue(Files.exists(runContext.workingDir().path().resolve("injected_vars.yml")));
+    }
+
+    @Test
+    void test42_ExtraVarsFiles_ParseErrorDoesNotLeakSecretSnippet() throws Exception {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var malformedYaml = runContext.workingDir().path().resolve("malformed.yml");
+        Files.writeString(malformedYaml, "vault_token: superConfidentialToken123\nfoo: [unclosed list\n");
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .env(
+                RunnerEnv.builder()
+                    .extraVarsFiles(Property.ofValue(List.of("malformed.yml")))
+                    .build()
+            )
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks:\n    - ping:\n"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .inline(Property.ofValue("localhost ansible_connection=local\n"))
+                    .build()
+            )
+            .build();
+
+        var ex = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(ex.getMessage(), containsString("Failed to parse extra variables file 'malformed.yml'"));
+        assertThat(ex.getMessage(), containsString("line "));
+        assertThat(ex.getMessage(), not(containsString("superConfidentialToken123")));
+        assertThat(ex.getMessage(), not(containsString("unclosed list")));
+    }
+
     /**
      * Flexible Mock TaskRunner for testing all combinations of AnsibleRunner.
      */
@@ -1626,6 +2073,9 @@ public class AnsibleRunnerComprehensiveTest {
 
         @Builder.Default
         private boolean simulateFailure = false;
+
+        @Builder.Default
+        private List<String> linesToLog = List.of();
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
@@ -1646,6 +2096,12 @@ public class AnsibleRunnerComprehensiveTest {
             if (Files.exists(envDir)) {
                 Path envBackup = runnerDir.resolve("env_backup");
                 org.apache.commons.io.FileUtils.copyDirectory(envDir.toFile(), envBackup.toFile());
+            }
+
+            if (taskCommands.getLogConsumer() != null && linesToLog != null) {
+                for (String line : linesToLog) {
+                    taskCommands.getLogConsumer().accept(line, false);
+                }
             }
 
             if (simulateFailure) {

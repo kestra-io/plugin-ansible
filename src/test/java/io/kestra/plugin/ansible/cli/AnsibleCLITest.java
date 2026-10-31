@@ -387,6 +387,12 @@ class AnsibleCLITest {
         return execute.run(TestsUtils.mockRunContext(runContextFactory, execute, Map.of()));
     }
 
+    private String readResultsRaw(URI resultsUri) throws Exception {
+        try (var is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
     private JsonNode readResults(URI resultsUri) throws Exception {
         try (InputStream is = storage.get(TenantService.MAIN_TENANT, null, resultsUri)) {
             return JacksonMapper.ofJson().readTree(is);
@@ -505,6 +511,16 @@ class AnsibleCLITest {
         var inline = JacksonMapper.ofJson().writeValueAsString(runOutput.getPlaybooks());
         assertThat(inline, not(containsString("hunter2-secret-token")));
         assertThat(JacksonMapper.ofJson().writeValueAsString(runOutput.getVars()), not(containsString("hunter2-secret-token")));
+    }
+
+    @Test
+    void run_storeMode_resultsFileIsIndented() throws Exception {
+        var runOutput = runPlaybooks(AnsibleCLI.ResultsStorage.STORE, "playbook-large-loop.yml");
+
+        var raw = readResultsRaw(runOutput.getResultsUri());
+        assertThat(raw, startsWith("[\n  {"));
+        assertThat(raw, containsString("\n    \"plays\": ["));
+        assertThat(JacksonMapper.ofJson().readTree(raw).size(), is(1));
     }
 
     @Test
@@ -677,6 +693,92 @@ class AnsibleCLITest {
         assertThat(hostResults(runOutput).size(), is(6));
         assertThat(runOutput.getVars().containsKey("playbooks"), is(false));
         assertThat(runOutput.getVars().get("outputs"), is(Map.of()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void run_withExplicitOutputs_logFailureDetails() throws Exception {
+        AnsibleCLI.AnsibleOutput defaults = runExplicitFailureDetails(false);
+        AnsibleCLI.AnsibleOutput enabled = runExplicitFailureDetails(true);
+
+        assertThat(defaults.getExitCode(), is(0));
+        assertThat(enabled.getExitCode(), is(0));
+
+        String defaultJson = JacksonMapper.ofJson().writeValueAsString(defaults.getPlaybooks());
+        String enabledJson = JacksonMapper.ofJson().writeValueAsString(enabled.getPlaybooks());
+
+        // By default, failure details remain redacted in EXPLICIT mode.
+        assertThat(defaultJson, not(containsString("FAILURE_DETAIL_CANARY_721")));
+        assertThat(defaultJson, not(containsString("\"rc\":7")));
+
+        // When enabled, the ordinary failure includes its return code and stderr.
+        assertThat(enabledJson, containsString("FAILURE_DETAIL_CANARY_721"));
+        assertThat(enabledJson, containsString("\"rc\":7"));
+        assertThat(enabledJson, not(containsString("STDERR_PREFIX_CANARY_319")));
+        // no_log must continue to protect the hidden failure, even when details are enabled.
+        assertThat(enabledJson, not(containsString("NO_LOG_CANARY_842")));
+        assertThat(enabledJson, not(containsString("\"rc\":9")));
+    }
+
+    @Test
+    void run_withExplicitOutputs_logFailureDetails_loopItems() throws Exception {
+        AnsibleCLI.AnsibleOutput enabled = runExplicitFailureDetails(
+            true,
+            "playbook-explicit-loop-failure-details.yml"
+        );
+
+        assertThat(enabled.getExitCode(), is(0));
+
+        String json = JacksonMapper.ofJson().writeValueAsString(enabled.getPlaybooks());
+
+        assertThat(json, containsString("LOOP_FAILURE_DETAIL_CANARY_001"));
+        assertThat(json, containsString("LOOP_FAILURE_DETAIL_CANARY_050"));
+        assertThat(json, not(containsString("LOOP_FAILURE_DETAIL_CANARY_051")));
+        assertThat(json, not(containsString("NO_LOG_LOOP_CANARY_842")));
+    }
+
+    private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(boolean enabled) throws Exception {
+        return runExplicitFailureDetails(enabled, "playbook-explicit-failure-details.yml");
+    }
+
+    private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(
+        boolean enabled,
+        String playbook
+    ) throws Exception {
+
+        AnsibleCLI execute = AnsibleCLI.builder()
+            .id(IdUtils.create())
+            .type(AnsibleCLI.class.getName())
+            .docker(
+                DockerOptions.builder()
+                    .image(ANSIBLE_IMAGE)
+                    .entryPoint(Collections.emptyList())
+                    .build()
+            )
+            .outputsMode(Property.ofValue(AnsibleCLI.OutputsMode.EXPLICIT))
+            .logFailureDetails(Property.ofValue(enabled))
+            .inputFiles(
+                Map.of(
+                    "playbooks/" + playbook, storage.put(
+                        TenantService.MAIN_TENANT,
+                        null,
+                        URI.create("/" + IdUtils.create() + ".ion"),
+                        this.getClass().getClassLoader()
+                            .getResourceAsStream("playbooks/" + playbook)
+                    ).toString()
+                )
+            )
+            .commands(
+                Property.ofValue(
+                    List.of(
+                        "ansible-playbook -i localhost -c local playbooks/" + playbook
+                    )
+                )
+            )
+            .build();
+
+        RunContext runContext = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        return execute.run(runContext);
     }
 
     @Test
