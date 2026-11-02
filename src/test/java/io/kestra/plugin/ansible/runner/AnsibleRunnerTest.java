@@ -141,6 +141,82 @@ class AnsibleRunnerTest {
     }
 
     @Test
+    void testPlaybookInSingularPlaybookFolder() throws Exception {
+        RunContext runContext = newRunContext();
+        Path workingDir = runContext.workingDir().path();
+
+        // Simulate namespace files having a "playbook" singular folder
+        Path playbookFolder = workingDir.resolve("playbook");
+        Files.createDirectories(playbookFolder);
+        Files.writeString(playbookFolder.resolve("site.yml"), """
+            - hosts: localhost
+              tasks:
+                - name: Ping from playbook folder
+                  ansible.builtin.ping:
+            """);
+
+        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+
+        // 1. When user leaves playbook: site.yml (default), auto-detection should find playbook/site.yml
+        AnsibleRunner taskDefault = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        AnsibleRunner.Output output = taskDefault.run(runContext);
+        assertNotNull(output);
+        assertThat(output.getStatus(), is("successful"));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/playbook/site.yml")));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/site.yml")));
+
+        // 2. When user explicitly specifies playbook: playbook/site.yml
+        AnsibleRunner taskExplicit = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .project(Project.builder().playbook(Property.ofValue("playbook/site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        AnsibleRunner.Output outputExplicit = taskExplicit.run(runContext);
+        assertNotNull(outputExplicit);
+        assertThat(outputExplicit.getStatus(), is("successful"));
+    }
+
+    @Test
+    void testPlaybookInCustomFolder() throws Exception {
+        RunContext runContext = newRunContext();
+        Path workingDir = runContext.workingDir().path();
+
+        // Create custom directory structure with roles and custom projects
+        Path customFolder = workingDir.resolve("custom/network");
+        Files.createDirectories(customFolder);
+        Files.writeString(customFolder.resolve("configure.yml"), """
+            - hosts: localhost
+              tasks:
+                - name: Custom task
+                  ansible.builtin.debug:
+                    msg: "custom"
+            """);
+
+        Path rolesFolder = workingDir.resolve("roles/firewall/tasks");
+        Files.createDirectories(rolesFolder);
+        Files.writeString(rolesFolder.resolve("main.yml"), "- name: Rule 1\n  ansible.builtin.debug: msg=ok\n");
+
+        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+
+        AnsibleRunner task = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .project(Project.builder().playbook(Property.ofValue("custom/network/configure.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        AnsibleRunner.Output output = task.run(runContext);
+        assertNotNull(output);
+        assertThat(output.getStatus(), is("successful"));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/custom/network/configure.yml")));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/roles/firewall/tasks/main.yml")));
+    }
+
+    @Test
     void testInlinePlaybookExecution() throws Exception {
         RunContext runContext = newRunContext();
         TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
@@ -185,6 +261,41 @@ class AnsibleRunnerTest {
         assertThat(content, containsString("Inline Playbook Test"));
     }
 
+    @Test
+    void testSubfolderProjectSourceArchive() throws Exception {
+        RunContext runContext = newRunContext();
+        Path workingDir = runContext.workingDir().path();
+
+        Path archiveDir = workingDir.resolve("archive_src");
+        Files.createDirectories(archiveDir.resolve("playbooks"));
+        Files.createDirectories(archiveDir.resolve("roles/common/tasks"));
+        Files.writeString(archiveDir.resolve("playbooks/deploy.yml"), "- hosts: localhost\n  roles:\n    - common\n");
+        Files.writeString(archiveDir.resolve("roles/common/tasks/main.yml"), "- name: Step 1\n  ansible.builtin.ping:\n");
+
+        Path zipPath = workingDir.resolve("project.zip");
+        io.kestra.plugin.ansible.runner.utils.ArchiveUtils.zipDirectory(archiveDir, zipPath);
+        java.net.URI zipUri = runContext.storage().putFile(zipPath.toFile());
+
+        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+
+        AnsibleRunner task = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .project(
+                Project.builder()
+                    .source(Property.ofValue(zipUri.toString()))
+                    .playbook(Property.ofValue("playbooks/deploy.yml"))
+                    .build()
+            )
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        AnsibleRunner.Output output = task.run(runContext);
+        assertNotNull(output);
+        assertThat(output.getStatus(), is("successful"));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/playbooks/deploy.yml")));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/roles/common/tasks/main.yml")));
+    }
+
     /**
      * Mock TaskRunner that verifies directory contents and generates realistic ansible-runner artifacts.
      */
@@ -196,6 +307,9 @@ class AnsibleRunnerTest {
 
         @Builder.Default
         private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:v26.10.1";
+
+        @Builder.Default
+        private List<Map<String, Object>> customEvents = null;
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
@@ -272,29 +386,37 @@ class AnsibleRunnerTest {
             Files.writeString(identArtifacts.resolve("status"), "successful\n", StandardCharsets.UTF_8);
             Files.writeString(identArtifacts.resolve("rc"), "0\n", StandardCharsets.UTF_8);
 
-            // 1. Task failure on router-2
-            Map<String, Object> failEvent = Map.of(
-                "event", "runner_on_failed",
-                "event_data", Map.of(
-                    "host", "router-2",
-                    "task", "Enforce ACL compliance",
-                    "failed", true
-                )
-            );
-            Files.writeString(jobEvents.resolve("1-fail.json"), JacksonMapper.ofJson().writeValueAsString(failEvent));
+            if (customEvents != null) {
+                int c = 1;
+                for (var ev : customEvents) {
+                    Files.writeString(jobEvents.resolve(c + "-event.json"), JacksonMapper.ofJson().writeValueAsString(ev));
+                    c++;
+                }
+            } else {
+                // 1. Task failure on router-2
+                Map<String, Object> failEvent = Map.of(
+                    "event", "runner_on_failed",
+                    "event_data", Map.of(
+                        "host", "router-2",
+                        "task", "Enforce ACL compliance",
+                        "failed", true
+                    )
+                );
+                Files.writeString(jobEvents.resolve("1-fail.json"), JacksonMapper.ofJson().writeValueAsString(failEvent));
 
-            // 2. Playbook on stats summary event
-            Map<String, Object> statsEvent = Map.of(
-                "event", "playbook_on_stats",
-                "event_data", Map.of(
-                    "ok", Map.of("router-1", 2, "router-2", 1),
-                    "changed", Map.of("router-1", 1, "router-2", 0),
-                    "failures", Map.of("router-1", 0, "router-2", 1),
-                    "dark", Map.of(),
-                    "skipped", Map.of()
-                )
-            );
-            Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
+                // 2. Playbook on stats summary event
+                Map<String, Object> statsEvent = Map.of(
+                    "event", "playbook_on_stats",
+                    "event_data", Map.of(
+                        "ok", Map.of("router-1", 2, "router-2", 1),
+                        "changed", Map.of("router-1", 1, "router-2", 0),
+                        "failures", Map.of("router-1", 0, "router-2", 1),
+                        "dark", Map.of(),
+                        "skipped", Map.of()
+                    )
+                );
+                Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
+            }
 
             return new TaskRunnerResult<>(0, taskCommands.getLogConsumer());
         }
