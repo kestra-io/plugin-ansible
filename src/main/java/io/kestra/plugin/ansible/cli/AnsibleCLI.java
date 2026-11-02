@@ -80,7 +80,7 @@ import lombok.experimental.SuperBuilder;
         Executes ansible or ansible-playbook commands with the configured task runner. Generates ansible.cfg with the Kestra callback by default unless you supply one, and merges outputs across multiple commands.
         A `requirements.txt` or `requirements.yml` present in the working directory is installed before commands run; see `autoInstallPythonRequirements` and `autoInstallGalaxyRequirements`.
         Declared `galaxyDependencies`/`pythonDependencies`, and requirements files already present before commands run, install into a working-directory subtree shared by every command and cached across runs; see `dependencyCacheEnabled`.
-        When the task runner has monitoring enabled (`taskRunner.monitoring.enabled: true`), kotlp sets `OTEL_EXPORTER_OTLP_ENDPOINT` and the `community.general.opentelemetry` callback is enabled automatically, so the playbook run, each task and each host result are captured as OpenTelemetry spans (task name, host, status, duration) and stored in Kestra's traces. The image needs the `community.general` collection (included in the full `ansible` package, or add it to `galaxyDependencies`) and the `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp` Python packages (add them to `pythonDependencies`). Only kotlp's local endpoint (`http://127.0.0.1:<port>`) enables it, a custom OTLP endpoint is left untouched. Task arguments and callback logs are kept out of spans by default (`ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS` and `ANSIBLE_OPENTELEMETRY_DISABLE_LOGS` default to `true`, set them through `env` to override); failure messages, exceptions and stderr of failed tasks are still recorded on their spans, while `no_log: true` tasks stay censored. Enabling it sets `ANSIBLE_CALLBACKS_ENABLED`, which takes precedence over `callbacks_enabled` in a custom `ansibleConfig`: list any extra callbacks in that variable through `env` instead.
+        When the task runner has monitoring enabled (`taskRunner.monitoring.enabled: true`), kotlp sets `OTEL_EXPORTER_OTLP_ENDPOINT` and the `community.general.opentelemetry` callback is enabled automatically, so the playbook run, each task and each host result are captured as OpenTelemetry spans (task name, host, status, duration) and stored in Kestra's traces. No image change is needed: when the image lacks the `community.general` collection or the `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp` Python packages, they are installed once into the working directory (`.kestra_otel`) before the first command, which needs network access to PyPI and Ansible Galaxy (a failed install only logs a warning and the task still runs, without traces). Pin or mirror them yourself through `galaxyDependencies`/`pythonDependencies` if you need fixed versions. Only kotlp's local endpoint (`http://127.0.0.1:<port>`) enables it, a custom OTLP endpoint is left untouched. Task arguments and callback logs are kept out of spans by default (`ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS` and `ANSIBLE_OPENTELEMETRY_DISABLE_LOGS` default to `true`, set them through `env` to override); failure messages, exceptions and stderr of failed tasks are still recorded on their spans, while `no_log: true` tasks stay censored. Enabling it sets `ANSIBLE_CALLBACKS_ENABLED`, which takes precedence over `callbacks_enabled` in a custom `ansibleConfig`: list any extra callbacks in that variable through `env` instead.
         """
 )
 @Plugin(
@@ -381,13 +381,36 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         "export ANSIBLE_LIBRARY=\"$PWD/library${ANSIBLE_LIBRARY:+:$ANSIBLE_LIBRARY}\""
     );
 
+    private static final String OTEL_DIR = "$KESTRA_OTEL_DIR";
+    private static final String KOTLP_ENDPOINT_CASE = "case \"${OTEL_EXPORTER_OTLP_ENDPOINT:-}\" in http://127.0.0.1:*) ";
+
     // Only for kotlp's embedded receiver (http://127.0.0.1:<port>): a user-configured collector is left untouched.
-    private static final List<String> OTEL_EXPORTS = List.of(
-        "case \"${OTEL_EXPORTER_OTLP_ENDPOINT:-}\" in http://127.0.0.1:*) "
-            + "export ANSIBLE_CALLBACKS_ENABLED=\"${ANSIBLE_CALLBACKS_ENABLED:-kestra_logger},community.general.opentelemetry\"; "
-            + "export ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS=\"${ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS:-true}\"; "
-            + "export ANSIBLE_OPENTELEMETRY_DISABLE_LOGS=\"${ANSIBLE_OPENTELEMETRY_DISABLE_LOGS:-true}\"; "
-            + "case \"${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:-}\" in \"\"|http/json) export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf;; esac;; "
+    // The packages the callback needs are installed under OTEL_DIR when the image lacks them (see OTEL_INSTALL), so
+    // monitoring needs no image change; the dir is put on the search paths only once it exists.
+    static List<String> otelExports(String collectionsFallback) {
+        return List.of(
+            KOTLP_ENDPOINT_CASE
+                + "export KESTRA_OTEL_DIR=\"$PWD/.kestra_otel\"; "
+                + "export PYTHONPATH=\"" + OTEL_DIR + "/python${PYTHONPATH:+:$PYTHONPATH}\"; "
+                + "if [ -d \"" + OTEL_DIR + "/collections\" ]; then export ANSIBLE_COLLECTIONS_PATH=\"" + OTEL_DIR + "/collections:${ANSIBLE_COLLECTIONS_PATH:-" + collectionsFallback + "}\"; fi; "
+                + "case \",${ANSIBLE_CALLBACKS_ENABLED:-},\" in *,community.general.opentelemetry,*) ;; "
+                + "*) export ANSIBLE_CALLBACKS_ENABLED=\"${ANSIBLE_CALLBACKS_ENABLED:-kestra_logger},community.general.opentelemetry\";; esac; "
+                + "export ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS=\"${ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS:-true}\"; "
+                + "export ANSIBLE_OPENTELEMETRY_DISABLE_LOGS=\"${ANSIBLE_OPENTELEMETRY_DISABLE_LOGS:-true}\"; "
+                + "case \"${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:-}\" in \"\"|http/json) export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf;; esac;; "
+                + "esac"
+        );
+    }
+
+    // Once, before the first command: a failed install only costs the traces, never the task.
+    private static final List<String> OTEL_INSTALL = List.of(
+        KOTLP_ENDPOINT_CASE
+            + "python3 -c 'import opentelemetry.sdk.trace, opentelemetry.exporter.otlp.proto.http.trace_exporter, opentelemetry.exporter.otlp.proto.grpc.trace_exporter' 2>/dev/null "
+            + "|| pip install --quiet --no-cache-dir --target \"" + OTEL_DIR + "/python\" opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp "
+            + "|| echo 'Could not install the OpenTelemetry Python packages, traces will not be exported' >&2; "
+            + "ansible-doc -t callback community.general.opentelemetry >/dev/null 2>&1 "
+            + "|| ansible-galaxy collection install community.general -p \"" + OTEL_DIR + "/collections\" "
+            + "|| echo 'Could not install the community.general collection, traces will not be exported' >&2;; "
             + "esac"
     );
 
@@ -867,12 +890,16 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 boolean isFirstCommand = !beforeDone;
                 List<String> beforeForRun = new ArrayList<>(CALLBACK_PATH_EXPORTS);
                 beforeForRun.addAll(dependencyInstall.pathExports());
-                beforeForRun.addAll(OTEL_EXPORTS);
+                var otelExports = otelExports(configuredPath(workingDir.resolve(ANSIBLE_CFG), "collections_path", "collections_paths").orElse(DEFAULT_COLLECTIONS_PATH));
+                beforeForRun.addAll(otelExports);
                 if (isFirstCommand) {
                     // User beforeCommands can configure the environment
                     // (e.g. private pip index, proxy, auth) before auto-install fires.
                     beforeForRun.addAll(runContext.render(this.beforeCommands).asList(String.class, extraVars));
                     beforeForRun.addAll(dependencyInstall.commands());
+                    // then the exports again, so the first command sees what the install just added
+                    beforeForRun.addAll(OTEL_INSTALL);
+                    beforeForRun.addAll(otelExports);
                 }
                 Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
 

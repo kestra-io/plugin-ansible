@@ -29,7 +29,11 @@ class AnsibleOtelExportsTest {
     private RunContextFactory runContextFactory;
 
     private String run(Map<String, String> env) throws Exception {
-        var command = "echo \"::{\\\"outputs\\\":{\\\"seen\\\":\\\"cb=${ANSIBLE_CALLBACKS_ENABLED:-}"
+        return run(env, null);
+    }
+
+    private String run(Map<String, String> env, String command) throws Exception {
+        command = command != null ? command : "echo \"::{\\\"outputs\\\":{\\\"seen\\\":\\\"cb=${ANSIBLE_CALLBACKS_ENABLED:-}"
             + "|proto=${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:-}"
             + "|hide=${ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS:-}"
             + "|logs=${ANSIBLE_OPENTELEMETRY_DISABLE_LOGS:-}\\\"}}::\"";
@@ -103,5 +107,16 @@ class AnsibleOtelExportsTest {
         );
 
         assertThat(seen, is("cb=|proto=http/json|hide=|logs="));
+    }
+
+    @Test
+    void shouldInstallWhatTheCallbackNeedsWhenTheImageLacksIt() throws Exception {
+        var seen = run(
+            Map.of("OTEL_EXPORTER_OTLP_ENDPOINT", KOTLP_ENDPOINT),
+            "python3 -c 'import opentelemetry.sdk.trace, opentelemetry.exporter.otlp.proto.http.trace_exporter' && ansible-doc -t callback community.general.opentelemetry > /dev/null "
+                + "&& echo \"::{\\\"outputs\\\":{\\\"seen\\\":\\\"ready\\\"}}::\""
+        );
+
+        assertThat(seen, is("ready"));
     }
 }
