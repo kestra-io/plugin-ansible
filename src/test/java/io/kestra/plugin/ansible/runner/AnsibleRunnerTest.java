@@ -5,11 +5,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 
 import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.runners.TaskCommands;
 import io.kestra.core.models.tasks.runners.TaskRunner;
@@ -20,6 +22,7 @@ import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.storages.StorageInterface;
 import io.kestra.plugin.ansible.runner.models.Inventory;
+import io.kestra.plugin.ansible.runner.models.LogsMode;
 import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
 
@@ -138,6 +141,11 @@ class AnsibleRunnerTest {
             assertThat(bytes[0], is((byte) 'P'));
             assertThat(bytes[1], is((byte) 'K'));
         }
+
+        assertThat(runContext.dynamicWorkerResults(), is(not(empty())));
+        var dynamicResult = runContext.dynamicWorkerResults().getFirst();
+        assertThat(dynamicResult.getTaskRun().getTaskId(), is("Enforce ACL compliance"));
+        assertThat(dynamicResult.getTaskRun().getState().getCurrent(), is(State.Type.FAILED));
     }
 
     @Test
@@ -185,6 +193,154 @@ class AnsibleRunnerTest {
         assertThat(content, containsString("Inline Playbook Test"));
     }
 
+    @Test
+    void testDynamicTaskRunsGanttAndLogs() throws Exception {
+        var runContext = newRunContext();
+
+        var events = List.<Map<String, Object>> of(
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T10:00:00.000Z",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Ping localhost",
+                    "task_uuid", "uuid-1",
+                    "task_action", "ansible.builtin.ping"
+                )
+            ),
+            Map.of(
+                "event", "runner_on_ok",
+                "created", "2026-11-02T10:00:01.000Z",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Ping localhost",
+                    "task_uuid", "uuid-1",
+                    "host", "localhost",
+                    "res", Map.of("ping", "pong", "changed", false)
+                )
+            ),
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T10:00:01.500Z",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Install package",
+                    "task_uuid", "uuid-2",
+                    "task_action", "ansible.builtin.package"
+                )
+            ),
+            Map.of(
+                "event", "runner_on_ok",
+                "created", "2026-11-02T10:00:03.000Z",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Install package",
+                    "task_uuid", "uuid-2",
+                    "host", "localhost",
+                    "res", Map.of("changed", true, "_ansible_no_log", true)
+                )
+            ),
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T10:00:03.500Z",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Configure firewall",
+                    "task_uuid", "uuid-3",
+                    "task_action", "ansible.builtin.command"
+                )
+            ),
+            Map.of(
+                "event", "runner_on_failed",
+                "created", "2026-11-02T10:00:04.000Z",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Configure firewall",
+                    "task_uuid", "uuid-3",
+                    "host", "localhost",
+                    "res", Map.of("failed", true, "msg", "Rule syntax error", "rc", 1)
+                )
+            ),
+            Map.of(
+                "event", "playbook_on_stats",
+                "event_data", Map.of(
+                    "ok", Map.of("localhost", 2),
+                    "changed", Map.of("localhost", 1),
+                    "failures", Map.of("localhost", 1),
+                    "dark", Map.of(),
+                    "skipped", Map.of()
+                )
+            )
+        );
+
+        var mockRunner = MockAnsibleTaskRunner.builder()
+            .customEvents(events)
+            .build();
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: localhost\n  tasks: []\n"))
+                    .build()
+            )
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .failOnErrors(Property.ofValue(false))
+            .build();
+
+        var output = task.run(runContext);
+        assertNotNull(output);
+
+        var dynamicResults = runContext.dynamicWorkerResults();
+        assertThat(dynamicResults, hasSize(3));
+
+        var task1 = dynamicResults.get(0).getTaskRun();
+        assertThat(task1.getTaskId(), is("Playbook 1 | Ping localhost"));
+        assertThat(task1.getState().getCurrent(), is(State.Type.SUCCESS));
+
+        var task2 = dynamicResults.get(1).getTaskRun();
+        assertThat(task2.getTaskId(), is("Playbook 1 | Install package"));
+        assertThat(task2.getState().getCurrent(), is(State.Type.SUCCESS));
+
+        var task3 = dynamicResults.get(2).getTaskRun();
+        assertThat(task3.getTaskId(), is("Playbook 1 | Configure firewall"));
+        assertThat(task3.getState().getCurrent(), is(State.Type.FAILED));
+    }
+
+    @Test
+    void testLogStreamingLimitPreservesCriticalErrorsAndSpool() throws Exception {
+        var runContext = newRunContext();
+        var spoolFile = runContext.workingDir().path().resolve("test-spool.log");
+
+        var consumer = new AnsibleRunnerLogConsumer(
+            runContext,
+            true,
+            LogsMode.FULL,
+            spoolFile,
+            50L,
+            1,
+            new SecretMasker()
+        );
+
+        for (var i = 1; i <= 60; i++) {
+            consumer.accept("Normal log line " + i, false, Instant.now());
+        }
+
+        assertTrue(consumer.wasTruncated(), "Should be marked truncated after exceeding limit");
+
+        consumer.accept("fatal: [localhost]: FAILED! => {\"msg\": \"Critical failure after limit\"}", false, Instant.now());
+        consumer.accept("PLAY RECAP *********************************************************************", false, Instant.now());
+        consumer.accept("localhost                  : ok=2    changed=0    unreachable=0    failed=1", false, Instant.now());
+
+        consumer.close();
+
+        var spooled = Files.readAllLines(spoolFile);
+        assertThat(spooled.size(), is(63));
+        assertThat(spooled.get(60), containsString("fatal: [localhost]: FAILED!"));
+        assertThat(spooled.get(61), containsString("PLAY RECAP"));
+        assertThat(spooled.get(62), containsString("failed=1"));
+    }
+
     /**
      * Mock TaskRunner that verifies directory contents and generates realistic ansible-runner artifacts.
      */
@@ -196,6 +352,8 @@ class AnsibleRunnerTest {
 
         @Builder.Default
         private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:v26.10.1";
+
+        private List<Map<String, Object>> customEvents;
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
@@ -272,29 +430,37 @@ class AnsibleRunnerTest {
             Files.writeString(identArtifacts.resolve("status"), "successful\n", StandardCharsets.UTF_8);
             Files.writeString(identArtifacts.resolve("rc"), "0\n", StandardCharsets.UTF_8);
 
-            // 1. Task failure on router-2
-            Map<String, Object> failEvent = Map.of(
-                "event", "runner_on_failed",
-                "event_data", Map.of(
-                    "host", "router-2",
-                    "task", "Enforce ACL compliance",
-                    "failed", true
-                )
-            );
-            Files.writeString(jobEvents.resolve("1-fail.json"), JacksonMapper.ofJson().writeValueAsString(failEvent));
+            if (customEvents != null) {
+                int counter = 1;
+                for (var event : customEvents) {
+                    Files.writeString(jobEvents.resolve(counter + "-event.json"), JacksonMapper.ofJson().writeValueAsString(event));
+                    counter++;
+                }
+            } else {
+                // 1. Task failure on router-2
+                Map<String, Object> failEvent = Map.of(
+                    "event", "runner_on_failed",
+                    "event_data", Map.of(
+                        "host", "router-2",
+                        "task", "Enforce ACL compliance",
+                        "failed", true
+                    )
+                );
+                Files.writeString(jobEvents.resolve("1-fail.json"), JacksonMapper.ofJson().writeValueAsString(failEvent));
 
-            // 2. Playbook on stats summary event
-            Map<String, Object> statsEvent = Map.of(
-                "event", "playbook_on_stats",
-                "event_data", Map.of(
-                    "ok", Map.of("router-1", 2, "router-2", 1),
-                    "changed", Map.of("router-1", 1, "router-2", 0),
-                    "failures", Map.of("router-1", 0, "router-2", 1),
-                    "dark", Map.of(),
-                    "skipped", Map.of()
-                )
-            );
-            Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
+                // 2. Playbook on stats summary event
+                Map<String, Object> statsEvent = Map.of(
+                    "event", "playbook_on_stats",
+                    "event_data", Map.of(
+                        "ok", Map.of("router-1", 2, "router-2", 1),
+                        "changed", Map.of("router-1", 1, "router-2", 0),
+                        "failures", Map.of("router-1", 0, "router-2", 1),
+                        "dark", Map.of(),
+                        "skipped", Map.of()
+                    )
+                );
+                Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
+            }
 
             return new TaskRunnerResult<>(0, taskCommands.getLogConsumer());
         }
