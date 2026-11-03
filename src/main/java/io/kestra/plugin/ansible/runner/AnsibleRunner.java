@@ -963,6 +963,8 @@ public class AnsibleRunner extends Task implements
                 if (uriPath == null || uriPath.isBlank() || "/".equals(uriPath)) {
                     throw new IllegalArgumentException(
                         "Invalid namespace file URI for inventory: " + rInvFile
+                            + ". Expected format: nsfile:///path/to/hosts.ini "
+                            + "or nsfile://<namespace>/path/to/hosts.ini."
                     );
                 }
 
@@ -976,7 +978,7 @@ public class AnsibleRunner extends Task implements
             } else if (rInvFile.contains("://")) {
                 throw new IllegalArgumentException(
                     "Unsupported URI scheme for inventory file: " + rInvFile
-                        + ". Only kestra:// internal storage URIs or local workspace paths are supported."
+                        + ". Supported schemes are kestra://, nsfile://, or local workspace paths."
                 );
             } else {
                 var relInv = rInvFile.startsWith("/") ? rInvFile.substring(1) : rInvFile;

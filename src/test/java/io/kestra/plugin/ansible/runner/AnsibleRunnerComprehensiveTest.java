@@ -31,6 +31,7 @@ import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.storages.StorageInterface;
 import io.kestra.core.utils.TestsUtils;
+import io.kestra.core.utils.IdUtils;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.LogsMode;
 import io.kestra.plugin.ansible.runner.models.Project;
@@ -431,17 +432,15 @@ public class AnsibleRunnerComprehensiveTest {
 
     @Test
     void test_InventoryFileFromCurrentNamespace() throws Exception {
-        // Inventory content stored in the current namespace
-        String inventoryContent = """
+        var inventoryContent = """
         [webservers]
         current-ns-host ansible_host=127.0.0.1
         """;
 
-        // Create a task with a mock runner
-        TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
+        var runner = ComprehensiveMockRunner.builder().build();
 
-        AnsibleRunner task = AnsibleRunner.builder()
-            .id("unit-test-current-namespace")
+        var task = AnsibleRunner.builder()
+            .id(IdUtils.create())
             .type(AnsibleRunner.class.getName())
             .taskRunner(runner)
             .project(
@@ -454,30 +453,25 @@ public class AnsibleRunnerComprehensiveTest {
             )
             .inventory(
                 Inventory.builder()
-                    .file(Property.ofValue(
-                        "nsfile:///inventories/hosts.ini"
-                    ))
+                    .file(Property.ofValue("nsfile:///inventories/hosts.ini"))
                     .build()
             )
             .failOnErrors(Property.ofValue(false))
             .build();
 
-        // Create a RunContext with namespace information
-        AnsibleRunner contextTask = AnsibleRunner.builder()
-            .id("unit-test")
+        var contextTask = AnsibleRunner.builder()
+            .id(IdUtils.create())
             .type(AnsibleRunner.class.getName())
             .build();
 
-        RunContext runContext = TestsUtils.mockRunContext(
+        var runContext = TestsUtils.mockRunContext(
             runContextFactory,
             contextTask,
             Map.of()
         );
 
-        // Get the current namespace from the RunContext
-        String currentNamespace = runContext.flowInfo().namespace();
+        var currentNamespace = runContext.flowInfo().namespace();
 
-        // Store the inventory file in the current namespace
         runContext.storage().namespace(currentNamespace).putFile(
             Path.of("inventories/hosts.ini"),
             new ByteArrayInputStream(
@@ -485,41 +479,69 @@ public class AnsibleRunnerComprehensiveTest {
             )
         );
 
-        // Execute the task
         task.run(runContext);
 
-        // Verify that the inventory file was copied
-        // into the Ansible runner's inventory directory
-        Path hosts = runContext.workingDir().path()
+        var hosts = runContext.workingDir().path()
             .resolve("runner/inventory/hosts");
 
-        assertTrue(
-            Files.exists(hosts),
-            "Inventory file should exist in the runner inventory directory"
-        );
-
-        // Verify that the copied inventory contains the expected host
-        assertThat(
-            Files.readString(hosts),
-            containsString("current-ns-host")
-        );
+        assertTrue(Files.exists(hosts));
+        assertThat(Files.readString(hosts), containsString("current-ns-host"));
     }
 
     @Test
     void test_InventoryFileFromNamespaceFile() throws Exception {
-        RunContext runContext = newRunContext();
-        TaskRunner<?> runner = ComprehensiveMockRunner.builder().build();
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
 
-        String inventoryContent =
-            "db-primary ansible_connection=local\n" +
-                "db-replica ansible_connection=local\n";
+        var inventoryContent = """
+        db-primary ansible_connection=local
+        db-replica ansible_connection=local
+        """;
 
         runContext.storage().namespace("my.test.ns").putFile(
             Path.of("inventories/hosts.ini"),
             new ByteArrayInputStream(inventoryContent.getBytes(StandardCharsets.UTF_8))
         );
 
-        AnsibleRunner task = AnsibleRunner.builder()
+        var task = AnsibleRunner.builder()
+            .id(IdUtils.create())
+            .type(AnsibleRunner.class.getName())
+            .taskRunner(runner)
+            .failOnErrors(Property.ofValue(false))
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("- hosts: all\n  tasks:\n    - ping:\n"))
+                    .playbook(Property.ofValue("site.yml"))
+                    .build()
+            )
+            .inventory(
+                Inventory.builder()
+                    .file(Property.ofValue("nsfile://my.test.ns/inventories/hosts.ini"))
+                    .build()
+            )
+            .build();
+
+        task.run(runContext);
+
+        var hosts = runContext.workingDir().path()
+            .resolve("runner/inventory/hosts");
+
+        assertTrue(Files.exists(hosts));
+
+        var content = Files.readString(hosts);
+
+        assertThat(content, containsString("db-primary"));
+        assertThat(content, containsString("db-replica"));
+    }
+
+    @Test
+    void test_InventoryFileNotFound() throws Exception {
+        var runContext = newRunContext();
+        var runner = ComprehensiveMockRunner.builder().build();
+
+        var task = AnsibleRunner.builder()
+            .id(IdUtils.create())
+            .type(AnsibleRunner.class.getName())
             .taskRunner(runner)
             .failOnErrors(Property.ofValue(false))
             .project(
@@ -531,21 +553,13 @@ public class AnsibleRunnerComprehensiveTest {
             .inventory(
                 Inventory.builder()
                     .file(Property.ofValue(
-                        "nsfile://my.test.ns/inventories/hosts.ini"
+                        "nsfile:///inventories/missing-hosts.ini"
                     ))
                     .build()
             )
             .build();
-        task.run(runContext);
-        Path hosts = runContext.workingDir().path()
-            .resolve("runner/inventory/hosts");
 
-        assertTrue(Files.exists(hosts));
-
-        String content = Files.readString(hosts);
-
-        assertThat(content, containsString("db-primary"));
-        assertThat(content, containsString("db-replica"));
+        assertThrows(Exception.class, () -> task.run(runContext));
     }
 
     @Test
