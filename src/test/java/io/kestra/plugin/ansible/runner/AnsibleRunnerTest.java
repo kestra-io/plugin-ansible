@@ -22,16 +22,20 @@ import io.kestra.core.storages.StorageInterface;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
+import io.kestra.plugin.ansible.runner.utils.ArchiveUtils;
 
 import jakarta.inject.Inject;
 import lombok.Builder;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @KestraTest
@@ -142,11 +146,10 @@ class AnsibleRunnerTest {
 
     @Test
     void testPlaybookInSingularPlaybookFolder() throws Exception {
-        RunContext runContext = newRunContext();
-        Path workingDir = runContext.workingDir().path();
+        var runContext = newRunContext();
+        var workingDir = runContext.workingDir().path();
 
-        // Simulate namespace files having a "playbook" singular folder
-        Path playbookFolder = workingDir.resolve("playbook");
+        var playbookFolder = workingDir.resolve("playbook");
         Files.createDirectories(playbookFolder);
         Files.writeString(playbookFolder.resolve("site.yml"), """
             - hosts: localhost
@@ -155,39 +158,36 @@ class AnsibleRunnerTest {
                   ansible.builtin.ping:
             """);
 
-        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+        var mockRunner = MockAnsibleTaskRunner.builder().build();
 
-        // 1. When user leaves playbook: site.yml (default), auto-detection should find playbook/site.yml
-        AnsibleRunner taskDefault = AnsibleRunner.builder()
+        var taskDefault = AnsibleRunner.builder()
             .taskRunner(mockRunner)
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
-        AnsibleRunner.Output output = taskDefault.run(runContext);
+        var output = taskDefault.run(runContext);
         assertNotNull(output);
         assertThat(output.getStatus(), is("successful"));
         assertTrue(Files.exists(workingDir.resolve("runner/project/playbook/site.yml")));
         assertTrue(Files.exists(workingDir.resolve("runner/project/site.yml")));
 
-        // 2. When user explicitly specifies playbook: playbook/site.yml
-        AnsibleRunner taskExplicit = AnsibleRunner.builder()
+        var taskExplicit = AnsibleRunner.builder()
             .taskRunner(mockRunner)
             .project(Project.builder().playbook(Property.ofValue("playbook/site.yml")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
-        AnsibleRunner.Output outputExplicit = taskExplicit.run(runContext);
+        var outputExplicit = taskExplicit.run(runContext);
         assertNotNull(outputExplicit);
         assertThat(outputExplicit.getStatus(), is("successful"));
     }
 
     @Test
     void testPlaybookInCustomFolder() throws Exception {
-        RunContext runContext = newRunContext();
-        Path workingDir = runContext.workingDir().path();
+        var runContext = newRunContext();
+        var workingDir = runContext.workingDir().path();
 
-        // Create custom directory structure with roles and custom projects
-        Path customFolder = workingDir.resolve("custom/network");
+        var customFolder = workingDir.resolve("custom/network");
         Files.createDirectories(customFolder);
         Files.writeString(customFolder.resolve("configure.yml"), """
             - hosts: localhost
@@ -197,23 +197,122 @@ class AnsibleRunnerTest {
                     msg: "custom"
             """);
 
-        Path rolesFolder = workingDir.resolve("roles/firewall/tasks");
+        var rolesFolder = workingDir.resolve("roles/firewall/tasks");
         Files.createDirectories(rolesFolder);
         Files.writeString(rolesFolder.resolve("main.yml"), "- name: Rule 1\n  ansible.builtin.debug: msg=ok\n");
 
-        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+        var mockRunner = MockAnsibleTaskRunner.builder().build();
 
-        AnsibleRunner task = AnsibleRunner.builder()
+        var task = AnsibleRunner.builder()
             .taskRunner(mockRunner)
             .project(Project.builder().playbook(Property.ofValue("custom/network/configure.yml")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
-        AnsibleRunner.Output output = task.run(runContext);
+        var output = task.run(runContext);
         assertNotNull(output);
         assertThat(output.getStatus(), is("successful"));
         assertTrue(Files.exists(workingDir.resolve("runner/project/custom/network/configure.yml")));
         assertTrue(Files.exists(workingDir.resolve("runner/project/roles/firewall/tasks/main.yml")));
+        assertTrue(Files.exists(workingDir.resolve("runner/project/custom/network/roles/firewall/tasks/main.yml")));
+    }
+
+    @Test
+    void testMissingSubfolderPlaybookThrowsException() throws Exception {
+        var runContext = newRunContext();
+        var workingDir = runContext.workingDir().path();
+
+        Files.writeString(workingDir.resolve("missing.yml"), "- hosts: localhost\n  tasks: []\n");
+
+        var mockRunner = MockAnsibleTaskRunner.builder().build();
+        var task = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .project(Project.builder().playbook(Property.ofValue("custom/missing.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(exception.getMessage(), is("Playbook not found: custom/missing.yml"));
+    }
+
+    @Test
+    void testAmbiguousBarePlaybookThrowsException() throws Exception {
+        var runContext = newRunContext();
+        var workingDir = runContext.workingDir().path();
+
+        Files.createDirectories(workingDir.resolve("env1"));
+        Files.createDirectories(workingDir.resolve("env2"));
+        Files.writeString(workingDir.resolve("env1/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("env2/site.yml"), "- hosts: localhost\n  tasks: []\n");
+
+        var mockRunner = MockAnsibleTaskRunner.builder().build();
+        var task = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(exception.getMessage(), containsString("Playbook not found: site.yml; found several candidates:"));
+        assertThat(exception.getMessage(), containsString("env1/site.yml"));
+        assertThat(exception.getMessage(), containsString("env2/site.yml"));
+    }
+
+    @Test
+    void testEnvVarsRolesPathWithAndWithoutUserOverride() throws Exception {
+        var runContextWithoutOverride = newRunContext();
+        var workDirWithoutOverride = runContextWithoutOverride.workingDir().path();
+        Files.writeString(workDirWithoutOverride.resolve("site.yml"), "- hosts: localhost\n  tasks: []\n");
+
+        var mockRunnerWithoutOverride = MockAnsibleTaskRunner.builder().build();
+        var taskWithoutOverride = AnsibleRunner.builder()
+            .taskRunner(mockRunnerWithoutOverride)
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        taskWithoutOverride.run(runContextWithoutOverride);
+        assertNull(mockRunnerWithoutOverride.getCapturedEnvVars());
+
+        var runContextWithOverride = newRunContext();
+        var workDirWithOverride = runContextWithOverride.workingDir().path();
+        Files.writeString(workDirWithOverride.resolve("site.yml"), "- hosts: localhost\n  tasks: []\n");
+
+        var mockRunnerWithOverride = MockAnsibleTaskRunner.builder().build();
+        var taskWithOverride = AnsibleRunner.builder()
+            .taskRunner(mockRunnerWithOverride)
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .env(
+                RunnerEnv.builder()
+                    .envVars(Property.ofValue(Map.of("ANSIBLE_ROLES_PATH", "/custom/roles")))
+                    .build()
+            )
+            .build();
+
+        taskWithOverride.run(runContextWithOverride);
+        assertNotNull(mockRunnerWithOverride.getCapturedEnvVars());
+        assertThat(mockRunnerWithOverride.getCapturedEnvVars(), containsString("\"/custom/roles\""));
+    }
+
+    @Test
+    void testOutputFilesNotDuplicatedFromWorkspace() throws Exception {
+        var runContext = newRunContext();
+        var workingDir = runContext.workingDir().path();
+
+        Files.writeString(workingDir.resolve("site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("report.txt"), "workspace report content\n");
+
+        var mockRunner = MockAnsibleTaskRunner.builder().build();
+        var task = AnsibleRunner.builder()
+            .taskRunner(mockRunner)
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .outputFiles(Property.ofValue(List.of("report.txt")))
+            .build();
+
+        var output = task.run(runContext);
+        assertNotNull(output);
+        assertFalse(Files.exists(workingDir.resolve("runner/project/report.txt")));
+        assertNotNull(output.getOutputFiles());
+        assertThat(output.getOutputFiles().keySet(), contains("report.txt"));
     }
 
     @Test
@@ -263,22 +362,24 @@ class AnsibleRunnerTest {
 
     @Test
     void testSubfolderProjectSourceArchive() throws Exception {
-        RunContext runContext = newRunContext();
-        Path workingDir = runContext.workingDir().path();
+        var runContext = newRunContext();
+        var workingDir = runContext.workingDir().path();
 
-        Path archiveDir = workingDir.resolve("archive_src");
+        var archiveDir = workingDir.resolve("archive_src");
         Files.createDirectories(archiveDir.resolve("playbooks"));
         Files.createDirectories(archiveDir.resolve("roles/common/tasks"));
+        Files.createDirectories(archiveDir.resolve("inventories/production"));
         Files.writeString(archiveDir.resolve("playbooks/deploy.yml"), "- hosts: localhost\n  roles:\n    - common\n");
         Files.writeString(archiveDir.resolve("roles/common/tasks/main.yml"), "- name: Step 1\n  ansible.builtin.ping:\n");
+        Files.writeString(archiveDir.resolve("inventories/production/hosts.ini"), "localhost ansible_connection=local\n");
 
-        Path zipPath = workingDir.resolve("project.zip");
-        io.kestra.plugin.ansible.runner.utils.ArchiveUtils.zipDirectory(archiveDir, zipPath);
-        java.net.URI zipUri = runContext.storage().putFile(zipPath.toFile());
+        var zipPath = workingDir.resolve("project.zip");
+        ArchiveUtils.zipDirectory(archiveDir, zipPath);
+        var zipUri = runContext.storage().putFile(zipPath.toFile());
 
-        TaskRunner<?> mockRunner = MockAnsibleTaskRunner.builder().build();
+        var mockRunner = MockAnsibleTaskRunner.builder().build();
 
-        AnsibleRunner task = AnsibleRunner.builder()
+        var task = AnsibleRunner.builder()
             .taskRunner(mockRunner)
             .project(
                 Project.builder()
@@ -286,10 +387,10 @@ class AnsibleRunnerTest {
                     .playbook(Property.ofValue("playbooks/deploy.yml"))
                     .build()
             )
-            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .inventory(Inventory.builder().file(Property.ofValue("inventories/production/hosts.ini")).build())
             .build();
 
-        AnsibleRunner.Output output = task.run(runContext);
+        var output = task.run(runContext);
         assertNotNull(output);
         assertThat(output.getStatus(), is("successful"));
         assertTrue(Files.exists(workingDir.resolve("runner/project/playbooks/deploy.yml")));
@@ -301,6 +402,7 @@ class AnsibleRunnerTest {
      */
     @SuperBuilder
     @NoArgsConstructor
+    @Getter
     public static class MockAnsibleTaskRunner extends TaskRunner<TaskRunnerDetailResult> {
         @Builder.Default
         protected String type = MockAnsibleTaskRunner.class.getName();
@@ -308,8 +410,7 @@ class AnsibleRunnerTest {
         @Builder.Default
         private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:v26.10.1";
 
-        @Builder.Default
-        private List<Map<String, Object>> customEvents = null;
+        private String capturedEnvVars;
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
@@ -345,9 +446,12 @@ class AnsibleRunnerTest {
             // Verify env/envvars
             if (Files.exists(runnerDir.resolve("env/envvars"))) {
                 String envvars = Files.readString(runnerDir.resolve("env/envvars"));
+                this.capturedEnvVars = envvars;
                 if (envvars.contains("ANSIBLE_HOST_KEY_CHECKING")) {
                     assertThat(envvars, containsString("ANSIBLE_HOST_KEY_CHECKING"));
                 }
+            } else {
+                this.capturedEnvVars = null;
             }
 
             // Verify env/passwords
@@ -386,44 +490,36 @@ class AnsibleRunnerTest {
             Files.writeString(identArtifacts.resolve("status"), "successful\n", StandardCharsets.UTF_8);
             Files.writeString(identArtifacts.resolve("rc"), "0\n", StandardCharsets.UTF_8);
 
-            if (customEvents != null) {
-                int c = 1;
-                for (var ev : customEvents) {
-                    Files.writeString(jobEvents.resolve(c + "-event.json"), JacksonMapper.ofJson().writeValueAsString(ev));
-                    c++;
-                }
-            } else {
-                // 1. Task failure on router-2
-                Map<String, Object> failEvent = Map.of(
-                    "event", "runner_on_failed",
-                    "event_data", Map.of(
-                        "host", "router-2",
-                        "task", "Enforce ACL compliance",
-                        "failed", true
-                    )
-                );
-                Files.writeString(jobEvents.resolve("1-fail.json"), JacksonMapper.ofJson().writeValueAsString(failEvent));
+            // 1. Task failure on router-2
+            Map<String, Object> failEvent = Map.of(
+                "event", "runner_on_failed",
+                "event_data", Map.of(
+                    "host", "router-2",
+                    "task", "Enforce ACL compliance",
+                    "failed", true
+                )
+            );
+            Files.writeString(jobEvents.resolve("1-fail.json"), JacksonMapper.ofJson().writeValueAsString(failEvent));
 
-                // 2. Playbook on stats summary event
-                Map<String, Object> statsEvent = Map.of(
-                    "event", "playbook_on_stats",
-                    "event_data", Map.of(
-                        "ok", Map.of("router-1", 2, "router-2", 1),
-                        "changed", Map.of("router-1", 1, "router-2", 0),
-                        "failures", Map.of("router-1", 0, "router-2", 1),
-                        "dark", Map.of(),
-                        "skipped", Map.of()
-                    )
-                );
-                Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
-            }
+            // 2. Playbook on stats summary event
+            Map<String, Object> statsEvent = Map.of(
+                "event", "playbook_on_stats",
+                "event_data", Map.of(
+                    "ok", Map.of("router-1", 2, "router-2", 1),
+                    "changed", Map.of("router-1", 1, "router-2", 0),
+                    "failures", Map.of("router-1", 0, "router-2", 1),
+                    "dark", Map.of(),
+                    "skipped", Map.of()
+                )
+            );
+            Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
 
             return new TaskRunnerResult<>(0, taskCommands.getLogConsumer());
         }
 
         @Override
         public Map<String, Object> additionalVars(RunContext runContext, TaskCommands taskCommands) {
-            return Collections.emptyMap();
+            return new HashMap<>();
         }
     }
 }

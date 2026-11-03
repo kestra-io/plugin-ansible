@@ -154,18 +154,22 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
-            title = "Execute an Ansible playbook from a zipped project archive containing playbooks and roles.",
+            title = "Execute an Ansible playbook from a zipped project archive containing playbooks, roles, and inventory.",
             full = true,
             code = """
                 id: run_ansible_project_archive
                 namespace: dev
 
+                inputs:
+                  - id: projectArchive
+                    type: FILE
+
                 tasks:
                   - id: run_ansible
                     type: io.kestra.plugin.ansible.runner.AnsibleRunner
                     project:
-                      source: "kestra:///dev/ansible/infrastructure.zip"
-                      playbook: "deploy.yml"
+                      source: "{{ inputs.projectArchive }}"
+                      playbook: "playbooks/deploy.yml"
                     inventory:
                       file: "inventories/production/hosts.ini"
                     env:
@@ -208,6 +212,11 @@ public class AnsibleRunner extends Task implements
     private static final long DEFAULT_MAX_OUTPUTS_SIZE = 10 * 1024 * 1024L; // 10MB
     private static final long DEFAULT_MAX_LOG_LINES = 10_000L;
     private static final int LOG_BATCH_SIZE = 100;
+    private static final List<String> ANSIBLE_PROJECT_DIRS = List.of(
+        "roles", "templates", "scripts", "group_vars", "host_vars",
+        "library", "lookup_plugins", "filter_plugins", "callback_plugins",
+        "module_utils", "collections", "tasks", "vars", "files", "handlers"
+    );
 
     @Schema(
         title = "Execution Environment container image",
@@ -466,7 +475,7 @@ public class AnsibleRunner extends Task implements
 
             var initialPlaybook = resolvePlaybook(runContext);
             var resolvedPlaybook = resolveProjectSource(runContext, workingDir, projectDir, runnerDir, initialPlaybook);
-            resolveInventory(runContext, workingDir, inventoryDir);
+            resolveInventory(runContext, workingDir, projectDir, inventoryDir);
 
             var rPasswords = renderPasswords(runContext);
             var mergedExtraVars = populateEnvDir(runContext, envDir, rPasswords);
@@ -633,10 +642,16 @@ public class AnsibleRunner extends Task implements
             Map<String, URI> finalOutputFiles = null;
             if (this.outputFiles != null && extractedOutputFiles != null && !extractedOutputFiles.isEmpty()) {
                 finalOutputFiles = new HashMap<>();
+                var runnerProjectPrefix = "runner/project/";
                 for (var entry : extractedOutputFiles.entrySet()) {
-                    if (!entry.getKey().startsWith("runner/artifacts/")) {
-                        finalOutputFiles.put(entry.getKey(), entry.getValue());
+                    var key = entry.getKey();
+                    if (key.startsWith("runner/artifacts/")) {
+                        continue;
                     }
+                    if (key.startsWith(runnerProjectPrefix) && extractedOutputFiles.containsKey(key.substring(runnerProjectPrefix.length()))) {
+                        continue;
+                    }
+                    finalOutputFiles.put(key, entry.getValue());
                 }
                 if (finalOutputFiles.isEmpty()) {
                     finalOutputFiles = null;
@@ -822,18 +837,9 @@ public class AnsibleRunner extends Task implements
                     throw new IllegalArgumentException("Project source not found: " + rSourceStr);
                 }
             }
-        } else {
-            // Replicate workspace files/folders into projectDir (playbook, playbooks, projects, roles, custom folders, etc.)
-            copyWorkspaceToProjectDir(workingDir, projectDir, runnerDir);
         }
 
-        // Also ensure standard folders like roles, tasks, collections are copied if present in workingDir
-        var standardDirs = List.of(
-            "roles", "templates", "scripts", "group_vars", "host_vars",
-            "library", "lookup_plugins", "filter_plugins", "callback_plugins",
-            "module_utils", "collections", "tasks", "vars", "files", "handlers"
-        );
-        for (var dirName : standardDirs) {
+        for (var dirName : ANSIBLE_PROJECT_DIRS) {
             var srcDir = workingDir.resolve(dirName);
             var destDir = projectDir.resolve(dirName);
             if (Files.isDirectory(srcDir) && !Files.exists(destDir)) {
@@ -846,12 +852,12 @@ public class AnsibleRunner extends Task implements
             Files.copy(ansibleCfg, projectDir.resolve("ansible.cfg"), StandardCopyOption.REPLACE_EXISTING);
         }
 
-        var resolvedPlaybook = resolvePlaybookFile(workingDir, projectDir, playbookName);
-        bridgeProjectDirectoriesToPlaybookDir(projectDir, resolvedPlaybook);
+        var resolvedPlaybook = resolvePlaybookFile(workingDir, projectDir, runnerDir, playbookName);
+        bridgeProjectDirectoriesToPlaybookDir(runContext, projectDir, resolvedPlaybook);
         return resolvedPlaybook;
     }
 
-    private void bridgeProjectDirectoriesToPlaybookDir(Path projectDir, String resolvedPlaybook) {
+    private void bridgeProjectDirectoriesToPlaybookDir(RunContext runContext, Path projectDir, String resolvedPlaybook) {
         if (resolvedPlaybook == null || !resolvedPlaybook.contains("/")) {
             return;
         }
@@ -861,22 +867,17 @@ public class AnsibleRunner extends Task implements
             return;
         }
 
-        var standardDirs = List.of(
-            "roles", "group_vars", "host_vars", "vars", "collections", "templates",
-            "library", "lookup_plugins", "filter_plugins", "callback_plugins",
-            "module_utils", "tasks", "files", "handlers"
-        );
-        for (var dirName : standardDirs) {
+        for (var dirName : ANSIBLE_PROJECT_DIRS) {
             var src = projectDir.resolve(dirName);
             var dest = playbookDir.resolve(dirName);
             if (Files.isDirectory(src) && !Files.exists(dest)) {
                 try {
-                    var rel = playbookDir.relativize(src);
-                    Files.createSymbolicLink(dest, rel);
-                } catch (Exception e) {
+                    Files.createSymbolicLink(dest, playbookDir.relativize(src));
+                } catch (Exception symlinkEx) {
                     try {
                         FileUtils.copyDirectory(src.toFile(), dest.toFile());
-                    } catch (Exception ignored) {
+                    } catch (Exception copyEx) {
+                        runContext.logger().warn("Failed to bridge project directory '{}' to '{}': {}", dirName, dest, copyEx.getMessage());
                     }
                 }
             }
@@ -886,118 +887,90 @@ public class AnsibleRunner extends Task implements
         var destCfg = playbookDir.resolve("ansible.cfg");
         if (Files.isRegularFile(ansibleCfg) && !Files.exists(destCfg)) {
             try {
-                var rel = playbookDir.relativize(ansibleCfg);
-                Files.createSymbolicLink(destCfg, rel);
-            } catch (Exception e) {
+                Files.createSymbolicLink(destCfg, playbookDir.relativize(ansibleCfg));
+            } catch (Exception symlinkEx) {
                 try {
                     Files.copy(ansibleCfg, destCfg, StandardCopyOption.REPLACE_EXISTING);
-                } catch (Exception ignored) {
+                } catch (Exception copyEx) {
+                    runContext.logger().warn("Failed to bridge 'ansible.cfg' to '{}': {}", destCfg, copyEx.getMessage());
                 }
             }
         }
     }
 
-    private void copyWorkspaceToProjectDir(Path workingDir, Path projectDir, Path runnerDir) throws IOException {
-        try (var stream = Files.list(workingDir)) {
-            for (var path : stream.toList()) {
-                var fileName = path.getFileName().toString();
-                if (
-                    path.equals(runnerDir) || fileName.startsWith(".") || fileName.startsWith("ansible-runner-log-tmp-") || fileName.startsWith("results-") || fileName.startsWith("artifacts-")
-                ) {
-                    continue;
-                }
-                var target = projectDir.resolve(fileName);
-                if (Files.isDirectory(path)) {
-                    FileUtils.copyDirectory(path.toFile(), target.toFile());
-                } else if (Files.isRegularFile(path)) {
-                    Files.copy(path, target, StandardCopyOption.REPLACE_EXISTING);
-                }
-            }
-        }
-    }
-
-    private String resolvePlaybookFile(Path workingDir, Path projectDir, String playbookName) throws IOException {
+    private String resolvePlaybookFile(Path workingDir, Path projectDir, Path runnerDir, String playbookName) throws IOException {
         var targetPlaybook = secureResolve(projectDir, playbookName);
-
-        // 1. Direct hit in projectDir
         if (Files.isRegularFile(targetPlaybook)) {
             return playbookName;
         }
 
-        // 2. Direct hit in workingDir (copy to projectDir)
         var directWorkingDirFile = secureResolve(workingDir, playbookName);
         if (Files.isRegularFile(directWorkingDirFile)) {
-            copySafely(directWorkingDirFile, targetPlaybook);
+            copyPlaybookWithParentDir(workingDir, projectDir, playbookName, directWorkingDirFile, targetPlaybook);
             return playbookName;
         }
 
-        // 3. Check well-known subdirectories: "playbook", "playbooks", "projects", "roles"
-        var candidateSubdirs = List.of("playbook", "playbooks", "projects", "roles");
-        for (var subdir : candidateSubdirs) {
-            var inProjectSubdir = projectDir.resolve(subdir).resolve(playbookName);
-            if (Files.isRegularFile(inProjectSubdir)) {
-                copySafely(inProjectSubdir, targetPlaybook);
-                return subdir + "/" + playbookName;
-            }
-            var inWorkingSubdir = workingDir.resolve(subdir).resolve(playbookName);
-            if (Files.isRegularFile(inWorkingSubdir)) {
-                copySafely(inWorkingSubdir, targetPlaybook);
-                copySafely(inWorkingSubdir, inProjectSubdir);
-                return subdir + "/" + playbookName;
-            }
-        }
-
-        // 4. If playbookName contains a subpath (e.g. "playbook/site.yml" or "custom/site.yml"),
-        // check if the file was copied to projectDir root (e.g. via directory source flattening)
-        var fileNameOnly = Paths.get(playbookName).getFileName().toString();
-        var rootFile = projectDir.resolve(fileNameOnly);
-        if (Files.isRegularFile(rootFile)) {
-            copySafely(rootFile, targetPlaybook);
-            return playbookName;
-        }
-
-        // 5. Recursive search in projectDir and workingDir (depth up to 5)
-        try (var stream = Files.walk(projectDir, 5)) {
-            var found = stream
-                .filter(Files::isRegularFile)
-                .filter(p -> p.getFileName().toString().equals(fileNameOnly))
-                .findFirst();
-            if (found.isPresent()) {
-                var rel = projectDir.relativize(found.get()).toString();
-                copySafely(found.get(), targetPlaybook);
-                return rel;
-            }
-        }
-
-        try (var stream = Files.walk(workingDir, 5)) {
-            var found = stream
-                .filter(p -> Files.isRegularFile(p) && !p.startsWith(projectDir))
-                .filter(p -> p.getFileName().toString().equals(fileNameOnly))
-                .findFirst();
-            if (found.isPresent()) {
-                copySafely(found.get(), targetPlaybook);
-                var rel = workingDir.relativize(found.get()).toString();
-                var inProjectDest = secureResolve(projectDir, rel);
-                copySafely(found.get(), inProjectDest);
-                return rel;
-            }
-        }
-
-        if (!Files.exists(targetPlaybook)) {
+        if (playbookName.contains("/")) {
             throw new IllegalArgumentException("Playbook not found: " + playbookName);
         }
 
-        return playbookName;
+        var candidates = findBarePlaybookCandidates(workingDir, projectDir, runnerDir, playbookName);
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException("Playbook not found: " + playbookName);
+        }
+        if (candidates.size() > 1) {
+            throw new IllegalArgumentException("Playbook not found: " + playbookName + "; found several candidates: " + String.join(", ", candidates));
+        }
+
+        var matchedRelPath = candidates.getFirst();
+        var inProjectFile = secureResolve(projectDir, matchedRelPath);
+        if (!Files.isRegularFile(inProjectFile)) {
+            var inWorkingFile = secureResolve(workingDir, matchedRelPath);
+            copyPlaybookWithParentDir(workingDir, projectDir, matchedRelPath, inWorkingFile, inProjectFile);
+        }
+        copyFile(inProjectFile, targetPlaybook);
+        return matchedRelPath;
     }
 
-    private static void copySafely(Path src, Path dest) {
-        try {
-            if (dest.getParent() != null) {
-                Files.createDirectories(dest.getParent());
+    private void copyPlaybookWithParentDir(Path workingDir, Path projectDir, String relPlaybookPath, Path srcFile, Path destFile) throws IOException {
+        var relParent = Paths.get(relPlaybookPath).getParent();
+        if (relParent != null) {
+            var srcParent = secureResolve(workingDir, relParent.toString());
+            var destParent = secureResolve(projectDir, relParent.toString());
+            if (Files.isDirectory(srcParent)) {
+                FileUtils.copyDirectory(srcParent.toFile(), destParent.toFile());
+                return;
             }
-            Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
-        } catch (Exception ignored) {
         }
+        copyFile(srcFile, destFile);
+    }
+
+    private List<String> findBarePlaybookCandidates(Path workingDir, Path projectDir, Path runnerDir, String bareFileName) throws IOException {
+        var matches = new LinkedHashSet<String>();
+        try (var stream = Files.walk(projectDir, 5)) {
+            stream
+                .filter(Files::isRegularFile)
+                .filter(p -> p.getFileName().toString().equals(bareFileName))
+                .map(p -> projectDir.relativize(p).toString().replace('\\', '/'))
+                .sorted()
+                .forEach(matches::add);
+        }
+        try (var stream = Files.walk(workingDir, 5)) {
+            stream
+                .filter(p -> Files.isRegularFile(p) && !p.startsWith(runnerDir))
+                .filter(p -> p.getFileName().toString().equals(bareFileName))
+                .map(p -> workingDir.relativize(p).toString().replace('\\', '/'))
+                .sorted()
+                .forEach(matches::add);
+        }
+        return new ArrayList<>(matches);
+    }
+
+    private static void copyFile(Path src, Path dest) throws IOException {
+        if (dest.getParent() != null) {
+            Files.createDirectories(dest.getParent());
+        }
+        Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
     }
 
     private void writePlaybookContent(Path projectDir, String playbookName, String content) throws IOException {
@@ -1036,7 +1009,7 @@ public class AnsibleRunner extends Task implements
         Files.writeString(target, sanitized + "\n", StandardCharsets.UTF_8);
     }
 
-    private void resolveInventory(RunContext runContext, Path workingDir, Path inventoryDir) throws Exception {
+    private void resolveInventory(RunContext runContext, Path workingDir, Path projectDir, Path inventoryDir) throws Exception {
         String rInvContent = null;
         if (this.inventory != null) {
             if (this.inventory.getContent() != null) {
@@ -1137,15 +1110,26 @@ public class AnsibleRunner extends Task implements
                 var localInv = secureResolve(workingDir, relInv);
                 var localSubInv = secureResolve(workingDir.resolve("inventory"), relInv);
                 var localPluralInv = secureResolve(workingDir.resolve("inventories"), relInv);
+                var projectInv = secureResolve(projectDir, relInv);
+                var projectSubInv = secureResolve(projectDir.resolve("inventory"), relInv);
+                var projectPluralInv = secureResolve(projectDir.resolve("inventories"), relInv);
 
                 if (Files.isDirectory(localInv)) {
                     FileUtils.copyDirectory(localInv.toFile(), inventoryDir.toFile());
+                } else if (Files.isDirectory(projectInv)) {
+                    FileUtils.copyDirectory(projectInv.toFile(), inventoryDir.toFile());
                 } else if (Files.isRegularFile(localInv)) {
                     Files.copy(localInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 } else if (Files.isRegularFile(localSubInv)) {
                     Files.copy(localSubInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 } else if (Files.isRegularFile(localPluralInv)) {
                     Files.copy(localPluralInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                } else if (Files.isRegularFile(projectInv)) {
+                    Files.copy(projectInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                } else if (Files.isRegularFile(projectSubInv)) {
+                    Files.copy(projectSubInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                } else if (Files.isRegularFile(projectPluralInv)) {
+                    Files.copy(projectPluralInv, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 } else if (rInvFile.contains("\n") || rInvFile.contains("[") || rInvFile.contains(",")) {
                     Files.writeString(inventoryDir.resolve("hosts"), rInvFile.trim() + "\n", StandardCharsets.UTF_8);
                 } else {
@@ -1299,26 +1283,12 @@ public class AnsibleRunner extends Task implements
             Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(mergedExtraVars), StandardCharsets.UTF_8);
         }
 
-        var finalEnvVars = new LinkedHashMap<String, String>();
-        finalEnvVars.put("ANSIBLE_ROLES_PATH", "roles:./roles:../roles:../../roles:../../../roles:./runner/project/roles");
-        finalEnvVars.put("ANSIBLE_COLLECTIONS_PATH", "collections:./collections:../collections:../../collections:../../../collections:./runner/project/collections");
-
         if (this.env != null && this.env.getEnvVars() != null) {
             var rEnvVarsMap = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
             if (rEnvVarsMap != null && !rEnvVarsMap.isEmpty()) {
-                for (var entry : rEnvVarsMap.entrySet()) {
-                    if ("ANSIBLE_ROLES_PATH".equals(entry.getKey())) {
-                        finalEnvVars.put("ANSIBLE_ROLES_PATH", entry.getValue() + ":" + finalEnvVars.get("ANSIBLE_ROLES_PATH"));
-                    } else if ("ANSIBLE_COLLECTIONS_PATH".equals(entry.getKey())) {
-                        finalEnvVars.put("ANSIBLE_COLLECTIONS_PATH", entry.getValue() + ":" + finalEnvVars.get("ANSIBLE_COLLECTIONS_PATH"));
-                    } else {
-                        finalEnvVars.put(entry.getKey(), entry.getValue());
-                    }
-                }
+                Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rEnvVarsMap), StandardCharsets.UTF_8);
             }
         }
-
-        Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(finalEnvVars), StandardCharsets.UTF_8);
 
         if (rPasswords != null && !rPasswords.isEmpty()) {
             Files.writeString(envDir.resolve("passwords"), JacksonMapper.ofJson().writeValueAsString(rPasswords), StandardCharsets.UTF_8);

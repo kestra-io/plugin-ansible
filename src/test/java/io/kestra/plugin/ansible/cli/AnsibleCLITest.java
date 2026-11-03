@@ -743,7 +743,8 @@ class AnsibleCLITest {
 
     private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(
         boolean enabled,
-        String playbook) throws Exception {
+        String playbook
+    ) throws Exception {
 
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
