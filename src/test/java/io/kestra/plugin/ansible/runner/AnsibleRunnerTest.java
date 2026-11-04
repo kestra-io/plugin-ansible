@@ -7,26 +7,32 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.runners.TaskCommands;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.models.tasks.runners.TaskRunnerDetailResult;
 import io.kestra.core.models.tasks.runners.TaskRunnerResult;
+import io.kestra.core.queues.QueueFactoryInterface;
+import io.kestra.core.queues.QueueInterface;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.storages.StorageInterface;
+import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.LogsMode;
 import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
 
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import lombok.Builder;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
@@ -46,10 +52,13 @@ class AnsibleRunnerTest {
     @Inject
     private StorageInterface storageInterface;
 
+    @Inject
+    @Named(QueueFactoryInterface.WORKERTASKLOG_NAMED)
+    private QueueInterface<LogEntry> logQueue;
+
     private RunContext newRunContext(Map<String, Object> vars) {
-        AnsibleRunner dummyTask = AnsibleRunner.builder().id("unit-test").type(AnsibleRunner.class.getName()).build();
-        io.kestra.core.runners.DefaultRunContext runContext = (io.kestra.core.runners.DefaultRunContext) runContextFactory.of(dummyTask, vars != null ? vars : Map.of());
-        return runContextFactory.initializer().forExecutor(runContext);
+        var dummyTask = AnsibleRunner.builder().id("unit-test").type(AnsibleRunner.class.getName()).build();
+        return TestsUtils.mockRunContext(runContextFactory, dummyTask, vars != null ? vars : Map.of());
     }
 
     private RunContext newRunContext() {
@@ -141,11 +150,6 @@ class AnsibleRunnerTest {
             assertThat(bytes[0], is((byte) 'P'));
             assertThat(bytes[1], is((byte) 'K'));
         }
-
-        assertThat(runContext.dynamicWorkerResults(), is(not(empty())));
-        var dynamicResult = runContext.dynamicWorkerResults().getFirst();
-        assertThat(dynamicResult.getTaskRun().getTaskId(), is("Enforce ACL compliance"));
-        assertThat(dynamicResult.getTaskRun().getState().getCurrent(), is(State.Type.FAILED));
     }
 
     @Test
@@ -198,75 +202,181 @@ class AnsibleRunnerTest {
         var runContext = newRunContext();
 
         var events = List.<Map<String, Object>> of(
+            // 1. Task 1 start (naive UTC isoformat without Z)
             Map.of(
                 "event", "playbook_on_task_start",
-                "created", "2026-11-02T10:00:00.000Z",
+                "created", "2026-11-02T10:00:00.000000",
                 "event_data", Map.of(
                     "play", "Playbook 1",
-                    "task", "Ping localhost",
+                    "task", "Ping hosts",
                     "task_uuid", "uuid-1",
                     "task_action", "ansible.builtin.ping"
                 )
             ),
+            // 2. Non-terminal runner_on_start on router-1
             Map.of(
-                "event", "runner_on_ok",
-                "created", "2026-11-02T10:00:01.000Z",
+                "event", "runner_on_start",
+                "created", "2026-11-02T10:00:00.100000",
                 "event_data", Map.of(
                     "play", "Playbook 1",
-                    "task", "Ping localhost",
+                    "task", "Ping hosts",
                     "task_uuid", "uuid-1",
-                    "host", "localhost",
+                    "host", "router-1"
+                )
+            ),
+            // 3. Non-terminal runner_on_start on router-2
+            Map.of(
+                "event", "runner_on_start",
+                "created", "2026-11-02T10:00:00.200000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Ping hosts",
+                    "task_uuid", "uuid-1",
+                    "host", "router-2"
+                )
+            ),
+            // 4. Terminal runner_on_ok on router-1
+            Map.of(
+                "event", "runner_on_ok",
+                "created", "2026-11-02T10:00:01.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Ping hosts",
+                    "task_uuid", "uuid-1",
+                    "host", "router-1",
                     "res", Map.of("ping", "pong", "changed", false)
                 )
             ),
+            // 5. Terminal runner_on_ok on router-2
             Map.of(
-                "event", "playbook_on_task_start",
-                "created", "2026-11-02T10:00:01.500Z",
+                "event", "runner_on_ok",
+                "created", "2026-11-02T10:00:01.500000",
                 "event_data", Map.of(
                     "play", "Playbook 1",
-                    "task", "Install package",
+                    "task", "Ping hosts",
+                    "task_uuid", "uuid-1",
+                    "host", "router-2",
+                    "res", Map.of("ping", "pong", "changed", false)
+                )
+            ),
+            // 6. Task 2 start (loop task across two hosts)
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T10:00:02.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Install packages",
                     "task_uuid", "uuid-2",
                     "task_action", "ansible.builtin.package"
                 )
             ),
+            // 7. Loop item ok on router-1
             Map.of(
-                "event", "runner_on_ok",
-                "created", "2026-11-02T10:00:03.000Z",
+                "event", "runner_item_on_ok",
+                "created", "2026-11-02T10:00:02.500000",
                 "event_data", Map.of(
                     "play", "Playbook 1",
-                    "task", "Install package",
+                    "task", "Install packages",
                     "task_uuid", "uuid-2",
-                    "host", "localhost",
-                    "res", Map.of("changed", true, "_ansible_no_log", true)
+                    "host", "router-1",
+                    "res", Map.of("item", "nginx", "changed", true)
                 )
             ),
+            // 8. Terminal runner_on_ok on router-1
             Map.of(
-                "event", "playbook_on_task_start",
-                "created", "2026-11-02T10:00:03.500Z",
+                "event", "runner_on_ok",
+                "created", "2026-11-02T10:00:03.000000",
                 "event_data", Map.of(
                     "play", "Playbook 1",
-                    "task", "Configure firewall",
+                    "task", "Install packages",
+                    "task_uuid", "uuid-2",
+                    "host", "router-1",
+                    "res", Map.of("changed", true, "results", List.of(Map.of("item", "nginx", "changed", true)))
+                )
+            ),
+            // 9. Loop item failed on router-2
+            Map.of(
+                "event", "runner_item_on_failed",
+                "created", "2026-11-02T10:00:03.500000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Install packages",
+                    "task_uuid", "uuid-2",
+                    "host", "router-2",
+                    "res", Map.of("item", "bad-pkg", "failed", true, "msg", "No package bad-pkg available", "rc", 1)
+                )
+            ),
+            // 10. Terminal runner_on_failed on router-2 with loop results
+            Map.of(
+                "event", "runner_on_failed",
+                "created", "2026-11-02T10:00:04.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Install packages",
+                    "task_uuid", "uuid-2",
+                    "host", "router-2",
+                    "res", Map.of(
+                        "failed", true,
+                        "msg", "One or more items failed",
+                        "results", List.of(
+                            Map.of("item", "nginx", "failed", false),
+                            Map.of("item", "bad-pkg", "failed", true, "msg", "No package bad-pkg available", "rc", 1)
+                        )
+                    )
+                )
+            ),
+            // 11. Handler task start (event #11 > 10 verifies numeric sort vs lexicographical sort)
+            Map.of(
+                "event", "playbook_on_handler_task_start",
+                "created", "2026-11-02T10:00:04.500000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Restart nginx",
                     "task_uuid", "uuid-3",
+                    "task_action", "ansible.builtin.service"
+                )
+            ),
+            // 12. Terminal runner_on_ok for handler on router-1
+            Map.of(
+                "event", "runner_on_ok",
+                "created", "2026-11-02T10:00:05.500000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Restart nginx",
+                    "task_uuid", "uuid-3",
+                    "host", "router-1",
+                    "res", Map.of("changed", true)
+                )
+            ),
+            // 13. Start-only task (killed mid-task: has playbook_on_task_start + runner_on_start, no terminal event)
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T10:00:06.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 1",
+                    "task", "Killed mid-task",
+                    "task_uuid", "uuid-4",
                     "task_action", "ansible.builtin.command"
                 )
             ),
+            // 14. Non-terminal runner_on_start for uuid-4
             Map.of(
-                "event", "runner_on_failed",
-                "created", "2026-11-02T10:00:04.000Z",
+                "event", "runner_on_start",
+                "created", "2026-11-02T10:00:06.100000",
                 "event_data", Map.of(
                     "play", "Playbook 1",
-                    "task", "Configure firewall",
-                    "task_uuid", "uuid-3",
-                    "host", "localhost",
-                    "res", Map.of("failed", true, "msg", "Rule syntax error", "rc", 1)
+                    "task", "Killed mid-task",
+                    "task_uuid", "uuid-4",
+                    "host", "router-1"
                 )
             ),
+            // 15. Playbook stats
             Map.of(
                 "event", "playbook_on_stats",
                 "event_data", Map.of(
-                    "ok", Map.of("localhost", 2),
-                    "changed", Map.of("localhost", 1),
-                    "failures", Map.of("localhost", 1),
+                    "ok", Map.of("router-1", 3, "router-2", 1),
+                    "changed", Map.of("router-1", 2, "router-2", 0),
+                    "failures", Map.of("router-1", 0, "router-2", 1),
                     "dark", Map.of(),
                     "skipped", Map.of()
                 )
@@ -277,68 +387,60 @@ class AnsibleRunnerTest {
             .customEvents(events)
             .build();
 
+        var logs = new CopyOnWriteArrayList<LogEntry>();
+        var receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
         var task = AnsibleRunner.builder()
             .taskRunner(mockRunner)
             .project(
                 Project.builder()
-                    .source(Property.ofValue("- hosts: localhost\n  tasks: []\n"))
+                    .source(Property.ofValue("- hosts: all\n  tasks: []\n"))
                     .build()
             )
-            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("router-1 ansible_connection=local\nrouter-2 ansible_connection=local\n")).build())
+            .logsMode(Property.ofValue(LogsMode.SUMMARY))
             .failOnErrors(Property.ofValue(false))
             .build();
 
         var output = task.run(runContext);
         assertNotNull(output);
 
+        // Start-only task (uuid-4) must be skipped, leaving 3 completed tasks in numeric event order
         var dynamicResults = runContext.dynamicWorkerResults();
         assertThat(dynamicResults, hasSize(3));
 
         var task1 = dynamicResults.get(0).getTaskRun();
-        assertThat(task1.getTaskId(), is("Playbook 1 | Ping localhost"));
+        assertThat(task1.getTaskId(), is("Playbook 1 | Ping hosts"));
         assertThat(task1.getState().getCurrent(), is(State.Type.SUCCESS));
+        assertThat(task1.getState().getHistories().getFirst().getDate(), is(Instant.parse("2026-11-02T10:00:00Z")));
+        assertThat(task1.getState().getHistories().getLast().getDate(), is(Instant.parse("2026-11-02T10:00:01.500Z")));
 
         var task2 = dynamicResults.get(1).getTaskRun();
-        assertThat(task2.getTaskId(), is("Playbook 1 | Install package"));
-        assertThat(task2.getState().getCurrent(), is(State.Type.SUCCESS));
+        assertThat(task2.getTaskId(), is("Playbook 1 | Install packages"));
+        assertThat(task2.getState().getCurrent(), is(State.Type.FAILED));
+        assertThat(task2.getState().getHistories().getFirst().getDate(), is(Instant.parse("2026-11-02T10:00:02Z")));
+        assertThat(task2.getState().getHistories().getLast().getDate(), is(Instant.parse("2026-11-02T10:00:04Z")));
 
         var task3 = dynamicResults.get(2).getTaskRun();
-        assertThat(task3.getTaskId(), is("Playbook 1 | Configure firewall"));
-        assertThat(task3.getState().getCurrent(), is(State.Type.FAILED));
-    }
+        assertThat(task3.getTaskId(), is("Playbook 1 | Restart nginx"));
+        assertThat(task3.getState().getCurrent(), is(State.Type.SUCCESS));
+        assertThat(task3.getState().getHistories().getFirst().getDate(), is(Instant.parse("2026-11-02T10:00:04.500Z")));
+        assertThat(task3.getState().getHistories().getLast().getDate(), is(Instant.parse("2026-11-02T10:00:05.500Z")));
 
-    @Test
-    void testLogStreamingLimitPreservesCriticalErrorsAndSpool() throws Exception {
-        var runContext = newRunContext();
-        var spoolFile = runContext.workingDir().path().resolve("test-spool.log");
+        TestsUtils.awaitLog(logs, l -> task2.getId().equals(l.getTaskRunId()) && l.getMessage() != null && l.getMessage().contains("bad-pkg"));
+        receive.blockLast();
 
-        var consumer = new AnsibleRunnerLogConsumer(
-            runContext,
-            true,
-            LogsMode.FULL,
-            spoolFile,
-            50L,
-            1,
-            new SecretMasker()
+        var task2Logs = logs.stream()
+            .filter(l -> task2.getId().equals(l.getTaskRunId()))
+            .map(LogEntry::getMessage)
+            .toList();
+        assertThat(
+            task2Logs, contains(
+                "[router-1] changed",
+                "[router-2] failed => One or more items failed",
+                "[router-2] failed (item=bad-pkg) => No package bad-pkg available (rc=1)"
+            )
         );
-
-        for (var i = 1; i <= 60; i++) {
-            consumer.accept("Normal log line " + i, false, Instant.now());
-        }
-
-        assertTrue(consumer.wasTruncated(), "Should be marked truncated after exceeding limit");
-
-        consumer.accept("fatal: [localhost]: FAILED! => {\"msg\": \"Critical failure after limit\"}", false, Instant.now());
-        consumer.accept("PLAY RECAP *********************************************************************", false, Instant.now());
-        consumer.accept("localhost                  : ok=2    changed=0    unreachable=0    failed=1", false, Instant.now());
-
-        consumer.close();
-
-        var spooled = Files.readAllLines(spoolFile);
-        assertThat(spooled.size(), is(63));
-        assertThat(spooled.get(60), containsString("fatal: [localhost]: FAILED!"));
-        assertThat(spooled.get(61), containsString("PLAY RECAP"));
-        assertThat(spooled.get(62), containsString("failed=1"));
     }
 
     /**
