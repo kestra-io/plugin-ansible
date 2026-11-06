@@ -1767,10 +1767,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
         var logs = new ArrayList<DynamicTaskRunLog>();
         var fullLogs = logsMode == LogsMode.FULL;
-        var storedResults = resultsStorage == ResultsStorage.STORE;
+        var fullResultsRef = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
         for (var hr : task.getHosts()) {
             if (hr != null) {
-                logs.addAll(DynamicTaskRunHelper.hostLogs(hr.getHost(), hr.getStatus(), hr.getResult(), fullLogs, storedResults));
+                logs.addAll(DynamicTaskRunHelper.hostLogs(hr.getHost(), hr.getStatus(), hr.getResult(), fullLogs, fullResultsRef));
             }
         }
         return logs;

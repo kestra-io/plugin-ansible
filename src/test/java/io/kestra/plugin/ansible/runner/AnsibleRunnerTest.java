@@ -10,6 +10,7 @@ import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.event.Level;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.executions.LogEntry;
@@ -235,7 +236,7 @@ class AnsibleRunnerTest {
                     "host", "router-2"
                 )
             ),
-            // 4. Terminal runner_on_ok on router-1
+            // 4. Terminal runner_on_ok on router-1 (with remote_addr IP to verify host takes precedence)
             Map.of(
                 "event", "runner_on_ok",
                 "created", "2026-11-02T10:00:01.000000",
@@ -244,6 +245,7 @@ class AnsibleRunnerTest {
                     "task", "Ping hosts",
                     "task_uuid", "uuid-1",
                     "host", "router-1",
+                    "remote_addr", "10.0.0.1",
                     "res", Map.of("ping", "pong", "changed", false)
                 )
             ),
@@ -427,7 +429,110 @@ class AnsibleRunnerTest {
         assertThat(task3.getState().getHistories().getFirst().getDate(), is(Instant.parse("2026-11-02T10:00:04.500Z")));
         assertThat(task3.getState().getHistories().getLast().getDate(), is(Instant.parse("2026-11-02T10:00:05.500Z")));
 
-        TestsUtils.awaitLog(logs, l -> task2.getId().equals(l.getTaskRunId()) && l.getMessage() != null && l.getMessage().contains("bad-pkg"));
+        // Verify block/rescue reconciliation, maxLogLines capping on per-task logs, and `outputLogFile` truncation pointer
+        var rescueRunContext = newRunContext();
+        var oversizedError = "E".repeat(4_500);
+        var rescueEvents = List.<Map<String, Object>> of(
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T11:00:00.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 2",
+                    "task", "Block task rescued",
+                    "task_uuid", "uuid-r1"
+                )
+            ),
+            Map.of(
+                "event", "runner_on_failed",
+                "created", "2026-11-02T11:00:01.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 2",
+                    "task", "Block task rescued",
+                    "task_uuid", "uuid-r1",
+                    "host", "router-1",
+                    "res", Map.of("failed", true, "msg", "Transient error caught by rescue")
+                )
+            ),
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T11:00:02.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 2",
+                    "task", "Rescue recovery task",
+                    "task_uuid", "uuid-r2"
+                )
+            ),
+            Map.of(
+                "event", "runner_on_ok",
+                "created", "2026-11-02T11:00:03.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 2",
+                    "task", "Rescue recovery task",
+                    "task_uuid", "uuid-r2",
+                    "host", "router-1",
+                    "res", Map.of("changed", false, "msg", "Recovered")
+                )
+            ),
+            Map.of(
+                "event", "playbook_on_task_start",
+                "created", "2026-11-02T11:00:04.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 2",
+                    "task", "Unrescued failure",
+                    "task_uuid", "uuid-r3"
+                )
+            ),
+            Map.of(
+                "event", "runner_on_failed",
+                "created", "2026-11-02T11:00:05.000000",
+                "event_data", Map.of(
+                    "play", "Playbook 2",
+                    "task", "Unrescued failure",
+                    "task_uuid", "uuid-r3",
+                    "host", "router-2",
+                    "res", Map.of("failed", true, "detail", oversizedError)
+                )
+            ),
+            Map.of(
+                "event", "playbook_on_stats",
+                "event_data", Map.of(
+                    "ok", Map.of("router-1", 1, "router-2", 0),
+                    "changed", Map.of("router-1", 0, "router-2", 0),
+                    "failures", Map.of("router-1", 0, "router-2", 1),
+                    "rescued", Map.of("router-1", 1, "router-2", 0),
+                    "dark", Map.of(),
+                    "skipped", Map.of()
+                )
+            )
+        );
+
+        var rescueTask = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().customEvents(rescueEvents).build())
+            .project(Project.builder().source(Property.ofValue("- hosts: all\n  tasks: []\n")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("router-1 ansible_connection=local\nrouter-2 ansible_connection=local\n")).build())
+            .maxLogLines(Property.ofValue(1L))
+            .saveResults(Property.ofValue(false))
+            .failOnErrors(Property.ofValue(false))
+            .build();
+
+        var rescueOutput = rescueTask.run(rescueRunContext);
+        assertNotNull(rescueOutput);
+        assertThat(rescueOutput.getFailedHosts(), contains("router-2"));
+
+        var rescueDynamicResults = rescueRunContext.dynamicWorkerResults();
+        assertThat(rescueDynamicResults, hasSize(3));
+
+        var rescuedTask = rescueDynamicResults.get(0).getTaskRun();
+        assertThat(rescuedTask.getState().getCurrent(), is(State.Type.SUCCESS));
+
+        var recoveryTask = rescueDynamicResults.get(1).getTaskRun();
+        assertThat(recoveryTask.getState().getCurrent(), is(State.Type.SUCCESS));
+
+        var failedTask = rescueDynamicResults.get(2).getTaskRun();
+        assertThat(failedTask.getState().getCurrent(), is(State.Type.FAILED));
+
+        TestsUtils.awaitLogs(logs, l -> task2.getId().equals(l.getTaskRunId()), 3);
+        TestsUtils.awaitLog(logs, l -> failedTask.getId().equals(l.getTaskRunId()));
         receive.blockLast();
 
         var task2Logs = logs.stream()
@@ -441,6 +546,24 @@ class AnsibleRunnerTest {
                 "[router-2] failed (item=bad-pkg) => No package bad-pkg available (rc=1)"
             )
         );
+
+        var rescuedLogs = logs.stream()
+            .filter(l -> rescuedTask.getId().equals(l.getTaskRunId()))
+            .toList();
+        assertThat(rescuedLogs, hasSize(1));
+        assertThat(rescuedLogs.getFirst().getLevel(), is(Level.WARN));
+        assertThat(rescuedLogs.getFirst().getMessage(), startsWith("[router-1] ignored =>"));
+
+        var recoveryLogs = logs.stream()
+            .filter(l -> recoveryTask.getId().equals(l.getTaskRunId()))
+            .toList();
+        assertThat(recoveryLogs, is(empty()));
+
+        var failedLogs = logs.stream()
+            .filter(l -> failedTask.getId().equals(l.getTaskRunId()))
+            .toList();
+        assertThat(failedLogs, hasSize(1));
+        assertThat(failedLogs.getFirst().getMessage(), endsWith("... (truncated, see `outputLogFile`)"));
     }
 
     /**

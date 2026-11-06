@@ -141,17 +141,38 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
             return;
         }
 
+        if (!tryAcquireTaskLogSlot(critical)) {
+            return;
+        }
+
+        append(line, stderr);
+    }
+
+    public synchronized boolean canAcceptTaskLog(boolean critical) {
+        if (!streamLogs) {
+            return false;
+        }
+        if (maxLogLines <= 0 || streamedLines < maxLogLines) {
+            return true;
+        }
+        return critical && criticalOverflow < CRITICAL_OVERFLOW_LIMIT;
+    }
+
+    public synchronized boolean tryAcquireTaskLogSlot(boolean critical) {
+        if (!streamLogs) {
+            return false;
+        }
         if (maxLogLines > 0 && streamedLines >= maxLogLines) {
             if (!critical || criticalOverflow >= CRITICAL_OVERFLOW_LIMIT) {
                 suppressedLines++;
                 warnTruncatedOnce();
-                return;
+                return false;
             }
             criticalOverflow++;
         }
 
         streamedLines++;
-        append(line, stderr);
+        return true;
     }
 
     private void append(String line, boolean stderr) {

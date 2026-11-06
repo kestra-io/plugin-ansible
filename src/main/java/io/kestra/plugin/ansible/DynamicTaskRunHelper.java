@@ -24,11 +24,11 @@ import io.kestra.core.utils.IdUtils;
  * {@link DynamicTaskRunLog}s across {@code AnsibleCLI} and {@code AnsibleRunner}.
  */
 public final class DynamicTaskRunHelper {
-    public static final int MAX_LOG_LINE_LENGTH = 4_000;
-    public static final int STDERR_TAIL_LENGTH = 1_024;
-    public static final int MAX_MSG_LOG_LENGTH = 2_000;
-    public static final int MAX_ITEM_LABEL_LENGTH = 256;
-    public static final int MAX_FAILED_ITEM_LOGS = 50;
+    private static final int MAX_LOG_LINE_LENGTH = 4_000;
+    private static final int STDERR_TAIL_LENGTH = 1_024;
+    private static final int MAX_MSG_LOG_LENGTH = 2_000;
+    private static final int MAX_ITEM_LABEL_LENGTH = 256;
+    private static final int MAX_FAILED_ITEM_LOGS = 50;
 
     private DynamicTaskRunHelper() {
     }
@@ -130,15 +130,15 @@ public final class DynamicTaskRunHelper {
         return "ignored".equalsIgnoreCase(status);
     }
 
-    public static List<DynamicTaskRunLog> hostLogs(String host, String status, Object result, boolean fullLogs, boolean storedResults) {
+    public static List<DynamicTaskRunLog> hostLogs(String host, String status, Object result, boolean fullLogs, String fullResultsRef) {
         var logs = new ArrayList<DynamicTaskRunLog>();
         var hasFailureReason = isFailure(status) || isIgnored(status);
 
         String message;
         if (fullLogs) {
-            message = "[" + host + "] " + status + " => " + truncateForLog(stringifyResult(result), storedResults);
+            message = "[" + host + "] " + status + " => " + truncateForLog(stringifyResult(result), fullResultsRef);
         } else if (hasFailureReason) {
-            message = "[" + host + "] " + status + " => " + truncateForLog(failureReason(result, storedResults), storedResults);
+            message = "[" + host + "] " + status + " => " + truncateForLog(failureReason(result, fullResultsRef), fullResultsRef);
         } else {
             message = "[" + host + "] " + status;
         }
@@ -146,20 +146,20 @@ public final class DynamicTaskRunHelper {
         logs.add(new DynamicTaskRunLog(logLevel(status), message));
 
         if (!fullLogs) {
-            logs.addAll(failedItemLogs(host, status, result, storedResults));
+            logs.addAll(failedItemLogs(host, status, result, fullResultsRef));
         }
 
         return logs;
     }
 
-    public static Level logLevel(String status) {
+    private static Level logLevel(String status) {
         if (isIgnored(status)) {
             return Level.WARN;
         }
         return isFailure(status) ? Level.ERROR : Level.INFO;
     }
 
-    private static List<DynamicTaskRunLog> failedItemLogs(String host, String hostStatus, Object rawResult, boolean storedResults) {
+    private static List<DynamicTaskRunLog> failedItemLogs(String host, String hostStatus, Object rawResult, String fullResultsRef) {
         if (!(rawResult instanceof Map<?, ?> result) || !(result.get("results") instanceof List<?> items)) {
             return List.of();
         }
@@ -177,17 +177,16 @@ public final class DynamicTaskRunHelper {
             logs.add(
                 new DynamicTaskRunLog(
                     level,
-                    "[" + host + "] " + status + label + " => " + truncateForLog(failureReason(item, storedResults), storedResults)
+                    "[" + host + "] " + status + label + " => " + truncateForLog(failureReason(item, fullResultsRef), fullResultsRef)
                 )
             );
         }
 
         if (failedItems.size() > MAX_FAILED_ITEM_LOGS) {
-            var fullResults = storedResults ? "`resultsUri`" : "`playbooks`";
             logs.add(
                 new DynamicTaskRunLog(
                     level,
-                    "[" + host + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items, see " + fullResults
+                    "[" + host + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items, see " + fullResultsRef
                 )
             );
         }
@@ -210,10 +209,10 @@ public final class DynamicTaskRunHelper {
         return s.length() <= max ? s : s.substring(0, max);
     }
 
-    public static String failureReason(Object result, boolean storedResults) {
+    private static String failureReason(Object result, String fullResultsRef) {
         if (result instanceof Map<?, ?> m && m.get("msg") != null) {
             // msg is cut on its own so rc and the stderr tail still fit under the line limit
-            var reason = new StringBuilder(truncateForLog(String.valueOf(m.get("msg")), MAX_MSG_LOG_LENGTH, storedResults));
+            var reason = new StringBuilder(truncateForLog(String.valueOf(m.get("msg")), MAX_MSG_LOG_LENGTH, fullResultsRef));
             if (m.get("rc") != null) {
                 reason.append(" (rc=").append(m.get("rc")).append(")");
             }
@@ -226,19 +225,18 @@ public final class DynamicTaskRunHelper {
         return stringifyResult(result);
     }
 
-    public static String truncateForLog(String s, boolean storedResults) {
-        return truncateForLog(s, MAX_LOG_LINE_LENGTH, storedResults);
+    private static String truncateForLog(String s, String fullResultsRef) {
+        return truncateForLog(s, MAX_LOG_LINE_LENGTH, fullResultsRef);
     }
 
-    private static String truncateForLog(String s, int max, boolean storedResults) {
+    private static String truncateForLog(String s, int max, String fullResultsRef) {
         if (s == null || s.length() <= max) {
             return s;
         }
-        var fullResults = storedResults ? "`resultsUri`" : "`playbooks`";
-        return s.substring(0, max) + "... (truncated, see " + fullResults + ")";
+        return s.substring(0, max) + "... (truncated, see " + fullResultsRef + ")";
     }
 
-    public static String stringifyResult(Object result) {
+    private static String stringifyResult(Object result) {
         if (result == null) {
             return "{}";
         }
