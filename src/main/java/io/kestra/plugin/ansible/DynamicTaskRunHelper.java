@@ -6,6 +6,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 import org.slf4j.event.Level;
 
@@ -127,18 +128,24 @@ public final class DynamicTaskRunHelper {
     }
 
     public static boolean isIgnored(String status) {
-        return "ignored".equalsIgnoreCase(status);
+        return "ignored".equalsIgnoreCase(status) || "rescued".equalsIgnoreCase(status);
     }
 
     public static List<DynamicTaskRunLog> hostLogs(String host, String status, Object result, boolean fullLogs, String fullResultsRef) {
+        return hostLogs(host, status, result, fullLogs, fullResultsRef, UnaryOperator.identity());
+    }
+
+    public static List<DynamicTaskRunLog> hostLogs(String host, String status, Object result, boolean fullLogs, String fullResultsRef,
+        UnaryOperator<String> masker) {
+        UnaryOperator<String> safeMasker = masker != null ? masker : UnaryOperator.identity();
         var logs = new ArrayList<DynamicTaskRunLog>();
         var hasFailureReason = isFailure(status) || isIgnored(status);
 
         String message;
         if (fullLogs) {
-            message = "[" + host + "] " + status + " => " + truncateForLog(stringifyResult(result), fullResultsRef);
+            message = "[" + host + "] " + status + " => " + truncateForLog(safeMasker.apply(stringifyResult(result)), fullResultsRef);
         } else if (hasFailureReason) {
-            message = "[" + host + "] " + status + " => " + truncateForLog(failureReason(result, fullResultsRef), fullResultsRef);
+            message = "[" + host + "] " + status + " => " + truncateForLog(failureReason(result, fullResultsRef, safeMasker), fullResultsRef);
         } else {
             message = "[" + host + "] " + status;
         }
@@ -146,7 +153,7 @@ public final class DynamicTaskRunHelper {
         logs.add(new DynamicTaskRunLog(logLevel(status), message));
 
         if (!fullLogs) {
-            logs.addAll(failedItemLogs(host, status, result, fullResultsRef));
+            logs.addAll(failedItemLogs(host, status, result, fullResultsRef, safeMasker));
         }
 
         return logs;
@@ -159,7 +166,8 @@ public final class DynamicTaskRunHelper {
         return isFailure(status) ? Level.ERROR : Level.INFO;
     }
 
-    private static List<DynamicTaskRunLog> failedItemLogs(String host, String hostStatus, Object rawResult, String fullResultsRef) {
+    private static List<DynamicTaskRunLog> failedItemLogs(String host, String hostStatus, Object rawResult, String fullResultsRef,
+        UnaryOperator<String> masker) {
         if (!(rawResult instanceof Map<?, ?> result) || !(result.get("results") instanceof List<?> items)) {
             return List.of();
         }
@@ -173,20 +181,21 @@ public final class DynamicTaskRunHelper {
         var logs = new ArrayList<DynamicTaskRunLog>();
         for (var item : failedItems.stream().limit(MAX_FAILED_ITEM_LOGS).toList()) {
             var status = Boolean.TRUE.equals(item.get("unreachable")) ? "unreachable" : "failed";
-            var label = itemLabel(item);
+            var label = itemLabel(item, masker);
             logs.add(
                 new DynamicTaskRunLog(
                     level,
-                    "[" + host + "] " + status + label + " => " + truncateForLog(failureReason(item, fullResultsRef), fullResultsRef)
+                    "[" + host + "] " + status + label + " => " + truncateForLog(failureReason(item, fullResultsRef, masker), fullResultsRef)
                 )
             );
         }
 
         if (failedItems.size() > MAX_FAILED_ITEM_LOGS) {
+            var suffix = fullResultsRef != null ? ", see " + fullResultsRef : "";
             logs.add(
                 new DynamicTaskRunLog(
                     level,
-                    "[" + host + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items, see " + fullResultsRef
+                    "[" + host + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items" + suffix
                 )
             );
         }
@@ -194,7 +203,7 @@ public final class DynamicTaskRunHelper {
     }
 
     /** Prefers loop_control.label over the raw item, like the callback does for the light result; no_log items get none. */
-    private static String itemLabel(Map<?, ?> item) {
+    private static String itemLabel(Map<?, ?> item, UnaryOperator<String> masker) {
         if (Boolean.TRUE.equals(item.get("_ansible_no_log"))) {
             return "";
         }
@@ -202,27 +211,32 @@ public final class DynamicTaskRunHelper {
         if (raw == null) {
             return "";
         }
-        return " (item=" + truncate(raw instanceof String text ? text : stringifyResult(raw), MAX_ITEM_LABEL_LENGTH) + ")";
+        var text = raw instanceof String s ? s : stringifyResult(raw);
+        return " (item=" + truncate(masker.apply(text), MAX_ITEM_LABEL_LENGTH) + ")";
     }
 
     private static String truncate(String s, int max) {
         return s.length() <= max ? s : s.substring(0, max);
     }
 
-    private static String failureReason(Object result, String fullResultsRef) {
+    private static String failureReason(Object result, String fullResultsRef, UnaryOperator<String> masker) {
         if (result instanceof Map<?, ?> m && m.get("msg") != null) {
             // msg is cut on its own so rc and the stderr tail still fit under the line limit
-            var reason = new StringBuilder(truncateForLog(String.valueOf(m.get("msg")), MAX_MSG_LOG_LENGTH, fullResultsRef));
+            var maskedMsg = masker.apply(String.valueOf(m.get("msg")));
+            var reason = new StringBuilder(truncateForLog(maskedMsg, MAX_MSG_LOG_LENGTH, fullResultsRef));
             if (m.get("rc") != null) {
                 reason.append(" (rc=").append(m.get("rc")).append(")");
             }
             if (!Boolean.TRUE.equals(m.get("_ansible_no_log")) && m.get("stderr") instanceof String stderr && !stderr.isEmpty()) {
-                var tail = stderr.length() <= STDERR_TAIL_LENGTH ? stderr : stderr.substring(stderr.length() - STDERR_TAIL_LENGTH);
+                var maskedStderr = masker.apply(stderr);
+                var tail = maskedStderr.length() <= STDERR_TAIL_LENGTH
+                    ? maskedStderr
+                    : maskedStderr.substring(maskedStderr.length() - STDERR_TAIL_LENGTH);
                 reason.append(" | stderr: ").append(tail);
             }
             return reason.toString();
         }
-        return stringifyResult(result);
+        return masker.apply(stringifyResult(result));
     }
 
     private static String truncateForLog(String s, String fullResultsRef) {
@@ -233,7 +247,8 @@ public final class DynamicTaskRunHelper {
         if (s == null || s.length() <= max) {
             return s;
         }
-        return s.substring(0, max) + "... (truncated, see " + fullResultsRef + ")";
+        var suffix = fullResultsRef != null ? "... (truncated, see " + fullResultsRef + ")" : "... (truncated)";
+        return s.substring(0, max) + suffix;
     }
 
     private static String stringifyResult(Object result) {

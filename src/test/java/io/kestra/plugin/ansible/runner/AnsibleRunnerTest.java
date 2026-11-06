@@ -429,9 +429,10 @@ class AnsibleRunnerTest {
         assertThat(task3.getState().getHistories().getFirst().getDate(), is(Instant.parse("2026-11-02T10:00:04.500Z")));
         assertThat(task3.getState().getHistories().getLast().getDate(), is(Instant.parse("2026-11-02T10:00:05.500Z")));
 
-        // Verify block/rescue reconciliation, maxLogLines capping on per-task logs, and `outputLogFile` truncation pointer
+        // Verify block/rescue reconciliation, numeric secret masking before truncation, maxLogLines capping, and truncation suffix
         var rescueRunContext = newRunContext();
-        var oversizedError = "E".repeat(4_500);
+        var numericSecret = "123456";
+        var oversizedError = "E".repeat(3_950) + numericSecret + "E".repeat(500);
         var rescueEvents = List.<Map<String, Object>> of(
             Map.of(
                 "event", "playbook_on_task_start",
@@ -444,12 +445,14 @@ class AnsibleRunnerTest {
             ),
             Map.of(
                 "event", "runner_on_failed",
+                "pid", 123456,
                 "created", "2026-11-02T11:00:01.000000",
                 "event_data", Map.of(
                     "play", "Playbook 2",
                     "task", "Block task rescued",
                     "task_uuid", "uuid-r1",
                     "host", "router-1",
+                    "remote_addr", "10.0.0.5",
                     "res", Map.of("failed", true, "msg", "Transient error caught by rescue")
                 )
             ),
@@ -470,6 +473,7 @@ class AnsibleRunnerTest {
                     "task", "Rescue recovery task",
                     "task_uuid", "uuid-r2",
                     "host", "router-1",
+                    "remote_addr", "10.0.0.5",
                     "res", Map.of("changed", false, "msg", "Recovered")
                 )
             ),
@@ -484,6 +488,7 @@ class AnsibleRunnerTest {
             ),
             Map.of(
                 "event", "runner_on_failed",
+                "pid", 123456,
                 "created", "2026-11-02T11:00:05.000000",
                 "event_data", Map.of(
                     "play", "Playbook 2",
@@ -495,6 +500,7 @@ class AnsibleRunnerTest {
             ),
             Map.of(
                 "event", "playbook_on_stats",
+                "pid", 123456,
                 "event_data", Map.of(
                     "ok", Map.of("router-1", 1, "router-2", 0),
                     "changed", Map.of("router-1", 0, "router-2", 0),
@@ -510,14 +516,15 @@ class AnsibleRunnerTest {
             .taskRunner(MockAnsibleTaskRunner.builder().customEvents(rescueEvents).build())
             .project(Project.builder().source(Property.ofValue("- hosts: all\n  tasks: []\n")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("router-1 ansible_connection=local\nrouter-2 ansible_connection=local\n")).build())
+            .env(RunnerEnv.builder().passwords(Property.ofValue(Map.of("pin", numericSecret))).build())
             .maxLogLines(Property.ofValue(1L))
-            .saveResults(Property.ofValue(false))
+            .saveArtifacts(Property.ofValue(false))
             .failOnErrors(Property.ofValue(false))
             .build();
 
         var rescueOutput = rescueTask.run(rescueRunContext);
         assertNotNull(rescueOutput);
-        assertThat(rescueOutput.getFailedHosts(), contains("router-2"));
+        assertThat(rescueOutput.getFailedHosts(), contains("10.0.0.5", "router-2"));
 
         var rescueDynamicResults = rescueRunContext.dynamicWorkerResults();
         assertThat(rescueDynamicResults, hasSize(3));
@@ -552,7 +559,7 @@ class AnsibleRunnerTest {
             .toList();
         assertThat(rescuedLogs, hasSize(1));
         assertThat(rescuedLogs.getFirst().getLevel(), is(Level.WARN));
-        assertThat(rescuedLogs.getFirst().getMessage(), startsWith("[router-1] ignored =>"));
+        assertThat(rescuedLogs.getFirst().getMessage(), startsWith("[router-1] rescued =>"));
 
         var recoveryLogs = logs.stream()
             .filter(l -> recoveryTask.getId().equals(l.getTaskRunId()))
@@ -563,7 +570,9 @@ class AnsibleRunnerTest {
             .filter(l -> failedTask.getId().equals(l.getTaskRunId()))
             .toList();
         assertThat(failedLogs, hasSize(1));
-        assertThat(failedLogs.getFirst().getMessage(), endsWith("... (truncated, see `outputLogFile`)"));
+        assertThat(failedLogs.getFirst().getMessage(), not(containsString(numericSecret)));
+        assertThat(failedLogs.getFirst().getMessage(), containsString("***"));
+        assertThat(failedLogs.getFirst().getMessage(), endsWith("... (truncated)"));
     }
 
     /**
