@@ -549,7 +549,7 @@ public class AnsibleRunner extends Task implements
             }
 
             var rSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
-            var telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, rLogsMode, rStreamLogs, rSaveResults, logConsumer);
+            var telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, rLogsMode, rStreamLogs, rSaveResults, rMaxLogLines, logConsumer);
 
             URI resultsUri = null;
             if (rSaveResults && Files.exists(identArtifactsDir)) {
@@ -1351,7 +1351,7 @@ public class AnsibleRunner extends Task implements
     }
 
     private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode, LogsMode logsMode, boolean streamLogs, boolean saveResults,
-        AnsibleRunnerLogConsumer logConsumer) {
+        long maxLogLines, AnsibleRunnerLogConsumer logConsumer) {
         var status = "failed";
         var rc = processExitCode;
         var failedHostsSet = new LinkedHashSet<String>();
@@ -1366,6 +1366,8 @@ public class AnsibleRunner extends Task implements
         var tasksMap = new LinkedHashMap<String, RunnerTaskInfo>();
         var failCandidatesByHost = new HashMap<String, List<RescuedCandidate>>();
         var fullResultsRef = saveResults ? "`resultsUri`" : "`outputLogFile`";
+        var streamedTaskLogs = 0L;
+        var criticalTaskOverflow = 0L;
 
         if (!Files.exists(identArtifactsDir)) {
             if (processExitCode == 0) {
@@ -1460,7 +1462,9 @@ public class AnsibleRunner extends Task implements
 
                                     var logStartIndex = taskInfo.logs.size();
                                     var isCritical = DynamicTaskRunHelper.isFailure(hostStatus) || DynamicTaskRunHelper.isIgnored(hostStatus);
-                                    if (streamLogs && (logConsumer == null || logConsumer.canAcceptTaskLog(isCritical))) {
+                                    var canLog = maxLogLines <= 0 || streamedTaskLogs < maxLogLines
+                                        || (isCritical && criticalTaskOverflow < AnsibleRunnerLogConsumer.CRITICAL_OVERFLOW_LIMIT);
+                                    if (streamLogs && canLog) {
                                         var fullLogs = logsMode == LogsMode.FULL;
                                         Map<String, Object> resMap = null;
                                         if (resNode.isObject() && (fullLogs || isCritical)) {
@@ -1468,12 +1472,20 @@ public class AnsibleRunner extends Task implements
                                             });
                                         }
                                         for (var log : DynamicTaskRunHelper.hostLogs(host, hostStatus, resMap, fullLogs, fullResultsRef)) {
-                                            if (logConsumer == null || logConsumer.tryAcquireTaskLogSlot(isCritical)) {
-                                                taskInfo.logs.add(log);
+                                            if (maxLogLines > 0 && streamedTaskLogs >= maxLogLines) {
+                                                if (!isCritical || criticalTaskOverflow >= AnsibleRunnerLogConsumer.CRITICAL_OVERFLOW_LIMIT) {
+                                                    if (logConsumer != null) {
+                                                        logConsumer.warnTruncatedOnce();
+                                                    }
+                                                    break;
+                                                }
+                                                criticalTaskOverflow++;
                                             }
+                                            streamedTaskLogs++;
+                                            taskInfo.logs.add(log);
                                         }
-                                    } else if (streamLogs) {
-                                        logConsumer.tryAcquireTaskLogSlot(false);
+                                    } else if (streamLogs && maxLogLines > 0 && streamedTaskLogs >= maxLogLines && logConsumer != null) {
+                                        logConsumer.warnTruncatedOnce();
                                     }
 
                                     if (("runner_on_failed".equals(event) || "runner_on_unreachable".equals(event)) && !isIgnored) {

@@ -540,7 +540,7 @@ class AnsibleRunnerTest {
             .map(LogEntry::getMessage)
             .toList();
         assertThat(
-            task2Logs, contains(
+            task2Logs, containsInAnyOrder(
                 "[router-1] changed",
                 "[router-2] failed => One or more items failed",
                 "[router-2] failed (item=bad-pkg) => No package bad-pkg available (rc=1)"

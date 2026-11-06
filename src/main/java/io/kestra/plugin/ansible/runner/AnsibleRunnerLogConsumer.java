@@ -21,7 +21,7 @@ import io.kestra.plugin.ansible.runner.models.LogsMode;
 // Batches, caps and masks runner output, and spools the full masked log to disk.
 public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
 
-    private static final int CRITICAL_OVERFLOW_LIMIT = 500;
+    static final int CRITICAL_OVERFLOW_LIMIT = 500;
 
     // Same syntax as core's TaskLogLineMatcher for ::{"outputs":...}:: and ::{"metrics":...}:: lines
     private static final Pattern KESTRA_MARKER = Pattern.compile("^::(\\{.*})::$");
@@ -141,38 +141,17 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
             return;
         }
 
-        if (!tryAcquireTaskLogSlot(critical)) {
-            return;
-        }
-
-        append(line, stderr);
-    }
-
-    public synchronized boolean canAcceptTaskLog(boolean critical) {
-        if (!streamLogs) {
-            return false;
-        }
-        if (maxLogLines <= 0 || streamedLines < maxLogLines) {
-            return true;
-        }
-        return critical && criticalOverflow < CRITICAL_OVERFLOW_LIMIT;
-    }
-
-    public synchronized boolean tryAcquireTaskLogSlot(boolean critical) {
-        if (!streamLogs) {
-            return false;
-        }
         if (maxLogLines > 0 && streamedLines >= maxLogLines) {
             if (!critical || criticalOverflow >= CRITICAL_OVERFLOW_LIMIT) {
                 suppressedLines++;
                 warnTruncatedOnce();
-                return false;
+                return;
             }
             criticalOverflow++;
         }
 
         streamedLines++;
-        return true;
+        append(line, stderr);
     }
 
     private void append(String line, boolean stderr) {
@@ -193,7 +172,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         }
     }
 
-    private void warnTruncatedOnce() {
+    synchronized void warnTruncatedOnce() {
         if (truncationWarned) {
             return;
         }
