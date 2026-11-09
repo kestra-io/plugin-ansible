@@ -432,7 +432,8 @@ class AnsibleRunnerTest {
         // Verify block/rescue reconciliation, numeric secret masking before truncation, maxLogLines capping, and truncation suffix
         var rescueRunContext = newRunContext();
         var numericSecret = "123456";
-        var oversizedError = "E".repeat(3_950) + numericSecret + "E".repeat(500);
+        // `{"detail":"` is 11 chars + 3986 'E's = 3997 chars, so `numericSecret` (6 chars) straddles index 4000 (3997..4002)
+        var oversizedError = "E".repeat(3_986) + numericSecret + "E".repeat(500);
         var rescueEvents = List.<Map<String, Object>> of(
             Map.of(
                 "event", "playbook_on_task_start",
@@ -482,7 +483,7 @@ class AnsibleRunnerTest {
                 "created", "2026-11-02T11:00:04.000000",
                 "event_data", Map.of(
                     "play", "Playbook 2",
-                    "task", "Unrescued failure",
+                    "task", "Unrescued failure " + numericSecret,
                     "task_uuid", "uuid-r3"
                 )
             ),
@@ -492,10 +493,10 @@ class AnsibleRunnerTest {
                 "created", "2026-11-02T11:00:05.000000",
                 "event_data", Map.of(
                     "play", "Playbook 2",
-                    "task", "Unrescued failure",
+                    "task", "Unrescued failure " + numericSecret,
                     "task_uuid", "uuid-r3",
                     "host", "router-2",
-                    "res", Map.of("failed", true, "detail", oversizedError)
+                    "res", Map.of("detail", oversizedError)
                 )
             ),
             Map.of(
@@ -536,6 +537,7 @@ class AnsibleRunnerTest {
         assertThat(recoveryTask.getState().getCurrent(), is(State.Type.SUCCESS));
 
         var failedTask = rescueDynamicResults.get(2).getTaskRun();
+        assertThat(failedTask.getTaskId(), is("Playbook 2 | Unrescued failure ***"));
         assertThat(failedTask.getState().getCurrent(), is(State.Type.FAILED));
 
         TestsUtils.awaitLogs(logs, l -> task2.getId().equals(l.getTaskRunId()), 3);
@@ -571,8 +573,8 @@ class AnsibleRunnerTest {
             .toList();
         assertThat(failedLogs, hasSize(1));
         assertThat(failedLogs.getFirst().getMessage(), not(containsString(numericSecret)));
-        assertThat(failedLogs.getFirst().getMessage(), containsString("***"));
-        assertThat(failedLogs.getFirst().getMessage(), endsWith("... (truncated)"));
+        assertThat(failedLogs.getFirst().getMessage(), not(containsString("123")));
+        assertThat(failedLogs.getFirst().getMessage(), endsWith("***... (truncated)"));
     }
 
     /**

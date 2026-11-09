@@ -1440,6 +1440,24 @@ public class AnsibleRunner extends Task implements
                                 taskUuid = taskName.isBlank() ? "task-" + eventFileCounter(eventFile) : taskName;
                             }
 
+                            if ("runner_on_failed".equals(event) || "runner_on_unreachable".equals(event)) {
+                                if (!host.isBlank() && failedHostsSet.size() < 1000) {
+                                    failedHostsSet.add(host);
+                                }
+                                var failedTask = new LinkedHashMap<String, Object>();
+                                failedTask.put("host", host);
+                                failedTask.put("task", taskName);
+                                failedTask.put("play", playName);
+                                failedTask.put("event", event);
+                                var msg = secretMasker.mask(eventData.path("res").path("msg").asText(""));
+                                if (!msg.isBlank()) {
+                                    failedTask.put("error", msg);
+                                }
+                                if (failedTasks.size() < 1000) {
+                                    failedTasks.add(failedTask);
+                                }
+                            }
+
                             if ("playbook_on_task_start".equals(event) || "playbook_on_handler_task_start".equals(event) || "playbook_on_cleanup_task_start".equals(event)) {
                                 var taskInfo = tasksMap.computeIfAbsent(taskUuid, k -> new RunnerTaskInfo());
                                 taskInfo.taskName = taskName;
@@ -1519,24 +1537,6 @@ public class AnsibleRunner extends Task implements
                                         logConsumer.warnTruncatedOnce();
                                     }
 
-                                    if ("runner_on_failed".equals(event) || "runner_on_unreachable".equals(event)) {
-                                        if (failedHostsSet.size() < 1000) {
-                                            failedHostsSet.add(host);
-                                        }
-                                        var failedTask = new LinkedHashMap<String, Object>();
-                                        failedTask.put("host", host);
-                                        failedTask.put("task", taskName);
-                                        failedTask.put("play", playName);
-                                        failedTask.put("event", event);
-                                        var msg = secretMasker.mask(resNode.path("msg").asText(""));
-                                        if (!msg.isBlank()) {
-                                            failedTask.put("error", msg);
-                                        }
-                                        if (failedTasks.size() < 1000) {
-                                            failedTasks.add(failedTask);
-                                        }
-                                    }
-
                                     var hostCreated = DynamicTaskRunHelper.parseInstant(root.path("created").asText(null));
                                     if (hostCreated != null) {
                                         if (taskInfo.endedAt == null || hostCreated.isAfter(taskInfo.endedAt)) {
@@ -1612,7 +1612,7 @@ public class AnsibleRunner extends Task implements
                     ? taskInfo.playName + " | " + name
                     : name;
                 return new DynamicTaskRunHelper.TaskEntry(
-                    uid,
+                    secretMasker.mask(uid),
                     taskInfo.startedAt,
                     taskInfo.endedAt,
                     taskInfo.failed,
