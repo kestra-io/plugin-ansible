@@ -14,6 +14,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -46,10 +47,12 @@ import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
+import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.NamespaceFilesUtils;
+import io.kestra.plugin.ansible.DynamicTaskRunHelper;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.LogsMode;
 import io.kestra.plugin.ansible.runner.models.Project;
@@ -266,9 +269,10 @@ public class AnsibleRunner extends Task implements
 
     @Schema(
         title = "Maximum number of log lines streamed to the Kestra UI",
-        description = "Protects the Kestra UI and log repository on very large runs. Lines are also batched into few log entries. " +
-            "Once the limit is reached only failures, unreachable hosts and the play recap are still streamed, and the complete " +
-            "log is automatically stored in `outputLogFile`. Set to 0 for unlimited (not recommended for huge playbooks)."
+        description = "Protects the Kestra UI and log repository on very large runs. Applies independently to live container " +
+            "stdout/stderr streaming (batched into few log entries) and to per-task host result logs. " +
+            "Once a limit is reached, up to 500 additional failure, unreachable, rescued/ignored or recap lines are still streamed, " +
+            "and the complete stdout/stderr log is automatically stored in `outputLogFile`. Set to 0 for unlimited (not recommended for huge playbooks)."
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
@@ -540,14 +544,17 @@ public class AnsibleRunner extends Task implements
                 }
             }
 
-            var telemetry = parseTelemetry(runContext, identArtifactsDir, processExitCode, secretMasker);
+            var rSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
+            var rSaveArtifacts = runContext.render(this.saveArtifacts).as(Boolean.class).orElse(true);
+            var telemetry = parseTelemetry(
+                runContext, identArtifactsDir, processExitCode, rLogsMode, rStreamLogs, rSaveArtifacts, rMaxLogLines, logConsumer, secretMasker
+            );
 
             if (Files.exists(identArtifactsDir)) {
                 secretMasker.maskTree(identArtifactsDir, runContext.logger());
             }
 
             URI resultsUri = null;
-            var rSaveResults = runContext.render(this.saveResults).as(Boolean.class).orElse(true);
             if (rSaveResults && Files.exists(identArtifactsDir)) {
                 var consolidatedResults = new LinkedHashMap<String, Object>();
                 consolidatedResults.put("status", telemetry.status);
@@ -569,7 +576,6 @@ public class AnsibleRunner extends Task implements
 
             var zipFile = workingDir.resolve("artifacts-" + ident + ".zip");
             URI artifactsUri = null;
-            var rSaveArtifacts = runContext.render(this.saveArtifacts).as(Boolean.class).orElse(true);
             if (rSaveArtifacts && Files.exists(identArtifactsDir)) {
                 ArchiveUtils.zipDirectory(identArtifactsDir, zipFile);
                 artifactsUri = runContext.storage().putFile(zipFile.toFile());
@@ -637,6 +643,11 @@ public class AnsibleRunner extends Task implements
 
             var rFailOnErrors = runContext.render(this.failOnErrors).as(Boolean.class).orElse(true);
             if (rFailOnErrors && !"successful".equalsIgnoreCase(telemetry.status)) {
+                try {
+                    DynamicTaskRunHelper.emit(runContext, telemetry.tasks);
+                } catch (Exception e) {
+                    runContext.logger().warn("Unable to emit the per-task logs of the failed run: {}", e.getMessage());
+                }
                 runContext.logger().error("Ansible Runner failed. Results: {}, Artifacts: {}, Logs: {}", resultsUri, artifactsUri, logFileUri);
                 throw new RunnableTaskException(
                     "Ansible Runner failed with status '" + telemetry.status + "' and exit code " + telemetry.rc +
@@ -645,6 +656,8 @@ public class AnsibleRunner extends Task implements
                     output
                 );
             }
+
+            DynamicTaskRunHelper.emit(runContext, telemetry.tasks);
 
             return output;
         } catch (Exception e) {
@@ -1339,7 +1352,8 @@ public class AnsibleRunner extends Task implements
         }
     }
 
-    private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode, SecretMasker secretMasker) {
+    private ExecutionTelemetry parseTelemetry(RunContext runContext, Path identArtifactsDir, int processExitCode, LogsMode logsMode, boolean streamLogs, boolean saveArtifacts,
+        long maxLogLines, AnsibleRunnerLogConsumer logConsumer, SecretMasker secretMasker) {
         var status = "failed";
         var rc = processExitCode;
         var failedHostsSet = new LinkedHashSet<String>();
@@ -1351,6 +1365,10 @@ public class AnsibleRunner extends Task implements
             .failures(0)
             .unreachable(0)
             .skipped(0);
+        var tasksMap = new LinkedHashMap<String, RunnerTaskInfo>();
+        var fullResultsRef = saveArtifacts ? "`artifactsUri`" : null;
+        var streamedTaskLogs = 0L;
+        var criticalTaskOverflow = 0L;
 
         if (!Files.exists(identArtifactsDir)) {
             if (processExitCode == 0) {
@@ -1382,8 +1400,29 @@ public class AnsibleRunner extends Task implements
                 try (var stream = Files.list(jobEventsDir)) {
                     var eventFiles = stream
                         .filter(p -> p.toString().endsWith(".json"))
-                        .sorted(Comparator.comparing(Path::getFileName))
+                        .sorted(Comparator.comparingInt(AnsibleRunner::eventFileCounter))
                         .toList();
+
+                    var rescuedRemainingByHost = new HashMap<String, Integer>();
+                    for (var i = eventFiles.size() - 1; i >= 0; i--) {
+                        try {
+                            var root = JacksonMapper.ofJson().readTree(eventFiles.get(i).toFile());
+                            if ("playbook_on_stats".equals(root.path("event").asText(""))) {
+                                var rescuedNode = root.path("event_data").path("rescued");
+                                if (rescuedNode.isObject()) {
+                                    rescuedNode.properties().forEach(entry ->
+                                    {
+                                        var count = entry.getValue().asInt(0);
+                                        if (count > 0) {
+                                            rescuedRemainingByHost.merge(entry.getKey(), count, Integer::sum);
+                                        }
+                                    });
+                                }
+                                break;
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
 
                     for (var eventFile : eventFiles) {
                         try {
@@ -1392,28 +1431,122 @@ public class AnsibleRunner extends Task implements
                             var eventData = root.path("event_data");
 
                             var host = eventData.path("remote_addr").asText(eventData.path("host").asText(""));
+                            var logHost = eventData.path("host").asText(host);
                             var taskName = eventData.path("task").asText("");
                             var playName = eventData.path("play").asText("");
+                            var action = eventData.path("task_action").asText("");
+                            var taskUuid = eventData.path("task_uuid").asText("");
+                            if (taskUuid.isBlank()) {
+                                taskUuid = taskName.isBlank() ? "task-" + eventFileCounter(eventFile) : taskName;
+                            }
 
                             if ("runner_on_failed".equals(event) || "runner_on_unreachable".equals(event)) {
-                                if (!host.isBlank()) {
-                                    if (failedHostsSet.size() < 1000)
-                                        failedHostsSet.add(host);
+                                if (!host.isBlank() && failedHostsSet.size() < 1000) {
+                                    failedHostsSet.add(host);
                                 }
                                 var failedTask = new LinkedHashMap<String, Object>();
                                 failedTask.put("host", host);
                                 failedTask.put("task", taskName);
                                 failedTask.put("play", playName);
                                 failedTask.put("event", event);
-                                var msg = eventData.path("res").path("msg").asText("");
+                                var msg = secretMasker.mask(eventData.path("res").path("msg").asText(""));
                                 if (!msg.isBlank()) {
-                                    if (secretMasker != null) {
-                                        msg = secretMasker.mask(msg);
-                                    }
                                     failedTask.put("error", msg);
                                 }
-                                if (failedTasks.size() < 1000)
+                                if (failedTasks.size() < 1000) {
                                     failedTasks.add(failedTask);
+                                }
+                            }
+
+                            if ("playbook_on_task_start".equals(event) || "playbook_on_handler_task_start".equals(event) || "playbook_on_cleanup_task_start".equals(event)) {
+                                var taskInfo = tasksMap.computeIfAbsent(taskUuid, k -> new RunnerTaskInfo());
+                                taskInfo.taskName = taskName;
+                                taskInfo.playName = playName;
+                                taskInfo.action = action;
+                                var eventCreated = DynamicTaskRunHelper.parseInstant(root.path("created").asText(null));
+                                if (taskInfo.startedAt == null && eventCreated != null) {
+                                    taskInfo.startedAt = eventCreated;
+                                }
+                            } else if (isTerminalHostEvent(event)) {
+                                var taskInfo = tasksMap.computeIfAbsent(taskUuid, k -> new RunnerTaskInfo());
+                                if (taskInfo.taskName == null || taskInfo.taskName.isBlank()) {
+                                    taskInfo.taskName = taskName;
+                                }
+                                if (taskInfo.playName == null || taskInfo.playName.isBlank()) {
+                                    taskInfo.playName = playName;
+                                }
+                                if (taskInfo.action == null || taskInfo.action.isBlank()) {
+                                    taskInfo.action = action;
+                                }
+
+                                if (!host.isBlank()) {
+                                    var resNode = eventData.path("res");
+                                    var isIgnored = resNode.path("ignore_errors").asBoolean(false)
+                                        || eventData.path("ignore_errors").asBoolean(false)
+                                        || ("runner_on_unreachable".equals(event)
+                                            && (resNode.path("ignore_unreachable").asBoolean(false) || eventData.path("ignore_unreachable").asBoolean(false)));
+                                    String hostStatus;
+                                    if ("runner_on_failed".equals(event)) {
+                                        if (isIgnored) {
+                                            hostStatus = "ignored";
+                                        } else {
+                                            var rescuedLeft = rescuedRemainingByHost.getOrDefault(logHost, 0);
+                                            if (rescuedLeft > 0) {
+                                                rescuedRemainingByHost.put(logHost, rescuedLeft - 1);
+                                                hostStatus = "rescued";
+                                            } else {
+                                                hostStatus = "failed";
+                                            }
+                                        }
+                                    } else if ("runner_on_unreachable".equals(event)) {
+                                        hostStatus = isIgnored ? "ignored" : "unreachable";
+                                    } else if ("runner_on_skipped".equals(event)) {
+                                        hostStatus = "skipped";
+                                    } else {
+                                        hostStatus = resNode.path("changed").asBoolean(false) ? "changed" : "ok";
+                                    }
+
+                                    if (DynamicTaskRunHelper.isFailure(hostStatus)) {
+                                        taskInfo.failed = true;
+                                    }
+
+                                    var isCritical = DynamicTaskRunHelper.isFailure(hostStatus) || DynamicTaskRunHelper.isIgnored(hostStatus);
+                                    var canLog = maxLogLines <= 0 || streamedTaskLogs < maxLogLines
+                                        || (isCritical && criticalTaskOverflow < AnsibleRunnerLogConsumer.CRITICAL_OVERFLOW_LIMIT);
+                                    if (streamLogs && canLog) {
+                                        var fullLogs = logsMode == LogsMode.FULL;
+                                        Map<String, Object> resMap = null;
+                                        if (resNode.isObject() && (fullLogs || isCritical)) {
+                                            resMap = JacksonMapper.ofJson().convertValue(resNode, new TypeReference<>() {
+                                            });
+                                        }
+                                        for (var log : DynamicTaskRunHelper.hostLogs(logHost, hostStatus, resMap, fullLogs, fullResultsRef, secretMasker::mask)) {
+                                            if (maxLogLines > 0 && streamedTaskLogs >= maxLogLines) {
+                                                if (!isCritical || criticalTaskOverflow >= AnsibleRunnerLogConsumer.CRITICAL_OVERFLOW_LIMIT) {
+                                                    if (logConsumer != null) {
+                                                        logConsumer.warnTruncatedOnce();
+                                                    }
+                                                    break;
+                                                }
+                                                criticalTaskOverflow++;
+                                            }
+                                            streamedTaskLogs++;
+                                            taskInfo.logs.add(log);
+                                        }
+                                    } else if (streamLogs && maxLogLines > 0 && streamedTaskLogs >= maxLogLines && logConsumer != null) {
+                                        logConsumer.warnTruncatedOnce();
+                                    }
+
+                                    var hostCreated = DynamicTaskRunHelper.parseInstant(root.path("created").asText(null));
+                                    if (hostCreated != null) {
+                                        if (taskInfo.endedAt == null || hostCreated.isAfter(taskInfo.endedAt)) {
+                                            taskInfo.endedAt = hostCreated;
+                                        }
+                                        if (taskInfo.startedAt == null) {
+                                            taskInfo.startedAt = hostCreated;
+                                        }
+                                    }
+                                }
                             }
 
                             if ("playbook_on_stats".equals(event)) {
@@ -1469,7 +1602,55 @@ public class AnsibleRunner extends Task implements
             }
         }
 
-        return new ExecutionTelemetry(status, rc, new ArrayList<>(failedHostsSet), stats, summaryBuilder.build(), failedTasks);
+        var taskEntries = tasksMap.values().stream()
+            .map(taskInfo ->
+            {
+                var name = taskInfo.taskName != null && !taskInfo.taskName.isBlank()
+                    ? taskInfo.taskName
+                    : (taskInfo.action != null && !taskInfo.action.isBlank() ? taskInfo.action : "unnamed_task");
+                var uid = (taskInfo.playName != null && !taskInfo.playName.isBlank() && !"null".equalsIgnoreCase(taskInfo.playName))
+                    ? taskInfo.playName + " | " + name
+                    : name;
+                return new DynamicTaskRunHelper.TaskEntry(
+                    secretMasker.mask(uid),
+                    taskInfo.startedAt,
+                    taskInfo.endedAt,
+                    taskInfo.failed,
+                    taskInfo.logs
+                );
+            })
+            .toList();
+
+        return new ExecutionTelemetry(status, rc, new ArrayList<>(failedHostsSet), stats, summaryBuilder.build(), failedTasks, taskEntries);
+    }
+
+    private static boolean isTerminalHostEvent(String event) {
+        return switch (event) {
+            case "runner_on_ok", "runner_on_failed", "runner_on_unreachable", "runner_on_skipped" -> true;
+            default -> false;
+        };
+    }
+
+    private static int eventFileCounter(Path p) {
+        var name = p.getFileName().toString();
+        var dash = name.indexOf('-');
+        if (dash > 0) {
+            try {
+                return Integer.parseInt(name.substring(0, dash));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 0;
+    }
+
+    private static class RunnerTaskInfo {
+        String taskName;
+        String playName;
+        String action;
+        Instant startedAt;
+        Instant endedAt;
+        boolean failed;
+        List<DynamicTaskRunLog> logs = new ArrayList<>();
     }
 
     private void validateCmdlineArg(String arg) {
@@ -1512,7 +1693,8 @@ public class AnsibleRunner extends Task implements
         List<String> failedHosts,
         Map<String, Object> stats,
         RunnerSummary summary,
-        List<Map<String, Object>> failedTasks) {
+        List<Map<String, Object>> failedTasks,
+        List<DynamicTaskRunHelper.TaskEntry> tasks) {
     }
 
     @Builder(toBuilder = true)
