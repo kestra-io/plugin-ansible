@@ -40,8 +40,10 @@ import lombok.experimental.SuperBuilder;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @KestraTest
@@ -575,6 +577,101 @@ class AnsibleRunnerTest {
         assertThat(failedLogs.getFirst().getMessage(), not(containsString(numericSecret)));
         assertThat(failedLogs.getFirst().getMessage(), not(containsString("123")));
         assertThat(failedLogs.getFirst().getMessage(), endsWith("***... (truncated)"));
+    }
+
+    @Test
+    void testCustomFoldersPlaybookAndVarsResolution() throws Exception {
+        // Scenario 1: Playbook in root folder + custom vars1/ folder with multiple vars files via inputFiles
+        var scenario1Ctx = newRunContext();
+        var scenario1Task = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .inputFiles(
+                Map.of(
+                    "site.yml", """
+                        - hosts: localhost
+                          gather_facts: false
+                          tasks:
+                            - name: Include all vars from custom folder
+                              ansible.builtin.include_vars:
+                                dir: vars1
+                        """,
+                    "vars1/app.yml", "app_name: payment-service\napp_env: production\n",
+                    "vars1/db.yml", "db_host: pg-primary.internal\ndb_port: 5432\n"
+                )
+            )
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var scenario1Out = scenario1Task.run(scenario1Ctx);
+        assertNotNull(scenario1Out);
+        var scenario1Project = scenario1Ctx.workingDir().path().resolve("runner/project");
+        assertTrue(Files.exists(scenario1Project.resolve("site.yml")));
+        assertTrue(Files.exists(scenario1Project.resolve("vars1/app.yml")));
+        assertTrue(Files.exists(scenario1Project.resolve("vars1/db.yml")));
+
+        // Scenario 2: Playbook in custom_playbooks/ folder + vars files in custom vars1/ folder
+        var scenario2Ctx = newRunContext();
+        var workingDir2 = scenario2Ctx.workingDir().path();
+        Files.createDirectories(workingDir2.resolve("custom_playbooks"));
+        Files.createDirectories(workingDir2.resolve("vars1"));
+        Files.writeString(workingDir2.resolve("custom_playbooks/site.yml"), """
+            - hosts: localhost
+              gather_facts: false
+              tasks:
+                - name: Include all vars from custom folder
+                  ansible.builtin.include_vars:
+                    dir: vars1
+            """);
+        Files.writeString(workingDir2.resolve("vars1/app.yml"), "app_name: payment-service\n");
+        Files.writeString(workingDir2.resolve("vars1/db.yml"), "db_port: 5432\n");
+
+        var scenario2Task = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .project(
+                Project.builder()
+                    .playbook(Property.ofValue("custom_playbooks/site.yml"))
+                    .build()
+            )
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var scenario2Out = scenario2Task.run(scenario2Ctx);
+        assertNotNull(scenario2Out);
+        var scenario2Project = workingDir2.resolve("runner/project");
+        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/site.yml")));
+        assertTrue(Files.exists(scenario2Project.resolve("vars1/app.yml")));
+        assertTrue(Files.exists(scenario2Project.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars1/app.yml")));
+        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars1/db.yml")));
+        assertFalse(Files.exists(workingDir2.resolve("custom_playbooks/vars1")));
+
+        // Missing subdirectory playbook must fail strictly without falling back to another directory's site.yml
+        var missingCtx = newRunContext();
+        var missingWd = missingCtx.workingDir().path();
+        Files.createDirectories(missingWd.resolve("other"));
+        Files.writeString(missingWd.resolve("other/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        var missingTask = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .project(Project.builder().playbook(Property.ofValue("custom/site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+        var missingEx = assertThrows(IllegalArgumentException.class, () -> missingTask.run(missingCtx));
+        assertThat(missingEx.getMessage(), is("Playbook not found: custom/site.yml"));
+
+        // Ambiguous bare playbook name across multiple subdirectories must fail with candidate list
+        var ambiguousCtx = newRunContext();
+        var ambiguousWd = ambiguousCtx.workingDir().path();
+        Files.createDirectories(ambiguousWd.resolve("dir1"));
+        Files.createDirectories(ambiguousWd.resolve("dir2"));
+        Files.writeString(ambiguousWd.resolve("dir1/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(ambiguousWd.resolve("dir2/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        var ambiguousTask = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+        var ambiguousEx = assertThrows(IllegalArgumentException.class, () -> ambiguousTask.run(ambiguousCtx));
+        assertThat(ambiguousEx.getMessage(), is("Playbook not found: site.yml; found several candidates: dir1/site.yml, dir2/site.yml"));
     }
 
     /**
