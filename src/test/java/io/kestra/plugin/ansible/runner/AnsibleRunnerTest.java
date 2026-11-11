@@ -581,49 +581,62 @@ class AnsibleRunnerTest {
 
     @Test
     void testCustomFoldersPlaybookAndVarsResolution() throws Exception {
-        // Scenario 1: Playbook in root folder + custom vars1/ folder with multiple vars files via inputFiles
+        // Scenario 1: Playbook in root namespace + multiple custom folders (vars1/, vars2/) and root files
         var scenario1Ctx = newRunContext();
+        var workingDir1 = scenario1Ctx.workingDir().path();
+        Files.createDirectories(workingDir1.resolve("vars1"));
+        Files.createDirectories(workingDir1.resolve("vars2"));
+        Files.writeString(workingDir1.resolve("site.yml"), """
+            - hosts: localhost
+              gather_facts: false
+              tasks:
+                - name: Include all vars from vars1
+                  ansible.builtin.include_vars:
+                    dir: vars1
+                - name: Include all vars from vars2
+                  ansible.builtin.include_vars:
+                    dir: vars2
+            """);
+        Files.writeString(workingDir1.resolve("common.yml"), "common_flag: true\n");
+        Files.writeString(workingDir1.resolve("vars1/app.yml"), "app_name: payment-service\napp_env: production\n");
+        Files.writeString(workingDir1.resolve("vars1/db.yml"), "db_host: pg-primary.internal\ndb_port: 5432\n");
+        Files.writeString(workingDir1.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
+
         var scenario1Task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
-            .inputFiles(
-                Map.of(
-                    "site.yml", """
-                        - hosts: localhost
-                          gather_facts: false
-                          tasks:
-                            - name: Include all vars from custom folder
-                              ansible.builtin.include_vars:
-                                dir: vars1
-                        """,
-                    "vars1/app.yml", "app_name: payment-service\napp_env: production\n",
-                    "vars1/db.yml", "db_host: pg-primary.internal\ndb_port: 5432\n"
-                )
-            )
+            .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
         var scenario1Out = scenario1Task.run(scenario1Ctx);
         assertNotNull(scenario1Out);
-        var scenario1Project = scenario1Ctx.workingDir().path().resolve("runner/project");
+        var scenario1Project = workingDir1.resolve("runner/project");
         assertTrue(Files.exists(scenario1Project.resolve("site.yml")));
+        assertTrue(Files.exists(scenario1Project.resolve("common.yml")));
         assertTrue(Files.exists(scenario1Project.resolve("vars1/app.yml")));
         assertTrue(Files.exists(scenario1Project.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(scenario1Project.resolve("vars2/region.yml")));
 
-        // Scenario 2: Playbook in custom_playbooks/ folder + vars files in custom vars1/ folder
+        // Scenario 2A: Playbook in custom_playbooks/site.yml + multiple custom vars folders (vars1/, vars2/) in namespace
         var scenario2Ctx = newRunContext();
         var workingDir2 = scenario2Ctx.workingDir().path();
         Files.createDirectories(workingDir2.resolve("custom_playbooks"));
         Files.createDirectories(workingDir2.resolve("vars1"));
+        Files.createDirectories(workingDir2.resolve("vars2"));
         Files.writeString(workingDir2.resolve("custom_playbooks/site.yml"), """
             - hosts: localhost
               gather_facts: false
               tasks:
-                - name: Include all vars from custom folder
+                - name: Include all vars from vars1
                   ansible.builtin.include_vars:
                     dir: vars1
+                - name: Include all vars from vars2
+                  ansible.builtin.include_vars:
+                    dir: vars2
             """);
         Files.writeString(workingDir2.resolve("vars1/app.yml"), "app_name: payment-service\n");
         Files.writeString(workingDir2.resolve("vars1/db.yml"), "db_port: 5432\n");
+        Files.writeString(workingDir2.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
 
         var scenario2Task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
@@ -641,9 +654,42 @@ class AnsibleRunnerTest {
         assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/site.yml")));
         assertTrue(Files.exists(scenario2Project.resolve("vars1/app.yml")));
         assertTrue(Files.exists(scenario2Project.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(scenario2Project.resolve("vars2/region.yml")));
         assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars1/app.yml")));
         assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars1/db.yml")));
+        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars2/region.yml")));
         assertFalse(Files.exists(workingDir2.resolve("custom_playbooks/vars1")));
+        assertFalse(Files.exists(workingDir2.resolve("custom_playbooks/vars2")));
+
+        // Scenario 2B: project.source pointing to custom_playbooks/ while multiple other custom folders (vars1/, vars2/) exist in root namespace
+        var scenario2bCtx = newRunContext();
+        var workingDir2b = scenario2bCtx.workingDir().path();
+        Files.createDirectories(workingDir2b.resolve("custom_playbooks"));
+        Files.createDirectories(workingDir2b.resolve("vars1"));
+        Files.createDirectories(workingDir2b.resolve("vars2"));
+        Files.writeString(workingDir2b.resolve("custom_playbooks/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir2b.resolve("vars1/app.yml"), "app_name: payment-service\n");
+        Files.writeString(workingDir2b.resolve("vars1/db.yml"), "db_port: 5432\n");
+        Files.writeString(workingDir2b.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
+
+        var scenario2bTask = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("custom_playbooks"))
+                    .playbook(Property.ofValue("site.yml"))
+                    .build()
+            )
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var scenario2bOut = scenario2bTask.run(scenario2bCtx);
+        assertNotNull(scenario2bOut);
+        var scenario2bProject = workingDir2b.resolve("runner/project");
+        assertTrue(Files.exists(scenario2bProject.resolve("site.yml")));
+        assertTrue(Files.exists(scenario2bProject.resolve("vars1/app.yml")));
+        assertTrue(Files.exists(scenario2bProject.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(scenario2bProject.resolve("vars2/region.yml")));
 
         // Missing subdirectory playbook must fail strictly without falling back to another directory's site.yml
         var missingCtx = newRunContext();

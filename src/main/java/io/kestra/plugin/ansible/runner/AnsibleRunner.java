@@ -864,7 +864,7 @@ public class AnsibleRunner extends Task implements
                     continue;
                 }
                 var dest = projectDir.resolve(entry.getFileName());
-                if (!Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                if (Files.isDirectory(entry) || !Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
                     linkOrCopy(entry, dest, runContext);
                 }
             }
@@ -875,7 +875,7 @@ public class AnsibleRunner extends Task implements
             try (var pbEntries = Files.list(playbooksDir)) {
                 for (var entry : pbEntries.toList()) {
                     var dest = projectDir.resolve(entry.getFileName());
-                    if (!Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                    if (Files.isDirectory(entry) || !Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
                         linkOrCopy(entry, dest, runContext);
                     }
                 }
@@ -893,7 +893,7 @@ public class AnsibleRunner extends Task implements
                 }
                 if (Files.isDirectory(sibling) || sibling.getFileName().toString().equals("ansible.cfg")) {
                     var linkPath = playbookDir.resolve(sibling.getFileName());
-                    if (!Files.exists(linkPath, LinkOption.NOFOLLOW_LINKS)) {
+                    if (Files.isDirectory(sibling) || !Files.exists(linkPath, LinkOption.NOFOLLOW_LINKS)) {
                         linkOrCopy(sibling, linkPath, runContext);
                     }
                 }
