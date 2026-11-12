@@ -536,7 +536,6 @@ public class AnsibleRunnerComprehensiveTest {
 
     @Test
     void test_InventoryFileNotFound() throws Exception {
-        var runContext = newRunContext();
         var runner = ComprehensiveMockRunner.builder().build();
 
         var task = AnsibleRunner.builder()
@@ -552,14 +551,30 @@ public class AnsibleRunnerComprehensiveTest {
             )
             .inventory(
                 Inventory.builder()
-                    .file(Property.ofValue(
-                        "nsfile:///inventories/missing-hosts.ini"
-                    ))
+                    .file(Property.ofValue("nsfile:///inventories/missing-hosts.ini"))
                     .build()
             )
             .build();
 
-        assertThrows(Exception.class, () -> task.run(runContext));
+        var contextTask = AnsibleRunner.builder()
+            .id(IdUtils.create())
+            .type(AnsibleRunner.class.getName())
+            .build();
+
+        var runContext = TestsUtils.mockRunContext(
+            runContextFactory,
+            contextTask,
+            Map.of()
+        );
+
+        var exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> task.run(runContext)
+        );
+
+        assertTrue(exception.getMessage().contains(
+            "Inventory namespace file nsfile:///inventories/missing-hosts.ini was not found"
+        ));
     }
 
     @Test

@@ -970,10 +970,9 @@ public class AnsibleRunner extends Task implements
                     Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 }
             } else if (rInvFile.startsWith("nsfile://")) {
-                URI uri = URI.create(rInvFile);
-
-                String uriPath = uri.getPath();
-                if (uriPath == null || uriPath.isBlank() || "/".equals(uriPath)) {
+                var uri = URI.create(rInvFile);
+                var uriPath = uri.getPath();
+                if (uriPath.isBlank() || "/".equals(uriPath)) {
                     throw new IllegalArgumentException(
                         "Invalid namespace file URI for inventory: " + rInvFile
                             + ". Expected format: nsfile:///path/to/hosts.ini "
@@ -982,10 +981,12 @@ public class AnsibleRunner extends Task implements
                 }
 
                 try (var is = URIFetcher.of(uri).fetch(runContext)) {
-                    Files.copy(
-                        is,
-                        inventoryDir.resolve("hosts"),
-                        StandardCopyOption.REPLACE_EXISTING
+                    Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                } catch (FileNotFoundException e) {
+                    throw new IllegalArgumentException(
+                        "Inventory namespace file %s was not found. Upload it to that namespace or fix the path."
+                            .formatted(rInvFile),
+                        e
                     );
                 }
             } else if (rInvFile.contains("://")) {
