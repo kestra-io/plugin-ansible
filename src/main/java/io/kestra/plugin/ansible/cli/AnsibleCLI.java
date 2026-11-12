@@ -27,8 +27,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.slf4j.event.Level;
-
 import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
@@ -37,10 +35,7 @@ import io.kestra.core.models.annotations.Metric;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.assets.AssetIdentifier;
-import io.kestra.core.models.executions.TaskRun;
-import io.kestra.core.models.executions.TaskRunAttempt;
 import io.kestra.core.models.executions.metrics.Timer;
-import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.*;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
@@ -50,11 +45,10 @@ import io.kestra.core.queues.QueueException;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
-import io.kestra.core.runners.WorkerTaskResult;
 import io.kestra.core.serializers.JacksonMapper;
-import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.NamespaceFilesUtils;
 import io.kestra.core.utils.UnixModeToPosixFilePermissions;
+import io.kestra.plugin.ansible.DynamicTaskRunHelper;
 import io.kestra.plugin.core.runner.Process;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
 import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
@@ -362,14 +356,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     // beyond any realistic queue message-size limit and the guard would only be nominal, while
     // the parse itself would have to materialize that volume in the worker heap.
     static final long MAX_OUTPUTS_SIZE_CEILING = 100_000_000L;
-    // Plenty for a summary or a failure reason while keeping a single dynamic-taskrun log line
-    // from growing unbounded when a host result is large.
-    private static final int MAX_LOG_LINE_LENGTH = 4_000;
-    // Same tail the callback keeps in the light result, so INLINE and STORE log alike.
-    private static final int STDERR_TAIL_LENGTH = 1_024;
-    private static final int MAX_MSG_LOG_LENGTH = 2_000;
-    private static final int MAX_ITEM_LABEL_LENGTH = 256;
-    private static final int MAX_FAILED_ITEM_LOGS = 50;
 
     // Ensure Ansible can find our bundled callback/library dirs regardless of where the playbook
     // lives or what the image configures (issue #120). Prepend them onto the search path using the
@@ -1755,212 +1741,39 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             return;
         }
 
-        // toList() so the body can throw the checked render() exception
-        for (AnsibleOutput.TaskOutput task : tasks(playbooks).toList()) {
-            String uid = task.getUid();
-            Instant started = parseInstant(task.getStartedAt());
-            Instant ended = parseInstant(task.getEndedAt());
-            if (uid == null || started == null || ended == null) {
-                continue; // missing or unparseable timeline info => skip
-            }
-
-            State.Type finalType = hasFailedHost(task) ? State.Type.FAILED : State.Type.SUCCESS;
-            State state = State.of(
-                finalType, new ArrayList<>(
-                    List.of(
-                        new State.History(State.Type.CREATED, started),
-                        new State.History(State.Type.RUNNING, started),
-                        new State.History(finalType, ended)
-                    )
+        var entries = tasks(playbooks)
+            .map(
+                task -> new DynamicTaskRunHelper.TaskEntry(
+                    task.getUid(),
+                    DynamicTaskRunHelper.parseInstant(task.getStartedAt()),
+                    DynamicTaskRunHelper.parseInstant(task.getEndedAt()),
+                    hasFailedHost(task),
+                    taskLogs(task, logsMode, resultsStorage)
                 )
-            );
+            )
+            .toList();
 
-            TaskRun subTaskRun = TaskRun.builder()
-                .id(IdUtils.create())
-                .tenantId(runContext.flowInfo().tenantId())
-                .namespace(runContext.render("{{ flow.namespace }}"))
-                .flowId(runContext.render("{{ flow.id }}"))
-                .taskId(uid) // stable identity for per-task grouping
-                .executionId(runContext.render("{{ execution.id }}"))
-                .parentTaskRunId(runContext.render("{{ taskrun.id }}"))
-                .state(state)
-                .attempts(
-                    List.of(
-                        TaskRunAttempt.builder()
-                            .state(state)
-                            .build()
-                    )
-                )
-                .build();
-
-            // Logs ride with the taskrun, so the run context fills in the execution context
-            // and masks secrets; the plugin never builds a LogEntry itself.
-            runContext.dynamicWorkerResult(
-                WorkerTaskResult.builder().taskRun(subTaskRun).build(),
-                taskLogs(task, logsMode, resultsStorage)
-            );
-        }
-    }
-
-    private static Instant parseInstant(String value) {
-        if (value == null) {
-            return null;
-        }
-        try {
-            return Instant.parse(value);
-        } catch (Exception e) {
-            return null;
-        }
+        DynamicTaskRunHelper.emit(runContext, entries);
     }
 
     private static boolean hasFailedHost(AnsibleOutput.TaskOutput task) {
-        return nonNulls(task.getHosts()).anyMatch(host -> isFailure(host.getStatus()));
+        return nonNulls(task.getHosts()).anyMatch(host -> DynamicTaskRunHelper.isFailure(host.getStatus()));
     }
 
-    private static boolean isFailure(String status) {
-        return "failed".equalsIgnoreCase(status) || "unreachable".equalsIgnoreCase(status);
-    }
-
-    private static boolean isIgnored(String status) {
-        return "ignored".equalsIgnoreCase(status);
-    }
-
-    /**
-     * Build the host-result log lines for a task.
-     * SUMMARY (default) logs only the status for ok/skipped hosts, and the status plus the
-     * failure reason for failed/unreachable/ignored hosts. FULL always logs the entire result payload.
-     * Neither mode overrides EXPLICIT-mode redaction: the host result payload is already reduced
-     * by the callback before it ever reaches this method.
-     */
     static List<DynamicTaskRunLog> taskLogs(AnsibleOutput.TaskOutput task, LogsMode logsMode, ResultsStorage resultsStorage) {
         if (task.getHosts() == null) {
             return List.of();
         }
 
-        List<DynamicTaskRunLog> logs = new ArrayList<>();
-        for (AnsibleOutput.HostResult hr : task.getHosts()) {
-            if (hr == null) {
-                continue;
-            }
-
-            String status = hr.getStatus();
-            boolean hasFailureReason = isFailure(status) || isIgnored(status);
-
-            String message;
-            if (logsMode == LogsMode.FULL) {
-                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(stringifyResult(hr.getResult()), resultsStorage);
-            } else if (hasFailureReason) {
-                message = "[" + hr.getHost() + "] " + status + " => " + truncateForLog(failureReason(hr.getResult(), resultsStorage), resultsStorage);
-            } else {
-                message = "[" + hr.getHost() + "] " + status;
-            }
-
-            logs.add(new DynamicTaskRunLog(logLevel(status), message));
-
-            if (logsMode != LogsMode.FULL) {
-                logs.addAll(failedItemLogs(hr, resultsStorage));
-            }
-        }
-
-        return logs;
-    }
-
-    private static Level logLevel(String status) {
-        if (isIgnored(status)) {
-            return Level.WARN;
-        }
-        return isFailure(status) ? Level.ERROR : Level.INFO;
-    }
-
-    private static List<DynamicTaskRunLog> failedItemLogs(AnsibleOutput.HostResult hr, ResultsStorage resultsStorage) {
-        if (!(hr.getResult() instanceof Map<?, ?> result) || !(result.get("results") instanceof List<?> items)) {
-            return List.of();
-        }
-
-        var failedItems = items.stream()
-            .filter(item -> item instanceof Map<?, ?> m && (Boolean.TRUE.equals(m.get("failed")) || Boolean.TRUE.equals(m.get("unreachable"))))
-            .map(item -> (Map<?, ?>) item)
-            .toList();
-
-        var level = logLevel(hr.getStatus());
         var logs = new ArrayList<DynamicTaskRunLog>();
-        for (var item : failedItems.stream().limit(MAX_FAILED_ITEM_LOGS).toList()) {
-            var status = Boolean.TRUE.equals(item.get("unreachable")) ? "unreachable" : "failed";
-            var label = itemLabel(item);
-            logs.add(
-                new DynamicTaskRunLog(
-                    level,
-                    "[" + hr.getHost() + "] " + status + label + " => " + truncateForLog(failureReason(item, resultsStorage), resultsStorage)
-                )
-            );
-        }
-
-        if (failedItems.size() > MAX_FAILED_ITEM_LOGS) {
-            var fullResults = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
-            logs.add(
-                new DynamicTaskRunLog(
-                    level,
-                    "[" + hr.getHost() + "] ... and " + (failedItems.size() - MAX_FAILED_ITEM_LOGS) + " more failed items, see " + fullResults
-                )
-            );
+        var fullLogs = logsMode == LogsMode.FULL;
+        var fullResultsRef = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
+        for (var hr : task.getHosts()) {
+            if (hr != null) {
+                logs.addAll(DynamicTaskRunHelper.hostLogs(hr.getHost(), hr.getStatus(), hr.getResult(), fullLogs, fullResultsRef));
+            }
         }
         return logs;
-    }
-
-    /** Prefers loop_control.label over the raw item, like the callback does for the light result; no_log items get none. */
-    private static String itemLabel(Map<?, ?> item) {
-        if (Boolean.TRUE.equals(item.get("_ansible_no_log"))) {
-            return "";
-        }
-        var raw = item.get("_ansible_item_label") != null ? item.get("_ansible_item_label") : item.get("item");
-        if (raw == null) {
-            return "";
-        }
-        return " (item=" + truncate(raw instanceof String text ? text : stringifyResult(raw), MAX_ITEM_LABEL_LENGTH) + ")";
-    }
-
-    private static String truncate(String s, int max) {
-        return s.length() <= max ? s : s.substring(0, max);
-    }
-
-    static String failureReason(Object result, ResultsStorage resultsStorage) {
-        if (result instanceof Map<?, ?> m && m.get("msg") != null) {
-            // msg is cut on its own so rc and the stderr tail still fit under the line limit
-            var reason = new StringBuilder(truncateForLog(String.valueOf(m.get("msg")), MAX_MSG_LOG_LENGTH, resultsStorage));
-            if (m.get("rc") != null) {
-                reason.append(" (rc=").append(m.get("rc")).append(")");
-            }
-            if (!Boolean.TRUE.equals(m.get("_ansible_no_log")) && m.get("stderr") instanceof String stderr && !stderr.isEmpty()) {
-                var tail = stderr.length() <= STDERR_TAIL_LENGTH ? stderr : stderr.substring(stderr.length() - STDERR_TAIL_LENGTH);
-                reason.append(" | stderr: ").append(tail);
-            }
-            return reason.toString();
-        }
-        return stringifyResult(result);
-    }
-
-    static String truncateForLog(String s, ResultsStorage resultsStorage) {
-        return truncateForLog(s, MAX_LOG_LINE_LENGTH, resultsStorage);
-    }
-
-    private static String truncateForLog(String s, int max, ResultsStorage resultsStorage) {
-        if (s == null || s.length() <= max) {
-            return s;
-        }
-        var fullResults = resultsStorage == ResultsStorage.STORE ? "`resultsUri`" : "`playbooks`";
-        return s.substring(0, max) + "... (truncated, see " + fullResults + ")";
-    }
-
-    static String stringifyResult(Object result) {
-        if (result == null) {
-            return "{}";
-        }
-
-        try {
-            return JacksonMapper.ofJson().writeValueAsString(result);
-        } catch (Exception e) {
-            return String.valueOf(result);
-        }
     }
 
     public enum OutputsMode {

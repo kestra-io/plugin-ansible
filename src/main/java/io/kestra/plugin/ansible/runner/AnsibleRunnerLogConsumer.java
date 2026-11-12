@@ -21,7 +21,7 @@ import io.kestra.plugin.ansible.runner.models.LogsMode;
 // Batches, caps and masks runner output, and spools the full masked log to disk.
 public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
 
-    private static final int CRITICAL_OVERFLOW_LIMIT = 500;
+    static final int CRITICAL_OVERFLOW_LIMIT = 500;
 
     // Same syntax as core's TaskLogLineMatcher for ::{"outputs":...}:: and ::{"metrics":...}:: lines
     private static final Pattern KESTRA_MARKER = Pattern.compile("^::(\\{.*})::$");
@@ -172,7 +172,7 @@ public class AnsibleRunnerLogConsumer extends DefaultLogConsumer {
         }
     }
 
-    private void warnTruncatedOnce() {
+    synchronized void warnTruncatedOnce() {
         if (truncationWarned) {
             return;
         }
