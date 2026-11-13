@@ -2476,17 +2476,19 @@ class AnsibleCLITest {
             .commands(Property.ofValue(List.of("ansible-playbook -i inventory.ini playbook.yml")))
             .build();
 
+        var context = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
+        var executionId = ((Map<?, ?>) context.getVariables().get("execution")).get("id");
+
         List<LogEntry> logs = new CopyOnWriteArrayList<>();
-        // The log queue is shared by every test, so keep only this task's entries.
+        // The log queue is shared by every test, and per-host lines use their own taskId, so filter on the execution.
         Flux<LogEntry> receive = TestsUtils.receive(logQueue, l ->
         {
-            if (execute.getId().equals(l.getLeft().getTaskId())) {
+            if (executionId.equals(l.getLeft().getExecutionId())) {
                 logs.add(l.getLeft());
             }
         });
 
         AnsibleCLI.AnsibleOutput output = null;
-        var context = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
         if (expectFailure) {
             assertThrows(RunnableTaskException.class, () -> execute.run(context));
         } else {
