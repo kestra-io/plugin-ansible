@@ -19,20 +19,20 @@ public class Inventory {
     @Schema(
         title = "Inventory file URI or path",
         description = """
-        URI to a Kestra Internal Storage or Namespace file, or a local workspace path.
+            URI to a Kestra Internal Storage file (`kestra://`), a Namespace file (`nsfile://`), a host file allowed by the Kestra configuration (`file://`), or a local workspace path.
 
-        Namespace file examples:
+            Namespace file examples:
 
-        Current namespace:
-        ```yaml
-        file: nsfile:///inventories/hosts.ini
-        ```
+            Current namespace:
+            ```yaml
+            file: nsfile:///inventories/hosts.ini
+            ```
 
-        Another namespace:
-        ```yaml
-        file: nsfile://company.shared.inventories/inventories/hosts.ini
-        ```
-        """
+            Another namespace:
+            ```yaml
+            file: nsfile://company.shared.inventories/inventories/hosts.ini
+            ```
+            """
     )
     private Property<String> file;
 

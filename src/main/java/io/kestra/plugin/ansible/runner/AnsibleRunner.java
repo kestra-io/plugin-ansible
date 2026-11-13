@@ -965,32 +965,18 @@ public class AnsibleRunner extends Task implements
         }
 
         if (rInvFile != null && !rInvFile.isBlank()) {
-            if (rInvFile.startsWith("kestra://")) {
-                try (var is = runContext.storage().getFile(URI.create(rInvFile))) {
-                    Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
-                }
-            } else if (rInvFile.startsWith("nsfile://")) {
-                var uri = URI.create(rInvFile);
-                var uriPath = uri.getPath();
-                if (uriPath.isBlank() || "/".equals(uriPath)) {
-                    throw new IllegalArgumentException(
-                        "Invalid namespace file URI for inventory: %s. Expected format: nsfile:///path/to/hosts.ini or nsfile://<namespace>/path/to/hosts.ini."
-                            .formatted(rInvFile)
-                    );
-                }
-
-                try (var is = URIFetcher.of(uri).fetch(runContext)) {
+            if (URIFetcher.supports(rInvFile)) {
+                try (var is = URIFetcher.of(rInvFile).fetch(runContext)) {
                     Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
                 } catch (FileNotFoundException e) {
                     throw new IllegalArgumentException(
-                        "Inventory namespace file %s was not found. Upload it to that namespace or fix the path."
-                            .formatted(rInvFile),
+                        "Inventory file %s was not found. Upload it or fix the path.".formatted(rInvFile),
                         e
                     );
                 }
             } else if (rInvFile.contains("://")) {
                 throw new IllegalArgumentException(
-                    "Unsupported URI scheme for inventory file: %s. Supported schemes are kestra://, nsfile://, or local workspace paths."
+                    "Unsupported URI scheme for inventory file: %s. Supported schemes are kestra://, nsfile://, file://, or local workspace paths."
                         .formatted(rInvFile)
                 );
             } else {

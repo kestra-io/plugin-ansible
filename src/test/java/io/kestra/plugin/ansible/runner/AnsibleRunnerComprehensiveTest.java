@@ -30,8 +30,8 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.storages.StorageInterface;
-import io.kestra.core.utils.TestsUtils;
 import io.kestra.core.utils.IdUtils;
+import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.ansible.runner.models.Inventory;
 import io.kestra.plugin.ansible.runner.models.LogsMode;
 import io.kestra.plugin.ansible.runner.models.Project;
@@ -433,9 +433,9 @@ public class AnsibleRunnerComprehensiveTest {
     @Test
     void test_InventoryFileFromCurrentNamespace() throws Exception {
         var inventoryContent = """
-        [webservers]
-        current-ns-host ansible_host=127.0.0.1
-        """;
+            [webservers]
+            current-ns-host ansible_host=127.0.0.1
+            """;
 
         var runner = ComprehensiveMockRunner.builder().build();
 
@@ -445,9 +445,11 @@ public class AnsibleRunnerComprehensiveTest {
             .taskRunner(runner)
             .project(
                 Project.builder()
-                    .source(Property.ofValue(
-                        "- hosts: webservers\n  tasks:\n    - ping:\n"
-                    ))
+                    .source(
+                        Property.ofValue(
+                            "- hosts: webservers\n  tasks:\n    - ping:\n"
+                        )
+                    )
                     .playbook(Property.ofValue("site.yml"))
                     .build()
             )
@@ -494,9 +496,9 @@ public class AnsibleRunnerComprehensiveTest {
         var runner = ComprehensiveMockRunner.builder().build();
 
         var inventoryContent = """
-        db-primary ansible_connection=local
-        db-replica ansible_connection=local
-        """;
+            db-primary ansible_connection=local
+            db-replica ansible_connection=local
+            """;
 
         runContext.storage().namespace("my.test.ns").putFile(
             Path.of("inventories/hosts.ini"),
@@ -572,9 +574,11 @@ public class AnsibleRunnerComprehensiveTest {
             () -> task.run(runContext)
         );
 
-        assertTrue(exception.getMessage().contains(
-            "Inventory namespace file nsfile:///inventories/missing-hosts.ini was not found"
-        ));
+        assertTrue(
+            exception.getMessage().contains(
+                "Inventory file nsfile:///inventories/missing-hosts.ini was not found"
+            )
+        );
     }
 
     @Test
