@@ -38,6 +38,7 @@ import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.property.URIFetcher;
 import io.kestra.core.models.tasks.InputFilesInterface;
 import io.kestra.core.models.tasks.NamespaceFiles;
 import io.kestra.core.models.tasks.NamespaceFilesInterface;
@@ -964,12 +965,20 @@ public class AnsibleRunner extends Task implements
         }
 
         if (rInvFile != null && !rInvFile.isBlank()) {
-            if (rInvFile.startsWith("kestra://")) {
-                try (var is = runContext.storage().getFile(URI.create(rInvFile))) {
+            if (URIFetcher.supports(rInvFile)) {
+                try (var is = URIFetcher.of(rInvFile).fetch(runContext)) {
                     Files.copy(is, inventoryDir.resolve("hosts"), StandardCopyOption.REPLACE_EXISTING);
+                } catch (FileNotFoundException e) {
+                    throw new IllegalArgumentException(
+                        "Inventory file %s was not found. Upload it or fix the path.".formatted(rInvFile),
+                        e
+                    );
                 }
             } else if (rInvFile.contains("://")) {
-                throw new IllegalArgumentException("Unsupported URI scheme for inventory file: " + rInvFile + ". Only kestra:// internal storage URIs or local workspace paths are supported.");
+                throw new IllegalArgumentException(
+                    "Unsupported URI scheme for inventory file: %s. Supported schemes are kestra://, nsfile://, file://, or local workspace paths."
+                        .formatted(rInvFile)
+                );
             } else {
                 var relInv = rInvFile.startsWith("/") ? rInvFile.substring(1) : rInvFile;
                 var localInv = secureResolve(workingDir, relInv);
