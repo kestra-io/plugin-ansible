@@ -743,8 +743,7 @@ class AnsibleCLITest {
 
     private AnsibleCLI.AnsibleOutput runExplicitFailureDetails(
         boolean enabled,
-        String playbook
-    ) throws Exception {
+        String playbook) throws Exception {
 
         AnsibleCLI execute = AnsibleCLI.builder()
             .id(IdUtils.create())
@@ -2478,7 +2477,13 @@ class AnsibleCLITest {
             .build();
 
         List<LogEntry> logs = new CopyOnWriteArrayList<>();
-        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+        // The log queue is shared by every test, so keep only this task's entries.
+        Flux<LogEntry> receive = TestsUtils.receive(logQueue, l ->
+        {
+            if (execute.getId().equals(l.getLeft().getTaskId())) {
+                logs.add(l.getLeft());
+            }
+        });
 
         AnsibleCLI.AnsibleOutput output = null;
         var context = TestsUtils.mockRunContext(runContextFactory, execute, Map.of());
