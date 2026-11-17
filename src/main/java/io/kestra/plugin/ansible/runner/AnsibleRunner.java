@@ -49,6 +49,7 @@ import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.DynamicTaskRunLog;
+import io.kestra.core.runners.FilesService;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
@@ -353,6 +354,10 @@ public class AnsibleRunner extends Task implements
 
     @Schema(
         title = "Project playbook configuration",
+        description = "Configures the entrypoint playbook and optional source directory or archive. " +
+            "Workspace entries from `namespaceFiles` and `inputFiles` are staged into `runner/project/` " +
+            "(with `project.source` and `playbooks/` taking precedence over root files), and sibling directories are linked " +
+            "into the playbook's subdirectory when `project.playbook` points to a nested path.",
         anyOf = { Project.class, String.class }
     )
     @Builder.Default
@@ -422,18 +427,13 @@ public class AnsibleRunner extends Task implements
             Files.createDirectories(envDir);
             Files.createDirectories(artifactsBaseDir);
 
-            // Pre-load namespace and input files directly into the working directory if configured.
-            // Loaded once here so playbooks, inventories, and custom folders are available in workingDir before resolution;
-            // not passed to CommandsWrapper to prevent duplicate loading.
+            // Load namespace and input files into workingDir once before resolving the project and inventory.
+            var commandsWrapper = new CommandsWrapper(runContext).withTaskRunner(this.taskRunner);
             if (this.namespaceFiles != null && !Boolean.FALSE.equals(runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
                 NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
             }
             if (this.inputFiles != null) {
-                PluginUtilsService.createInputFilesRaw(
-                    runContext,
-                    workingDir,
-                    PluginUtilsService.transformInputFiles(runContext, this.inputFiles)
-                );
+                FilesService.inputFiles(runContext, this.taskRunner.additionalVars(runContext, commandsWrapper), this.inputFiles);
             }
 
             var resolvedPlaybook = resolvePlaybook(runContext);
@@ -502,9 +502,8 @@ public class AnsibleRunner extends Task implements
                 secretMasker
             );
 
-            var commandsWrapper = new CommandsWrapper(runContext)
+            commandsWrapper = commandsWrapper
                 .withLogConsumer(logConsumer)
-                .withTaskRunner(this.taskRunner)
                 .withContainerImage(rImage)
                 .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
                 .withCommands(Property.ofValue(runnerCommand));
@@ -608,7 +607,7 @@ public class AnsibleRunner extends Task implements
                     if (key.startsWith("runner/artifacts/")) {
                         continue;
                     }
-                    if (key.startsWith("runner/project/") && extractedOutputFiles.containsKey(key.substring("runner/project/".length()))) {
+                    if (extractedOutputFiles.containsKey("runner/project/" + key)) {
                         continue;
                     }
                     finalOutputFiles.put(key, entry.getValue());
@@ -727,11 +726,11 @@ public class AnsibleRunner extends Task implements
     }
 
     private String resolvePlaybook(RunContext runContext) throws IllegalVariableEvaluationException {
-        var resolved = DEFAULT_PLAYBOOK;
+        var rPlaybook = DEFAULT_PLAYBOOK;
         if (this.project != null && this.project.getPlaybook() != null) {
-            resolved = runContext.render(this.project.getPlaybook()).as(String.class).orElse(DEFAULT_PLAYBOOK);
+            rPlaybook = runContext.render(this.project.getPlaybook()).as(String.class).orElse(DEFAULT_PLAYBOOK);
         }
-        return resolved.startsWith("/") ? resolved.substring(1) : resolved;
+        return rPlaybook.startsWith("/") ? rPlaybook.substring(1) : rPlaybook;
     }
 
     private void resolveProjectSource(RunContext runContext, Path workingDir, Path projectDir, Path runnerDir, String playbookName)
@@ -809,12 +808,12 @@ public class AnsibleRunner extends Task implements
 
         var targetPlaybook = secureResolve(projectDir, playbookName);
         if (!Files.exists(targetPlaybook)) {
-            var directWorkingDirFile = secureResolve(workingDir, playbookName);
             var playbooksSubDirFile = secureResolve(workingDir.resolve("playbooks"), playbookName);
-            if (Files.isRegularFile(directWorkingDirFile)) {
-                linkOrCopy(directWorkingDirFile, targetPlaybook, runContext);
-            } else if (Files.isRegularFile(playbooksSubDirFile)) {
+            var directWorkingDirFile = secureResolve(workingDir, playbookName);
+            if (Files.isRegularFile(playbooksSubDirFile)) {
                 linkOrCopy(playbooksSubDirFile, targetPlaybook, runContext);
+            } else if (Files.isRegularFile(directWorkingDirFile)) {
+                linkOrCopy(directWorkingDirFile, targetPlaybook, runContext);
             } else if (!playbookName.contains("/")) {
                 List<Path> candidates;
                 try (var stream = Files.walk(workingDir, 4)) {
@@ -829,7 +828,9 @@ public class AnsibleRunner extends Task implements
                         .sorted()
                         .toList();
                     throw new IllegalArgumentException(
-                        "Playbook not found: " + playbookName + "; found several candidates: " + String.join(", ", relCandidates)
+                        "Playbook '%s' matches several files: %s, set project.playbook to one of them".formatted(
+                            playbookName, String.join(", ", relCandidates)
+                        )
                     );
                 } else if (candidates.size() == 1) {
                     var found = candidates.getFirst();
@@ -858,18 +859,6 @@ public class AnsibleRunner extends Task implements
     }
 
     private void stageWorkspaceEntries(Path workingDir, Path projectDir, Path runnerDir, RunContext runContext) throws IOException {
-        try (var rootEntries = Files.list(workingDir)) {
-            for (var entry : rootEntries.toList()) {
-                if (entry.equals(runnerDir)) {
-                    continue;
-                }
-                var dest = projectDir.resolve(entry.getFileName());
-                if (Files.isDirectory(entry) || !Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
-                    linkOrCopy(entry, dest, runContext);
-                }
-            }
-        }
-
         var playbooksDir = workingDir.resolve("playbooks");
         if (Files.isDirectory(playbooksDir)) {
             try (var pbEntries = Files.list(playbooksDir)) {
@@ -881,6 +870,18 @@ public class AnsibleRunner extends Task implements
                 }
             } catch (Exception e) {
                 runContext.logger().warn("Failed to link playbooks dir: {}", e.getMessage());
+            }
+        }
+
+        try (var rootEntries = Files.list(workingDir)) {
+            for (var entry : rootEntries.toList()) {
+                if (entry.equals(runnerDir)) {
+                    continue;
+                }
+                var dest = projectDir.resolve(entry.getFileName());
+                if (Files.isDirectory(entry) || !Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                    linkOrCopy(entry, dest, runContext);
+                }
             }
         }
     }
@@ -1326,7 +1327,8 @@ public class AnsibleRunner extends Task implements
 
         // 1. Check if defined in task inputFiles in-memory without duplicate on-disk materialization
         if (this.inputFiles != null) {
-            var transformed = PluginUtilsService.transformInputFiles(runContext, this.inputFiles);
+            var runnerVars = this.taskRunner.additionalVars(runContext, new CommandsWrapper(runContext).withTaskRunner(this.taskRunner));
+            var transformed = PluginUtilsService.transformInputFiles(runContext, runnerVars, this.inputFiles);
             if (transformed != null && transformed.containsKey(fileRef)) {
                 var contentOrUri = transformed.get(fileRef);
                 if (contentOrUri != null) {

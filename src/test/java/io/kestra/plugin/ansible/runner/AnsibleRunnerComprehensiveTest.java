@@ -2032,8 +2032,8 @@ public class AnsibleRunnerComprehensiveTest {
         }
 
         @Override
-        public Map<String, Object> additionalVars(RunContext runContext, TaskCommands taskCommands) {
-            return Collections.emptyMap();
+        protected Map<String, Object> runnerAdditionalVars(RunContext runContext, TaskCommands taskCommands) {
+            return Map.of("workingDir", taskCommands.getWorkingDirectory());
         }
     }
 }

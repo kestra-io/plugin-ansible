@@ -580,13 +580,12 @@ class AnsibleRunnerTest {
     }
 
     @Test
-    void testCustomFoldersPlaybookAndVarsResolution() throws Exception {
-        // Scenario 1: Playbook in root namespace + multiple custom folders (vars1/, vars2/) and root files
-        var scenario1Ctx = newRunContext();
-        var workingDir1 = scenario1Ctx.workingDir().path();
-        Files.createDirectories(workingDir1.resolve("vars1"));
-        Files.createDirectories(workingDir1.resolve("vars2"));
-        Files.writeString(workingDir1.resolve("site.yml"), """
+    void testCustomFoldersRootPlaybookAndMultipleVarsFolders() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("vars1"));
+        Files.createDirectories(workingDir.resolve("vars2"));
+        Files.writeString(workingDir.resolve("site.yml"), """
             - hosts: localhost
               gather_facts: false
               tasks:
@@ -597,33 +596,35 @@ class AnsibleRunnerTest {
                   ansible.builtin.include_vars:
                     dir: vars2
             """);
-        Files.writeString(workingDir1.resolve("common.yml"), "common_flag: true\n");
-        Files.writeString(workingDir1.resolve("vars1/app.yml"), "app_name: payment-service\napp_env: production\n");
-        Files.writeString(workingDir1.resolve("vars1/db.yml"), "db_host: pg-primary.internal\ndb_port: 5432\n");
-        Files.writeString(workingDir1.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
+        Files.writeString(workingDir.resolve("common.yml"), "common_flag: true\n");
+        Files.writeString(workingDir.resolve("vars1/app.yml"), "app_name: payment-service\napp_env: production\n");
+        Files.writeString(workingDir.resolve("vars1/db.yml"), "db_host: pg-primary.internal\ndb_port: 5432\n");
+        Files.writeString(workingDir.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
 
-        var scenario1Task = AnsibleRunner.builder()
+        var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
             .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
-        var scenario1Out = scenario1Task.run(scenario1Ctx);
-        assertNotNull(scenario1Out);
-        var scenario1Project = workingDir1.resolve("runner/project");
-        assertTrue(Files.exists(scenario1Project.resolve("site.yml")));
-        assertTrue(Files.exists(scenario1Project.resolve("common.yml")));
-        assertTrue(Files.exists(scenario1Project.resolve("vars1/app.yml")));
-        assertTrue(Files.exists(scenario1Project.resolve("vars1/db.yml")));
-        assertTrue(Files.exists(scenario1Project.resolve("vars2/region.yml")));
+        var out = task.run(ctx);
+        assertNotNull(out);
+        var projectDir = workingDir.resolve("runner/project");
+        assertTrue(Files.exists(projectDir.resolve("site.yml")));
+        assertTrue(Files.exists(projectDir.resolve("common.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars1/app.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars2/region.yml")));
+    }
 
-        // Scenario 2A: Playbook in custom_playbooks/site.yml + multiple custom vars folders (vars1/, vars2/) in namespace
-        var scenario2Ctx = newRunContext();
-        var workingDir2 = scenario2Ctx.workingDir().path();
-        Files.createDirectories(workingDir2.resolve("custom_playbooks"));
-        Files.createDirectories(workingDir2.resolve("vars1"));
-        Files.createDirectories(workingDir2.resolve("vars2"));
-        Files.writeString(workingDir2.resolve("custom_playbooks/site.yml"), """
+    @Test
+    void testCustomFoldersSubfolderPlaybookAndMultipleVarsFolders() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("custom_playbooks"));
+        Files.createDirectories(workingDir.resolve("vars1"));
+        Files.createDirectories(workingDir.resolve("vars2"));
+        Files.writeString(workingDir.resolve("custom_playbooks/site.yml"), """
             - hosts: localhost
               gather_facts: false
               tasks:
@@ -634,11 +635,11 @@ class AnsibleRunnerTest {
                   ansible.builtin.include_vars:
                     dir: vars2
             """);
-        Files.writeString(workingDir2.resolve("vars1/app.yml"), "app_name: payment-service\n");
-        Files.writeString(workingDir2.resolve("vars1/db.yml"), "db_port: 5432\n");
-        Files.writeString(workingDir2.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
+        Files.writeString(workingDir.resolve("vars1/app.yml"), "app_name: payment-service\n");
+        Files.writeString(workingDir.resolve("vars1/db.yml"), "db_port: 5432\n");
+        Files.writeString(workingDir.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
 
-        var scenario2Task = AnsibleRunner.builder()
+        var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
             .project(
                 Project.builder()
@@ -648,31 +649,33 @@ class AnsibleRunnerTest {
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
-        var scenario2Out = scenario2Task.run(scenario2Ctx);
-        assertNotNull(scenario2Out);
-        var scenario2Project = workingDir2.resolve("runner/project");
-        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/site.yml")));
-        assertTrue(Files.exists(scenario2Project.resolve("vars1/app.yml")));
-        assertTrue(Files.exists(scenario2Project.resolve("vars1/db.yml")));
-        assertTrue(Files.exists(scenario2Project.resolve("vars2/region.yml")));
-        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars1/app.yml")));
-        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars1/db.yml")));
-        assertTrue(Files.exists(scenario2Project.resolve("custom_playbooks/vars2/region.yml")));
-        assertFalse(Files.exists(workingDir2.resolve("custom_playbooks/vars1")));
-        assertFalse(Files.exists(workingDir2.resolve("custom_playbooks/vars2")));
+        var out = task.run(ctx);
+        assertNotNull(out);
+        var projectDir = workingDir.resolve("runner/project");
+        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/site.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars1/app.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars2/region.yml")));
+        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/vars1/app.yml")));
+        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/vars1/db.yml")));
+        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/vars2/region.yml")));
+        assertFalse(Files.exists(workingDir.resolve("custom_playbooks/vars1")));
+        assertFalse(Files.exists(workingDir.resolve("custom_playbooks/vars2")));
+    }
 
-        // Scenario 2B: project.source pointing to custom_playbooks/ while multiple other custom folders (vars1/, vars2/) exist in root namespace
-        var scenario2bCtx = newRunContext();
-        var workingDir2b = scenario2bCtx.workingDir().path();
-        Files.createDirectories(workingDir2b.resolve("custom_playbooks"));
-        Files.createDirectories(workingDir2b.resolve("vars1"));
-        Files.createDirectories(workingDir2b.resolve("vars2"));
-        Files.writeString(workingDir2b.resolve("custom_playbooks/site.yml"), "- hosts: localhost\n  tasks: []\n");
-        Files.writeString(workingDir2b.resolve("vars1/app.yml"), "app_name: payment-service\n");
-        Files.writeString(workingDir2b.resolve("vars1/db.yml"), "db_port: 5432\n");
-        Files.writeString(workingDir2b.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
+    @Test
+    void testCustomFoldersProjectSourceWithMultipleVarsFolders() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("custom_playbooks"));
+        Files.createDirectories(workingDir.resolve("vars1"));
+        Files.createDirectories(workingDir.resolve("vars2"));
+        Files.writeString(workingDir.resolve("custom_playbooks/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("vars1/app.yml"), "app_name: payment-service\n");
+        Files.writeString(workingDir.resolve("vars1/db.yml"), "db_port: 5432\n");
+        Files.writeString(workingDir.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
 
-        var scenario2bTask = AnsibleRunner.builder()
+        var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
             .project(
                 Project.builder()
@@ -683,41 +686,128 @@ class AnsibleRunnerTest {
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
 
-        var scenario2bOut = scenario2bTask.run(scenario2bCtx);
-        assertNotNull(scenario2bOut);
-        var scenario2bProject = workingDir2b.resolve("runner/project");
-        assertTrue(Files.exists(scenario2bProject.resolve("site.yml")));
-        assertTrue(Files.exists(scenario2bProject.resolve("vars1/app.yml")));
-        assertTrue(Files.exists(scenario2bProject.resolve("vars1/db.yml")));
-        assertTrue(Files.exists(scenario2bProject.resolve("vars2/region.yml")));
+        var out = task.run(ctx);
+        assertNotNull(out);
+        var projectDir = workingDir.resolve("runner/project");
+        assertTrue(Files.exists(projectDir.resolve("site.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars1/app.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars1/db.yml")));
+        assertTrue(Files.exists(projectDir.resolve("vars2/region.yml")));
+    }
 
-        // Missing subdirectory playbook must fail strictly without falling back to another directory's site.yml
-        var missingCtx = newRunContext();
-        var missingWd = missingCtx.workingDir().path();
-        Files.createDirectories(missingWd.resolve("other"));
-        Files.writeString(missingWd.resolve("other/site.yml"), "- hosts: localhost\n  tasks: []\n");
-        var missingTask = AnsibleRunner.builder()
+    @Test
+    void testCustomFoldersMissingPlaybookPathThrows() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("other"));
+        Files.writeString(workingDir.resolve("other/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
             .project(Project.builder().playbook(Property.ofValue("custom/site.yml")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
-        var missingEx = assertThrows(IllegalArgumentException.class, () -> missingTask.run(missingCtx));
-        assertThat(missingEx.getMessage(), is("Playbook not found: custom/site.yml"));
+        var ex = assertThrows(IllegalArgumentException.class, () -> task.run(ctx));
+        assertThat(ex.getMessage(), is("Playbook not found: custom/site.yml"));
+    }
 
-        // Ambiguous bare playbook name across multiple subdirectories must fail with candidate list
-        var ambiguousCtx = newRunContext();
-        var ambiguousWd = ambiguousCtx.workingDir().path();
-        Files.createDirectories(ambiguousWd.resolve("dir1"));
-        Files.createDirectories(ambiguousWd.resolve("dir2"));
-        Files.writeString(ambiguousWd.resolve("dir1/site.yml"), "- hosts: localhost\n  tasks: []\n");
-        Files.writeString(ambiguousWd.resolve("dir2/site.yml"), "- hosts: localhost\n  tasks: []\n");
-        var ambiguousTask = AnsibleRunner.builder()
+    @Test
+    void testCustomFoldersAmbiguousBarePlaybookThrows() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("dir1"));
+        Files.createDirectories(workingDir.resolve("dir2"));
+        Files.writeString(workingDir.resolve("dir1/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("dir2/site.yml"), "- hosts: localhost\n  tasks: []\n");
+        var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
             .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
             .build();
-        var ambiguousEx = assertThrows(IllegalArgumentException.class, () -> ambiguousTask.run(ambiguousCtx));
-        assertThat(ambiguousEx.getMessage(), is("Playbook not found: site.yml; found several candidates: dir1/site.yml, dir2/site.yml"));
+        var ex = assertThrows(IllegalArgumentException.class, () -> task.run(ctx));
+        assertThat(ex.getMessage(), is("Playbook 'site.yml' matches several files: dir1/site.yml, dir2/site.yml, set project.playbook to one of them"));
+    }
+
+    @Test
+    void testInputFilesPathTraversalBlocked() {
+        var ctx = newRunContext();
+        var task = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .inputFiles(Map.of("runner/../../../tmp/x", "escaped"))
+            .project(Project.builder().inline(Property.ofValue("- hosts: localhost\n  tasks: []\n")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+        assertThrows(IllegalArgumentException.class, () -> task.run(ctx));
+    }
+
+    @Test
+    void testInputFilesWorkingDirRendered() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        var task = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .inputFiles(
+                Map.of(
+                    "vars1/path.yml", "wd_path: \"{{ workingDir }}\"\n",
+                    "site.yml", "- hosts: localhost\n  tasks: []\n"
+                )
+            )
+            .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var out = task.run(ctx);
+        assertNotNull(out);
+        var rendered = Files.readString(workingDir.resolve("runner/project/vars1/path.yml"));
+        assertThat(rendered, containsString(workingDir.toString()));
+    }
+
+    @Test
+    void testOutputFilesKeepsProjectCopyWhenStagedFileEdited() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.writeString(workingDir.resolve("site.yml"), "- hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("report.txt"), "original-root-content\n");
+
+        var runner = MockAnsibleTaskRunner.builder()
+            .projectFileEdits(Map.of("report.txt", "edited-in-project\n"))
+            .build();
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(runner)
+            .outputFiles(Property.ofValue(List.of("report.txt")))
+            .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var out = task.run(ctx);
+        assertNotNull(out);
+        assertNotNull(out.getOutputFiles());
+        assertFalse(out.getOutputFiles().containsKey("report.txt"), "Unedited root copy must be dropped when project copy exists");
+        assertTrue(out.getOutputFiles().containsKey("runner/project/report.txt"), "Edited project copy must be kept");
+        try (var is = ctx.storage().getFile(out.getOutputFiles().get("runner/project/report.txt"))) {
+            var content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(content, is("edited-in-project\n"));
+        }
+    }
+
+    @Test
+    void testPlaybooksDirWinsOverRootPlaybook() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("playbooks"));
+        Files.writeString(workingDir.resolve("site.yml"), "- name: root-playbook\n  hosts: localhost\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("playbooks/site.yml"), "- name: playbooks-dir-playbook\n  hosts: localhost\n  tasks: []\n");
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .project(Project.builder().playbook(Property.ofValue("site.yml")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build())
+            .build();
+
+        var out = task.run(ctx);
+        assertNotNull(out);
+        var stagedContent = Files.readString(workingDir.resolve("runner/project/site.yml"));
+        assertThat(stagedContent, containsString("playbooks-dir-playbook"));
     }
 
     /**
@@ -733,6 +823,8 @@ class AnsibleRunnerTest {
         private String expectedContainerImage = "ghcr.io/ansible/community-ansible-dev-tools:v26.10.1";
 
         private List<Map<String, Object>> customEvents;
+
+        private Map<String, String> projectFileEdits;
 
         @Override
         public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
@@ -841,12 +933,24 @@ class AnsibleRunnerTest {
                 Files.writeString(jobEvents.resolve("2-stats.json"), JacksonMapper.ofJson().writeValueAsString(statsEvent));
             }
 
+            if (projectFileEdits != null) {
+                var projectDir = runnerDir.resolve("project");
+                for (var entry : projectFileEdits.entrySet()) {
+                    var target = projectDir.resolve(entry.getKey());
+                    if (target.getParent() != null) {
+                        Files.createDirectories(target.getParent());
+                    }
+                    Files.deleteIfExists(target);
+                    Files.writeString(target, entry.getValue(), StandardCharsets.UTF_8);
+                }
+            }
+
             return new TaskRunnerResult<>(0, taskCommands.getLogConsumer());
         }
 
         @Override
-        public Map<String, Object> additionalVars(RunContext runContext, TaskCommands taskCommands) {
-            return Collections.emptyMap();
+        protected Map<String, Object> runnerAdditionalVars(RunContext runContext, TaskCommands taskCommands) {
+            return Map.of("workingDir", taskCommands.getWorkingDirectory());
         }
     }
 }
