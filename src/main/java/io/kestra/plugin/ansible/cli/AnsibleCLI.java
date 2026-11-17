@@ -869,11 +869,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
 
                 // a TaskRunner can't be reused: Docker kills itself after each run and stays killed
-                TaskRunner<?> commandRunner = resolveCommandRunner();
+                var commandRunner = resolveCommandRunner();
 
                 CommandsWrapper commandWrapper = baseWrapper
                     .withTaskRunner(commandRunner)
-                    .withDockerOptions(null)
                     .withEnv(envForRun)
                     // user beforeCommands + auto-install run once before the first command; the callback
                     // path exports are re-applied before every command (each runs in its own container)
@@ -888,8 +887,17 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 ScriptOutput out;
                 try {
                     currentRunner.set(commandRunner);
+                    // kill() may have run before currentRunner was published, so it never saw this runner
+                    if (isKilled.get()) {
+                        throw new KilledException();
+                    }
                     out = commandWrapper.run();
                 } catch (RunnableTaskException e) {
+                    // a kill surfaces as the container's exit code (137): report it as a kill, not a failed command
+                    if (isKilled.get()) {
+                        deleteQuietly(runContext, resultsFiles);
+                        throw new KilledException();
+                    }
                     // a non-zero exit still leaves the callback's payload behind: keep going to read it
                     // back so the failed attempt carries its outputs, see the end of run()
                     if (!(e.getOutput() instanceof ScriptOutput failedOutput)) {
@@ -1423,23 +1431,30 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     // TaskRunner keeps its killed flag across runs, so copy it per command. toBuilder() would share that flag.
-    TaskRunner<?> freshTaskRunner(TaskRunner<?> runner) throws Exception {
+    private TaskRunner<?> freshTaskRunner(TaskRunner<?> runner) {
         try {
             return JacksonMapper.ofJson().readValue(
                 JacksonMapper.ofJson().writeValueAsString(runner),
                 TaskRunner.class
             );
         } catch (Exception e) {
-            throw new IllegalStateException("Unable to copy task runner of type '" + runner.getType() + "'", e);
+            throw new IllegalStateException(
+                "Unable to copy the configuration of task runner '" + runner.getType() + "' for a new command, check the `taskRunner` properties",
+                e
+            );
         }
     }
 
     @Override
     public void kill() {
         if (isKilled.compareAndSet(false, true)) {
-            TaskRunner<?> runner = currentRunner.get();
+            var runner = currentRunner.get();
             if (runner != null) {
-                runner.kill();
+                try {
+                    runner.kill();
+                } catch (Exception e) {
+                    // kill() must never throw: the runner may already be finished or torn down
+                }
             }
         }
     }
