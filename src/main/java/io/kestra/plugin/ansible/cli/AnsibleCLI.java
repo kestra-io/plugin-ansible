@@ -29,6 +29,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.slf4j.Logger;
+
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.type.TypeReference;
 
@@ -495,6 +497,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @EqualsAndHashCode.Exclude
     private final transient AtomicBoolean isKilled = new AtomicBoolean(false);
 
+    @Getter(AccessLevel.NONE)
+    @JsonIgnore
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private final transient AtomicReference<Logger> killLogger = new AtomicReference<>();
+
     @Schema(
         title = "Task runner container image",
         description = "Used only by container-based runners; defaults to cytopia/ansible:latest-tools. Supply a lean image with required modules to speed execution. Non-container runners won't include Ansible dependencies, so rely on this image (or provide your own) when you need them."
@@ -724,6 +732,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
     @Override
     public AnsibleOutput run(RunContext runContext) throws Exception {
+        killLogger.set(runContext.logger());
         List<String> outputFilesList = new ArrayList<>(runContext.render(this.outputFiles).asList(String.class));
 
         boolean wantLogFile = runContext.render(this.outputLogFile).as(Boolean.class).orElse(false);
@@ -895,13 +904,11 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 } catch (RunnableTaskException e) {
                     // a kill surfaces as the container's exit code (137): report it as a kill, not a failed command
                     if (isKilled.get()) {
-                        deleteQuietly(runContext, resultsFiles);
                         throw new KilledException();
                     }
                     // a non-zero exit still leaves the callback's payload behind: keep going to read it
                     // back so the failed attempt carries its outputs, see the end of run()
                     if (!(e.getOutput() instanceof ScriptOutput failedOutput)) {
-                        deleteQuietly(runContext, resultsFiles);
                         throw e;
                     }
                     failure = e;
@@ -1423,7 +1430,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     }
 
     // package-private for tests
-    TaskRunner<?> resolveCommandRunner() throws Exception {
+    TaskRunner<?> resolveCommandRunner() {
         if (docker != null && this.taskRunner instanceof Docker) {
             return Docker.from(injectDefaults(docker));
         }
@@ -1454,6 +1461,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     runner.kill();
                 } catch (Exception e) {
                     // kill() must never throw: the runner may already be finished or torn down
+                    var logger = killLogger.get();
+                    if (logger != null) {
+                        logger.warn("Unable to stop the running command's task runner: {}", e.getMessage());
+                    }
                 }
             }
         }
