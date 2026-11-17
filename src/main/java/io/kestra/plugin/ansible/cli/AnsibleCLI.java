@@ -22,14 +22,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
+import io.kestra.core.exceptions.KilledException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Metric;
 import io.kestra.core.models.annotations.Plugin;
@@ -479,6 +483,18 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
     @Valid
     protected TaskRunner<?> taskRunner = Docker.instance();
 
+    @Getter(AccessLevel.NONE)
+    @JsonIgnore
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private final transient AtomicReference<TaskRunner<?>> currentRunner = new AtomicReference<>();
+
+    @Getter(AccessLevel.NONE)
+    @JsonIgnore
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private final transient AtomicBoolean isKilled = new AtomicBoolean(false);
+
     @Schema(
         title = "Task runner container image",
         description = "Used only by container-based runners; defaults to cytopia/ansible:latest-tools. Supply a lean image with required modules to speed execution. Non-container runners won't include Ansible dependencies, so rely on this image (or provide your own) when you need them."
@@ -738,8 +754,6 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         // We want to create input files once and reuse the same working dir for all commands
         CommandsWrapper baseWrapper = new CommandsWrapper(runContext)
             .withLogConsumer(logConsumer)
-            .withDockerOptions(injectDefaults(docker))
-            .withTaskRunner(this.taskRunner)
             .withContainerImage(runContext.render(this.containerImage).as(String.class).orElseThrow())
             .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
             .withEnv(rEnv.isEmpty() ? new HashMap<>() : rEnv)
@@ -801,6 +815,10 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
         try {
             int idx = 0;
             for (String cmd : rCommands) {
+                if (isKilled.get()) {
+                    throw new KilledException();
+                }
+
                 Map<String, String> envForRun = new HashMap<>(rEnv.isEmpty() ? Map.of() : rEnv);
                 envForRun.put(OUTPUTS_MODE_ENV, rOutputsMode);
                 envForRun.put(STREAM_LOGS_ENV, String.valueOf(rStreamLogs));
@@ -850,7 +868,12 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                 }
                 Property<List<String>> mergedBeforeCommands = Property.ofValue(beforeForRun);
 
+                // a TaskRunner can't be reused: Docker kills itself after each run and stays killed
+                TaskRunner<?> commandRunner = resolveCommandRunner();
+
                 CommandsWrapper commandWrapper = baseWrapper
+                    .withTaskRunner(commandRunner)
+                    .withDockerOptions(null)
                     .withEnv(envForRun)
                     // user beforeCommands + auto-install run once before the first command; the callback
                     // path exports are re-applied before every command (each runs in its own container)
@@ -864,6 +887,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
 
                 ScriptOutput out;
                 try {
+                    currentRunner.set(commandRunner);
                     out = commandWrapper.run();
                 } catch (RunnableTaskException e) {
                     // a non-zero exit still leaves the callback's payload behind: keep going to read it
@@ -875,6 +899,7 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
                     failure = e;
                     out = failedOutput;
                 } finally {
+                    currentRunner.set(null);
                     // the install ran in the first command, even a failing one leaves a cacheable tree
                     if (isFirstCommand && dependencyInstall.uploadHash() != null) {
                         saveDependencyCache(runContext, workingDir, dependencyInstall.uploadHash());
@@ -1387,6 +1412,36 @@ public class AnsibleCLI extends Task implements RunnableTask<AnsibleCLI.AnsibleO
             throw new IOException("Bundled resource not found on the classpath: " + path);
         }
         return stream;
+    }
+
+    // package-private for tests
+    TaskRunner<?> resolveCommandRunner() throws Exception {
+        if (docker != null && this.taskRunner instanceof Docker) {
+            return Docker.from(injectDefaults(docker));
+        }
+        return freshTaskRunner(this.taskRunner);
+    }
+
+    // TaskRunner keeps its killed flag across runs, so copy it per command. toBuilder() would share that flag.
+    TaskRunner<?> freshTaskRunner(TaskRunner<?> runner) throws Exception {
+        try {
+            return JacksonMapper.ofJson().readValue(
+                JacksonMapper.ofJson().writeValueAsString(runner),
+                TaskRunner.class
+            );
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to copy task runner of type '" + runner.getType() + "'", e);
+        }
+    }
+
+    @Override
+    public void kill() {
+        if (isKilled.compareAndSet(false, true)) {
+            TaskRunner<?> runner = currentRunner.get();
+            if (runner != null) {
+                runner.kill();
+            }
+        }
     }
 
     private DockerOptions injectDefaults(DockerOptions original) {
