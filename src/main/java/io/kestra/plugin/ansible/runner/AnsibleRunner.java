@@ -158,7 +158,7 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
-            title = "Execute a playbook from a custom subfolder in Namespace Files alongside custom roles, vars folders, and inventory.",
+            title = "Execute an Ansible project from a custom folder in Namespace Files alongside custom roles, vars folders, and inventory.",
             full = true,
             code = """
                 id: run_ansible_custom_folders
@@ -170,7 +170,8 @@ import lombok.experimental.SuperBuilder;
                     namespaceFiles:
                       enabled: true
                     project:
-                      playbook: custom_playbooks/site.yml
+                      source: customer_project
+                      playbook: playbook.yml
                     inventory:
                       file: inventory.ini
                 """
@@ -187,6 +188,7 @@ public class AnsibleRunner extends Task implements
     private static final Pattern PKG_ALLOWLIST = Pattern.compile("^[a-zA-Z0-9_][a-zA-Z0-9_\\-\\.\\=\\>\\<\\~]*$");
     private static final Pattern WHITESPACE_PATTERN = Pattern.compile(".*\\s.*");
     private static final String DEFAULT_PLAYBOOK = "site.yml";
+    private static final List<String> ROLE_ENTRY_DIRS = List.of("tasks", "handlers", "defaults", "meta");
     private static final long DEFAULT_MAX_OUTPUTS_SIZE = 10 * 1024 * 1024L; // 10MB
     private static final long DEFAULT_MAX_LOG_LINES = 10_000L;
     private static final int LOG_BATCH_SIZE = 100;
@@ -865,8 +867,11 @@ public class AnsibleRunner extends Task implements
             throw new IllegalArgumentException("Playbook not found: " + playbookName);
         }
 
+        stageCustomRoles(projectDir, runContext);
+
         if (targetPlaybook.getParent() != null && !targetPlaybook.getParent().equals(projectDir)) {
             bridgePlaybookSubdirectory(projectDir, targetPlaybook.getParent(), runContext);
+            stageCustomRoles(targetPlaybook.getParent(), runContext);
         }
     }
 
@@ -912,6 +917,50 @@ public class AnsibleRunner extends Task implements
                 }
             }
         }
+    }
+
+    private void stageCustomRoles(Path baseDir, RunContext runContext) throws IOException {
+        var rolesDir = baseDir.resolve("roles");
+        List<Path> topDirs;
+        try (var entries = Files.list(baseDir)) {
+            topDirs = entries
+                .filter(Files::isDirectory)
+                .filter(p -> !p.equals(rolesDir))
+                .toList();
+        }
+        for (var topDir : topDirs) {
+            var nestedRolesDir = topDir.resolve("roles");
+            if (Files.isDirectory(nestedRolesDir)) {
+                try (var nestedRoles = Files.list(nestedRolesDir)) {
+                    for (var roleDir : nestedRoles.filter(Files::isDirectory).toList()) {
+                        var dest = rolesDir.resolve(roleDir.getFileName());
+                        if (!Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                            linkOrCopy(roleDir, dest, runContext);
+                        }
+                    }
+                }
+            }
+            try (var children = Files.list(topDir)) {
+                for (var candidate : children.filter(Files::isDirectory).toList()) {
+                    if (isAnsibleRole(candidate)) {
+                        var dest = rolesDir.resolve(candidate.getFileName());
+                        if (!Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                            linkOrCopy(candidate, dest, runContext);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean isAnsibleRole(Path dir) {
+        for (var sub : ROLE_ENTRY_DIRS) {
+            var subDir = dir.resolve(sub);
+            if (Files.isDirectory(subDir) && (Files.isRegularFile(subDir.resolve("main.yml")) || Files.isRegularFile(subDir.resolve("main.yaml")))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void linkOrCopy(Path src, Path dest, RunContext runContext) throws IOException {
