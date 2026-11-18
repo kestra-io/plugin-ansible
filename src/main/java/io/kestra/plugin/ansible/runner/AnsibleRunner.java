@@ -156,6 +156,24 @@ import lombok.experimental.SuperBuilder;
                         app:
                           environment: production
                 """
+        ),
+        @Example(
+            title = "Execute a playbook from a custom subfolder in Namespace Files alongside custom roles, vars folders, and inventory.",
+            full = true,
+            code = """
+                id: run_ansible_custom_folders
+                namespace: company.team
+
+                tasks:
+                  - id: run_ansible
+                    type: io.kestra.plugin.ansible.runner.AnsibleRunner
+                    namespaceFiles:
+                      enabled: true
+                    project:
+                      playbook: custom_playbooks/site.yml
+                    inventory:
+                      file: inventory.ini
+                """
         )
     }
 )
