@@ -1,6 +1,5 @@
 package io.kestra.plugin.ansible.runner;
 
-import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -46,7 +45,6 @@ import io.kestra.core.models.tasks.OutputFilesInterface;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.models.tasks.Task;
-import io.kestra.core.models.tasks.runners.PluginUtilsService;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.FilesService;
@@ -354,10 +352,12 @@ public class AnsibleRunner extends Task implements
 
     @Schema(
         title = "Project playbook configuration",
-        description = "Configures the entrypoint playbook and optional source directory or archive. " +
-            "Workspace entries from `namespaceFiles` and `inputFiles` are staged into `runner/project/` " +
-            "(with `project.source` and `playbooks/` taking precedence over root files), and sibling directories are linked " +
-            "into the playbook's subdirectory when `project.playbook` points to a nested path.",
+        description = """
+            Configures the entrypoint playbook and optional source directory or archive.
+            Workspace entries from `namespaceFiles` and `inputFiles` are staged into `runner/project/`
+            (with `project.source` and `playbooks/` taking precedence over root files), and sibling directories are linked
+            into the playbook's subdirectory when `project.playbook` points to a nested path.
+            """,
         anyOf = { Project.class, String.class }
     )
     @Builder.Default
@@ -607,10 +607,11 @@ public class AnsibleRunner extends Task implements
                     if (key.startsWith("runner/artifacts/")) {
                         continue;
                     }
-                    if (extractedOutputFiles.containsKey("runner/project/" + key)) {
+                    if (key.startsWith("runner/project/") && extractedOutputFiles.containsKey(key.substring("runner/project/".length()))) {
                         continue;
                     }
-                    finalOutputFiles.put(key, entry.getValue());
+                    var value = extractedOutputFiles.getOrDefault("runner/project/" + key, entry.getValue());
+                    finalOutputFiles.put(key, value);
                 }
                 if (finalOutputFiles.isEmpty()) {
                     finalOutputFiles = null;
@@ -807,41 +808,33 @@ public class AnsibleRunner extends Task implements
         stageWorkspaceEntries(workingDir, projectDir, runnerDir, runContext);
 
         var targetPlaybook = secureResolve(projectDir, playbookName);
-        if (!Files.exists(targetPlaybook)) {
-            var playbooksSubDirFile = secureResolve(workingDir.resolve("playbooks"), playbookName);
-            var directWorkingDirFile = secureResolve(workingDir, playbookName);
-            if (Files.isRegularFile(playbooksSubDirFile)) {
-                linkOrCopy(playbooksSubDirFile, targetPlaybook, runContext);
-            } else if (Files.isRegularFile(directWorkingDirFile)) {
-                linkOrCopy(directWorkingDirFile, targetPlaybook, runContext);
-            } else if (!playbookName.contains("/")) {
-                List<Path> candidates;
-                try (var stream = Files.walk(workingDir, 4)) {
-                    candidates = stream
-                        .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equals(playbookName))
-                        .filter(p -> !p.startsWith(runnerDir))
-                        .toList();
-                }
-                if (candidates.size() > 1) {
-                    var relCandidates = candidates.stream()
-                        .map(p -> workingDir.relativize(p).toString().replace('\\', '/'))
-                        .sorted()
-                        .toList();
-                    throw new IllegalArgumentException(
-                        "Playbook '%s' matches several files: %s, set project.playbook to one of them".formatted(
-                            playbookName, String.join(", ", relCandidates)
-                        )
-                    );
-                } else if (candidates.size() == 1) {
-                    var found = candidates.getFirst();
-                    linkOrCopy(found, targetPlaybook, runContext);
-                    if (found.getParent() != null && !found.getParent().equals(workingDir)) {
-                        try (var siblings = Files.list(found.getParent())) {
-                            for (var sibling : siblings.toList()) {
-                                var dest = projectDir.resolve(sibling.getFileName());
-                                if (!Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
-                                    linkOrCopy(sibling, dest, runContext);
-                                }
+        if (!Files.exists(targetPlaybook) && !playbookName.contains("/")) {
+            List<Path> candidates;
+            try (var stream = Files.walk(workingDir, 4)) {
+                candidates = stream
+                    .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equals(playbookName))
+                    .filter(p -> !p.startsWith(runnerDir))
+                    .toList();
+            }
+            if (candidates.size() > 1) {
+                var relCandidates = candidates.stream()
+                    .map(p -> workingDir.relativize(p).toString().replace('\\', '/'))
+                    .sorted()
+                    .toList();
+                throw new IllegalArgumentException(
+                    "Playbook '%s' matches several files: %s, set project.playbook to one of them".formatted(
+                        playbookName, String.join(", ", relCandidates)
+                    )
+                );
+            } else if (candidates.size() == 1) {
+                var found = candidates.getFirst();
+                linkOrCopy(found, targetPlaybook, runContext);
+                if (found.getParent() != null && !found.getParent().equals(workingDir)) {
+                    try (var siblings = Files.list(found.getParent())) {
+                        for (var sibling : siblings.toList()) {
+                            var dest = projectDir.resolve(sibling.getFileName());
+                            if (!Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                                linkOrCopy(sibling, dest, runContext);
                             }
                         }
                     }
@@ -969,7 +962,7 @@ public class AnsibleRunner extends Task implements
         if (targetFile.getParent() != null) {
             Files.createDirectories(targetFile.getParent());
         }
-        Files.writeString(targetFile, sanitized + "\n", StandardCharsets.UTF_8);
+        Files.writeString(targetFile, "%s\n".formatted(sanitized), StandardCharsets.UTF_8);
     }
 
     private void resolveInventory(RunContext runContext, Path workingDir, Path projectDir, Path inventoryDir) throws Exception {
@@ -1325,22 +1318,7 @@ public class AnsibleRunner extends Task implements
             throw new IllegalArgumentException("Path traversal blocked: '" + fileRef + "' escapes the base directory.");
         }
 
-        // 1. Check if defined in task inputFiles in-memory without duplicate on-disk materialization
-        if (this.inputFiles != null) {
-            var runnerVars = this.taskRunner.additionalVars(runContext, new CommandsWrapper(runContext).withTaskRunner(this.taskRunner));
-            var transformed = PluginUtilsService.transformInputFiles(runContext, runnerVars, this.inputFiles);
-            if (transformed != null && transformed.containsKey(fileRef)) {
-                var contentOrUri = transformed.get(fileRef);
-                if (contentOrUri != null) {
-                    if (contentOrUri.startsWith("kestra://")) {
-                        return runContext.storage().getFile(URI.create(contentOrUri));
-                    }
-                    return new ByteArrayInputStream(contentOrUri.getBytes(StandardCharsets.UTF_8));
-                }
-            }
-        }
-
-        // 2. Check relative or absolute path in workingDir
+        // 1. Check relative or absolute path in workingDir
         var workingDir = runContext.workingDir().path();
         var localPath = resolveWithin(workingDir, fileRef);
         if (localPath != null && Files.isRegularFile(localPath)) {

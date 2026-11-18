@@ -782,9 +782,9 @@ class AnsibleRunnerTest {
         var out = task.run(ctx);
         assertNotNull(out);
         assertNotNull(out.getOutputFiles());
-        assertFalse(out.getOutputFiles().containsKey("report.txt"), "Unedited root copy must be dropped when project copy exists");
-        assertTrue(out.getOutputFiles().containsKey("runner/project/report.txt"), "Edited project copy must be kept");
-        try (var is = ctx.storage().getFile(out.getOutputFiles().get("runner/project/report.txt"))) {
+        assertTrue(out.getOutputFiles().containsKey("report.txt"), "Original key must be preserved");
+        assertFalse(out.getOutputFiles().containsKey("runner/project/report.txt"), "Duplicate runner/project/ key must be dropped");
+        try (var is = ctx.storage().getFile(out.getOutputFiles().get("report.txt"))) {
             var content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             assertThat(content, is("edited-in-project\n"));
         }

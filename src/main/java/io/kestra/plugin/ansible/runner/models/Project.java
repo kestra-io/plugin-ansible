@@ -15,8 +15,10 @@ public class Project {
 
     @Schema(
         title = "Project playbook source directory, archive URI, or inline playbook",
-        description = "URI to the Kestra storage file, zip archive, local directory, or inline playbook YAML string. " +
-            "Other workspace entries from `namespaceFiles` and `inputFiles` are also staged into `runner/project/` without overwriting files from `source`."
+        description = """
+            URI to the Kestra storage file, zip archive, local directory, or inline playbook YAML string.
+            Other workspace entries from `namespaceFiles` and `inputFiles` are also staged into `runner/project/` without overwriting files from `source`.
+            """
     )
     private Property<String> source;
 
@@ -34,9 +36,11 @@ public class Project {
 
     @Schema(
         title = "Entrypoint playbook filename",
-        description = "The playbook file or relative path to execute within the project directory (e.g. `site.yml` or `custom_playbooks/site.yml`). " +
-            "For a bare filename, `playbooks/<playbook>` takes precedence over the workspace root, or a unique match in subdirectories is used. " +
-            "When the playbook runs from a subdirectory, sibling directories in `runner/project/` are linked into that subdirectory."
+        description = """
+            The playbook file or relative path to execute within the project directory (e.g. `site.yml` or `custom_playbooks/site.yml`).
+            For a bare filename, `playbooks/<playbook>` takes precedence over the workspace root, or a unique match in subdirectories is used.
+            When the playbook runs from a subdirectory, sibling directories in `runner/project/` are linked into that subdirectory.
+            """
     )
     @Builder.Default
     private Property<String> playbook = Property.ofValue("site.yml");
