@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import io.kestra.core.exceptions.KilledException;
+import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.property.Property;
@@ -26,6 +27,7 @@ import io.kestra.core.tenant.TenantService;
 import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.scripts.exec.scripts.models.DockerOptions;
+import io.kestra.plugin.scripts.exec.scripts.models.ScriptOutput;
 import io.kestra.plugin.scripts.runner.docker.Docker;
 
 import jakarta.inject.Inject;
@@ -192,5 +194,43 @@ class AnsibleCLIMultiCommandRunnerTest {
             is(false)
         );
         receive.blockLast();
+    }
+
+    @Test
+    void run_withFailFast_stopsAtFailingBeforeCommand() throws Exception {
+        var task = base()
+            .taskRunner(Docker.builder().type(Docker.class.getName()).image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .failFast(Property.ofValue(true))
+            .beforeCommands(Property.ofValue(List.of("false")))
+            .inputFiles(Map.of("first.yml", playbook("First play")))
+            .commands(Property.ofValue(List.of("ansible-playbook first.yml")))
+            .build();
+
+        var failure = assertThrows(RunnableTaskException.class, () -> task.run(TestsUtils.mockRunContext(runContextFactory, task, Map.of())));
+
+        assertThat(failure.getOutput(), instanceOf(ScriptOutput.class));
+        assertThat(((ScriptOutput) failure.getOutput()).getExitCode(), is(1));
+    }
+
+    @Test
+    void run_withoutFailFast_keepsRunningAfterFailingBeforeCommand() throws Exception {
+        var task = base()
+            .taskRunner(Docker.builder().type(Docker.class.getName()).image(ANSIBLE_IMAGE).entryPoint(Collections.emptyList()).build())
+            .beforeCommands(Property.ofValue(List.of("false")))
+            .inputFiles(Map.of("first.yml", playbook("First play")))
+            .commands(Property.ofValue(List.of("ansible-playbook first.yml")))
+            .build();
+
+        var output = task.run(TestsUtils.mockRunContext(runContextFactory, task, Map.of()));
+
+        assertThat(output.getExitCode(), is(0));
+    }
+
+    // A field read through AbstractExecScript raises NoSuchFieldError where the parent dropped it
+    @Test
+    void ownsFieldsReadDirectly() throws Exception {
+        for (var name : List.of("docker", "taskRunner", "containerImage", "failFast", "commands")) {
+            assertThat(name, AnsibleCLI.class.getDeclaredField(name), notNullValue());
+        }
     }
 }
