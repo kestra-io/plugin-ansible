@@ -112,7 +112,7 @@ class AnsibleRunnerTest {
                     .inline(Property.ofValue("router-1 ansible_host=192.168.1.1\nrouter-2 ansible_host=192.168.1.2\n"))
                     .build()
             )
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVars(Property.ofValue(Map.of("strict_mode", true, "count", 42)))
                     .envVars(Property.ofValue(Map.of("ANSIBLE_HOST_KEY_CHECKING", "False")))
@@ -519,7 +519,7 @@ class AnsibleRunnerTest {
             .taskRunner(MockAnsibleTaskRunner.builder().customEvents(rescueEvents).build())
             .project(Project.builder().source(Property.ofValue("- hosts: all\n  tasks: []\n")).build())
             .inventory(Inventory.builder().inline(Property.ofValue("router-1 ansible_connection=local\nrouter-2 ansible_connection=local\n")).build())
-            .env(RunnerEnv.builder().passwords(Property.ofValue(Map.of("pin", numericSecret))).build())
+            .runnerEnv(RunnerEnv.builder().passwords(Property.ofValue(Map.of("pin", numericSecret))).build())
             .maxLogLines(Property.ofValue(1L))
             .saveArtifacts(Property.ofValue(false))
             .failOnErrors(Property.ofValue(false))
@@ -826,6 +826,74 @@ class AnsibleRunnerTest {
         assertNotNull(out);
         var stagedContent = Files.readString(workingDir.resolve("runner/project/site.yml"));
         assertThat(stagedContent, containsString("playbooks-dir-playbook"));
+    }
+
+    @Test
+    void inheritedEnvReachesRunnerContainer() throws Exception {
+        var runContext = newRunContext();
+        var capturingRunner = CapturingTaskRunner.builder().build();
+
+        var task = capturedTask(capturingRunner).env(Property.ofValue(Map.of("MY_CONTAINER_VAR", "hello"))).build();
+        task.run(runContext);
+
+        assertThat(capturingRunner.capturedEnv, hasEntry("MY_CONTAINER_VAR", "hello"));
+    }
+
+    @Test
+    void failFastTrue_prependsSetE_andRunnerCommandDisablesItAgain() throws Exception {
+        var capturingRunner = CapturingTaskRunner.builder().build();
+
+        capturedTask(capturingRunner).failFast(Property.ofValue(true)).build().run(newRunContext());
+
+        var script = String.join("\n", capturingRunner.capturedCommands);
+        assertThat(script, containsString("set -e"));
+        assertThat(script.indexOf("set -e"), lessThan(script.indexOf("false\n")));
+        assertThat(script, containsString("set +e; ansible-runner run"));
+    }
+
+    @Test
+    void failFastDefaultsToFalse_noSetE() throws Exception {
+        var capturingRunner = CapturingTaskRunner.builder().build();
+
+        capturedTask(capturingRunner).build().run(newRunContext());
+
+        assertThat(String.join("\n", capturingRunner.capturedCommands), not(containsString("set -e")));
+    }
+
+    @Test
+    void legacyNestedEnv_isRejectedWithPointerToRunnerEnv() {
+        var task = capturedTask(CapturingTaskRunner.builder().build())
+            .env(Property.ofExpression("{\"envVars\": {\"A\": \"b\"}}"))
+            .build();
+
+        var e = assertThrows(IllegalArgumentException.class, () -> task.run(newRunContext()));
+
+        assertThat(e.getMessage(), containsString("runnerEnv"));
+    }
+
+    private static AnsibleRunner.AnsibleRunnerBuilder<?, ?> capturedTask(CapturingTaskRunner runner) {
+        return AnsibleRunner.builder()
+            .taskRunner(runner)
+            .beforeCommands(Property.ofValue(List.of("false")))
+            .project(Project.builder().inline(Property.ofValue("- hosts: localhost\n  tasks:\n    - debug: msg=ok\n")).build())
+            .inventory(Inventory.builder().inline(Property.ofValue("localhost ansible_connection=local\n")).build());
+    }
+
+    @SuperBuilder
+    @NoArgsConstructor
+    public static class CapturingTaskRunner extends MockAnsibleTaskRunner {
+        @Builder.Default
+        protected String type = CapturingTaskRunner.class.getName();
+
+        private transient Map<String, String> capturedEnv;
+        private transient List<String> capturedCommands;
+
+        @Override
+        public TaskRunnerResult<TaskRunnerDetailResult> run(RunContext runContext, TaskCommands taskCommands, List<String> filesToDownload) throws Exception {
+            this.capturedEnv = taskCommands.getEnv();
+            this.capturedCommands = runContext.render(taskCommands.getCommands()).asList(String.class);
+            return super.run(runContext, taskCommands, filesToDownload);
+        }
     }
 
     /**

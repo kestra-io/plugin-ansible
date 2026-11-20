@@ -804,7 +804,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVars(Property.ofValue(vars))
                     .build()
@@ -851,7 +851,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .envVars(Property.ofValue(envs))
                     .build()
@@ -892,7 +892,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .passwords(Property.ofExpression("{\"vault_password\": \"{{ secretVault }}\"}"))
                     .build()
@@ -935,7 +935,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         AnsibleRunner task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .sshKey(Property.ofValue(key))
                     .build()
@@ -1676,7 +1676,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("base.json", "override.yml")))
                     .extraVars(
@@ -1734,7 +1734,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of(storageUri.toString())))
                     .build()
@@ -1781,7 +1781,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("nsfile://company.network/extra.json")))
                     .build()
@@ -1839,7 +1839,7 @@ public class AnsibleRunnerComprehensiveTest {
             .outputLogFile(Property.ofValue(true))
             .streamLogs(Property.ofValue(true))
             .logsMode(Property.ofValue(LogsMode.FULL))
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("secrets.json")))
                     .build()
@@ -1884,7 +1884,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("non_existent_vars.yml")))
                     .build()
@@ -1915,7 +1915,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("invalid.yml")))
                     .build()
@@ -1943,7 +1943,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("../../../../etc/passwd")))
                     .build()
@@ -1973,7 +1973,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(ComprehensiveMockRunner.builder().build())
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("link.yml")))
                     .build()
@@ -2004,7 +2004,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("nsfile://company.network/../../etc/passwd")))
                     .build()
@@ -2033,7 +2033,7 @@ public class AnsibleRunnerComprehensiveTest {
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
             .inputFiles(Map.of("injected_vars.yml", "app_env: staging\nworkers: 8\n"))
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("injected_vars.yml")))
                     .build()
@@ -2071,7 +2071,7 @@ public class AnsibleRunnerComprehensiveTest {
 
         var task = AnsibleRunner.builder()
             .taskRunner(runner)
-            .env(
+            .runnerEnv(
                 RunnerEnv.builder()
                     .extraVarsFiles(Property.ofValue(List.of("malformed.yml")))
                     .build()

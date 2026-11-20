@@ -39,13 +39,8 @@ import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.property.URIFetcher;
-import io.kestra.core.models.tasks.InputFilesInterface;
-import io.kestra.core.models.tasks.NamespaceFiles;
-import io.kestra.core.models.tasks.NamespaceFilesInterface;
-import io.kestra.core.models.tasks.OutputFilesInterface;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.RunnableTaskException;
-import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.runners.TaskRunner;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.FilesService;
@@ -60,7 +55,7 @@ import io.kestra.plugin.ansible.runner.models.Project;
 import io.kestra.plugin.ansible.runner.models.RunnerEnv;
 import io.kestra.plugin.ansible.runner.models.RunnerSummary;
 import io.kestra.plugin.ansible.runner.utils.ArchiveUtils;
-import io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper;
+import io.kestra.plugin.scripts.exec.AbstractExecScript;
 import io.kestra.plugin.scripts.runner.docker.Docker;
 
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -81,7 +76,11 @@ import lombok.experimental.SuperBuilder;
 @NoArgsConstructor
 @Schema(
     title = "Execute Ansible playbooks using Ansible Runner",
-    description = "Provides enterprise-grade Ansible orchestration with containerized Execution Environments, structured telemetry, and zero UI log bloat."
+    description = """
+        Provides enterprise-grade Ansible orchestration with containerized Execution Environments, structured telemetry, and zero UI log bloat.
+        The inherited `interpreter`, `warningOnStdErr`, `outputDirectory` and `runner` properties are accepted but ignored: commands always run with `/bin/bash -c`, stderr goes through the runner log consumer, no output directory is used and `taskRunner` is the only runner setting honored.
+        The deprecated `docker` option (only present on Kestra 1.3.x) is ignored too: use `taskRunner` instead.
+        """
 )
 @Plugin(
     examples = {
@@ -148,7 +147,7 @@ import lombok.experimental.SuperBuilder;
                     inventory:
                       content: |
                         localhost ansible_connection=local
-                    env:
+                    runnerEnv:
                       extraVarsFiles:
                         - "company.network/vars/base.json"
                         - "vars/prod.yml"
@@ -178,11 +177,7 @@ import lombok.experimental.SuperBuilder;
         )
     }
 )
-public class AnsibleRunner extends Task implements
-    RunnableTask<AnsibleRunner.Output>,
-    NamespaceFilesInterface,
-    InputFilesInterface,
-    OutputFilesInterface {
+public class AnsibleRunner extends AbstractExecScript implements RunnableTask<AnsibleRunner.Output> {
 
     private static final String DEFAULT_CONTAINER_IMAGE = "ghcr.io/ansible/community-ansible-dev-tools:v26.10.1";
     private static final Pattern PKG_ALLOWLIST = Pattern.compile("^[a-zA-Z0-9_][a-zA-Z0-9_\\-\\.\\=\\>\\<\\~]*$");
@@ -192,6 +187,7 @@ public class AnsibleRunner extends Task implements
     private static final long DEFAULT_MAX_OUTPUTS_SIZE = 10 * 1024 * 1024L; // 10MB
     private static final long DEFAULT_MAX_LOG_LINES = 10_000L;
     private static final int LOG_BATCH_SIZE = 100;
+    private static final Set<String> LEGACY_ENV_KEYS = Set.of("envVars", "passwords", "sshKey", "extraVars", "extraVarsFiles");
 
     @Schema(
         title = "Execution Environment container image",
@@ -215,25 +211,15 @@ public class AnsibleRunner extends Task implements
     protected TaskRunner<?> taskRunner = Docker.instance();
 
     @Schema(
-        title = "Namespace files configuration",
-        description = "Enables loading files from Kestra namespace storage directly into the execution environment."
+        title = "Fail fast on the first failing command",
+        description = """
+            If true, `set -e` is prepended to `beforeCommands`, so the first failing line stops the run.
+            Defaults to false, so a failing `beforeCommands` line does not stop the run.
+            """
     )
+    @Builder.Default
     @PluginProperty(group = "execution")
-    private NamespaceFiles namespaceFiles;
-
-    @Schema(
-        title = "Input files to inject into the working directory",
-        description = "Map of additional files to create in the container environment before execution."
-    )
-    @PluginProperty(group = "execution")
-    private Object inputFiles;
-
-    @Schema(
-        title = "Output files to capture and store in internal storage",
-        description = "List of glob patterns for files to extract from the execution directory and make available as task outputs."
-    )
-    @PluginProperty(group = "execution")
-    private Property<List<String>> outputFiles;
+    protected Property<Boolean> failFast = Property.ofValue(false);
 
     @Schema(
         title = "Auto-install Ansible Galaxy collections and roles",
@@ -264,13 +250,6 @@ public class AnsibleRunner extends Task implements
     )
     @PluginProperty(group = "advanced")
     private Property<List<String>> pythonDependencies;
-
-    @Schema(
-        title = "Commands to execute before the runner process",
-        description = "Custom shell commands to run inside the container prior to ansible-runner execution."
-    )
-    @PluginProperty(group = "execution")
-    private Property<List<String>> beforeCommands;
 
     @Schema(
         title = "Execution log verbosity mode",
@@ -392,8 +371,15 @@ public class AnsibleRunner extends Task implements
     )
     private Inventory inventory;
 
-    @Schema(title = "Environment and credentials configuration")
-    private RunnerEnv env;
+    @Schema(
+        title = "Environment and credentials configuration",
+        description = """
+            Ansible runner environment: env vars, passwords, SSH key and extra vars.
+            Renamed from `env`, which is now the inherited map of container environment variables.
+            """
+    )
+    @PluginProperty(group = "execution")
+    private RunnerEnv runnerEnv;
 
     @Schema(title = "Execution timeout (maps to job_timeout)")
     private Property<Duration> timeout;
@@ -409,19 +395,15 @@ public class AnsibleRunner extends Task implements
     @Builder.Default
     private Property<Boolean> failOnErrors = Property.ofValue(true);
 
-    @Override
-    public NamespaceFiles getNamespaceFiles() {
-        return this.namespaceFiles;
-    }
-
-    @Override
-    public Object getInputFiles() {
-        return this.inputFiles;
-    }
-
-    @Override
-    public Property<List<String>> getOutputFiles() {
-        return this.outputFiles;
+    // `env` used to hold the runner options, now renamed `runnerEnv`; fail with a pointer instead of a Jackson error
+    private void rejectLegacyEnv(RunContext runContext) throws Exception {
+        var rawEnv = runContext.render(this.getEnv()).asMap(String.class, Object.class);
+        if (rawEnv.keySet().stream().anyMatch(LEGACY_ENV_KEYS::contains)) {
+            throw new IllegalArgumentException(
+                "AnsibleRunner: 'env' is now a map of container environment variables and the nested options were renamed 'runnerEnv'; "
+                    + "move envVars, passwords, sshKey, extraVars and extraVarsFiles under 'runnerEnv'"
+            );
+        }
     }
 
     @Override
@@ -433,6 +415,7 @@ public class AnsibleRunner extends Task implements
 
     @Override
     public Output run(RunContext runContext) throws Exception {
+        rejectLegacyEnv(runContext);
         var workingDir = runContext.workingDir().path();
         AnsibleRunnerLogConsumer logConsumer = null;
         var logSpoolFile = Files.createTempFile("ansible-runner-log-tmp-", ".log");
@@ -449,12 +432,12 @@ public class AnsibleRunner extends Task implements
             Files.createDirectories(artifactsBaseDir);
 
             // Load namespace and input files into workingDir once before resolving the project and inventory.
-            var commandsWrapper = new CommandsWrapper(runContext).withTaskRunner(this.taskRunner);
-            if (this.namespaceFiles != null && !Boolean.FALSE.equals(runContext.render(this.namespaceFiles.getEnabled()).as(Boolean.class).orElse(true))) {
-                NamespaceFilesUtils.loadNamespaceFiles(runContext, this.namespaceFiles);
+            var commandsWrapper = this.commands(runContext);
+            if (this.getNamespaceFiles() != null && !Boolean.FALSE.equals(runContext.render(this.getNamespaceFiles().getEnabled()).as(Boolean.class).orElse(true))) {
+                NamespaceFilesUtils.loadNamespaceFiles(runContext, this.getNamespaceFiles());
             }
-            if (this.inputFiles != null) {
-                FilesService.inputFiles(runContext, this.taskRunner.additionalVars(runContext, commandsWrapper), this.inputFiles);
+            if (this.getInputFiles() != null) {
+                FilesService.inputFiles(runContext, this.taskRunner.additionalVars(runContext, commandsWrapper), this.getInputFiles());
             }
 
             var resolvedPlaybook = resolvePlaybook(runContext);
@@ -470,8 +453,9 @@ public class AnsibleRunner extends Task implements
             // Playbook-level failures (rc=2 failed hosts, rc=4 unreachable) must not make the task runner
             // throw before telemetry is parsed. If ansible-runner produced an rc artifact, exit 0 and let
             // failOnErrors decide; otherwise (runner never started) propagate the real exit code.
+            // set +e: failFast's `set -e` must not exit before the rc handling below
             var runnerCommand = List.of(
-                "ansible-runner run ./runner -p '" + resolvedPlaybook.replace("'", "'\\''") + "' --ident " + ident
+                "set +e; ansible-runner run ./runner -p '" + resolvedPlaybook.replace("'", "'\\''") + "' --ident " + ident
                     + "; __rc=$?; if [ -f ./runner/artifacts/" + ident + "/rc ]; then if [ $__rc -eq 2 ] || [ $__rc -eq 4 ]; then exit 0; fi; fi; exit $__rc"
             );
 
@@ -490,9 +474,9 @@ public class AnsibleRunner extends Task implements
             }
 
             var secretMasker = new SecretMasker();
-            if (this.env != null) {
-                if (this.env.getSshKey() != null) {
-                    var rSshKey = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
+            if (this.runnerEnv != null) {
+                if (this.runnerEnv.getSshKey() != null) {
+                    var rSshKey = runContext.render(this.runnerEnv.getSshKey()).as(String.class).orElse(null);
                     if (rSshKey != null && !rSshKey.isBlank()) {
                         secretMasker.add(rSshKey);
                     }
@@ -507,8 +491,8 @@ public class AnsibleRunner extends Task implements
                 if (mergedExtraVars != null && !mergedExtraVars.isEmpty()) {
                     secretMasker.addSensitiveValues(mergedExtraVars);
                 }
-                if (this.env.getEnvVars() != null) {
-                    var rEnvVars = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
+                if (this.runnerEnv.getEnvVars() != null) {
+                    var rEnvVars = runContext.render(this.runnerEnv.getEnvVars()).asMap(String.class, String.class);
                     secretMasker.addSensitiveValues(rEnvVars);
                 }
             }
@@ -523,10 +507,17 @@ public class AnsibleRunner extends Task implements
                 secretMasker
             );
 
+            // commands() already sets env, taskRunner, inputFiles, timeout, targetOS and failFast; only real overrides follow
             commandsWrapper = commandsWrapper
+                .withBeforeCommandsWithOptions(true)
+                // the wrapper must keep this.taskRunner, not build a Docker runner from the deprecated docker option
+                .withDockerOptions(null)
                 .withLogConsumer(logConsumer)
                 .withContainerImage(rImage)
                 .withInterpreter(Property.ofValue(List.of("/bin/bash", "-c")))
+                .withNamespaceFiles(null)
+                .withInputFiles(null)
+                .withEnableOutputDirectory(null)
                 .withCommands(Property.ofValue(runnerCommand));
 
             var preCommands = buildPreCommands(runContext, workingDir);
@@ -535,8 +526,8 @@ public class AnsibleRunner extends Task implements
             }
 
             var outputPatterns = new ArrayList<String>();
-            if (this.outputFiles != null) {
-                var rOutputFiles = runContext.render(this.outputFiles).asList(String.class);
+            if (this.getOutputFiles() != null) {
+                var rOutputFiles = runContext.render(this.getOutputFiles()).asList(String.class);
                 for (var pattern : rOutputFiles) {
                     outputPatterns.add(pattern);
                     if (!pattern.startsWith("/") && !pattern.startsWith("**/") && !pattern.startsWith("runner/")) {
@@ -621,7 +612,7 @@ public class AnsibleRunner extends Task implements
             }
 
             Map<String, URI> finalOutputFiles = null;
-            if (this.outputFiles != null && extractedOutputFiles != null && !extractedOutputFiles.isEmpty()) {
+            if (this.getOutputFiles() != null && extractedOutputFiles != null && !extractedOutputFiles.isEmpty()) {
                 finalOutputFiles = new HashMap<>();
                 for (var entry : extractedOutputFiles.entrySet()) {
                     var key = entry.getKey();
@@ -706,8 +697,8 @@ public class AnsibleRunner extends Task implements
     private List<String> buildPreCommands(RunContext runContext, Path workingDir) throws IllegalVariableEvaluationException {
         var cmds = new ArrayList<String>();
 
-        if (this.beforeCommands != null) {
-            cmds.addAll(runContext.render(this.beforeCommands).asList(String.class));
+        if (this.getBeforeCommands() != null) {
+            cmds.addAll(runContext.render(this.getBeforeCommands()).asList(String.class));
         }
 
         var rAutoInstallGalaxy = runContext.render(this.autoInstallGalaxyRequirements).as(Boolean.class).orElse(true);
@@ -1226,10 +1217,10 @@ public class AnsibleRunner extends Task implements
     }
 
     private Map<String, String> renderPasswords(RunContext runContext) throws IllegalVariableEvaluationException {
-        if (this.env == null || this.env.getPasswords() == null) {
+        if (this.runnerEnv == null || this.runnerEnv.getPasswords() == null) {
             return Map.of();
         }
-        var rPasswords = runContext.render(this.env.getPasswords()).asMap(String.class, String.class);
+        var rPasswords = runContext.render(this.runnerEnv.getPasswords()).asMap(String.class, String.class);
         if (rPasswords == null || rPasswords.isEmpty()) {
             return Map.of();
         }
@@ -1286,9 +1277,9 @@ public class AnsibleRunner extends Task implements
         }
 
         var mergedExtraVars = new HashMap<String, Object>();
-        if (this.env != null) {
-            if (this.env.getExtraVarsFiles() != null) {
-                var rExtraVarsFiles = runContext.render(this.env.getExtraVarsFiles()).asList(String.class);
+        if (this.runnerEnv != null) {
+            if (this.runnerEnv.getExtraVarsFiles() != null) {
+                var rExtraVarsFiles = runContext.render(this.runnerEnv.getExtraVarsFiles()).asList(String.class);
                 if (rExtraVarsFiles != null && !rExtraVarsFiles.isEmpty()) {
                     for (var fileRef : rExtraVarsFiles) {
                         if (fileRef != null && !fileRef.isBlank()) {
@@ -1300,8 +1291,8 @@ public class AnsibleRunner extends Task implements
                     }
                 }
             }
-            if (this.env.getExtraVars() != null) {
-                var rExtraVarsMap = runContext.render(this.env.getExtraVars()).asMap(String.class, Object.class);
+            if (this.runnerEnv.getExtraVars() != null) {
+                var rExtraVarsMap = runContext.render(this.runnerEnv.getExtraVars()).asMap(String.class, Object.class);
                 if (rExtraVarsMap != null && !rExtraVarsMap.isEmpty()) {
                     deepMerge(mergedExtraVars, rExtraVarsMap);
                 }
@@ -1311,8 +1302,8 @@ public class AnsibleRunner extends Task implements
             Files.writeString(envDir.resolve("extravars"), JacksonMapper.ofJson().writeValueAsString(mergedExtraVars), StandardCharsets.UTF_8);
         }
 
-        if (this.env != null && this.env.getEnvVars() != null) {
-            var rEnvVarsMap = runContext.render(this.env.getEnvVars()).asMap(String.class, String.class);
+        if (this.runnerEnv != null && this.runnerEnv.getEnvVars() != null) {
+            var rEnvVarsMap = runContext.render(this.runnerEnv.getEnvVars()).asMap(String.class, String.class);
             if (rEnvVarsMap != null && !rEnvVarsMap.isEmpty()) {
                 Files.writeString(envDir.resolve("envvars"), JacksonMapper.ofJson().writeValueAsString(rEnvVarsMap), StandardCharsets.UTF_8);
             }
@@ -1324,8 +1315,8 @@ public class AnsibleRunner extends Task implements
 
         // Written with secure 0600 POSIX permissions to protect private key
         String rSshKeyValue = null;
-        if (this.env != null && this.env.getSshKey() != null) {
-            rSshKeyValue = runContext.render(this.env.getSshKey()).as(String.class).orElse(null);
+        if (this.runnerEnv != null && this.runnerEnv.getSshKey() != null) {
+            rSshKeyValue = runContext.render(this.runnerEnv.getSshKey()).as(String.class).orElse(null);
         }
 
         if (rSshKeyValue != null && !rSshKeyValue.isBlank()) {
