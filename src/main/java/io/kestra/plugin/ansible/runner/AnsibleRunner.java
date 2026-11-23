@@ -157,7 +157,7 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
-            title = "Execute an Ansible project from a custom folder in Namespace Files alongside custom roles, vars folders, and inventory.",
+            title = "Execute an Ansible project from a custom folder in Namespace Files with vars folders and inventory.",
             full = true,
             code = """
                 id: run_ansible_custom_folders
@@ -506,7 +506,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
                 secretMasker
             );
 
-            // commands() already sets env, taskRunner, timeout, targetOS and failFast; only real overrides follow
+            // commands() already sets env, taskRunner, timeout, targetOS and failFast, only real overrides follow
             commandsWrapper = commandsWrapper
                 .withBeforeCommandsWithOptions(true)
                 // the wrapper must keep this.taskRunner, not build a Docker runner from the deprecated docker option
@@ -836,7 +836,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
             } else if (candidates.size() == 1) {
                 var found = candidates.getFirst();
                 linkOrCopy(found, targetPlaybook, runContext);
-                if (found.getParent() != null && !found.getParent().equals(workingDir)) {
+                if (!found.getParent().equals(workingDir)) {
                     try (var siblings = Files.list(found.getParent())) {
                         for (var sibling : siblings.toList()) {
                             var dest = projectDir.resolve(sibling.getFileName());
@@ -853,7 +853,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
             throw new IllegalArgumentException("Playbook not found: " + playbookName);
         }
 
-        if (targetPlaybook.getParent() != null && !targetPlaybook.getParent().equals(projectDir)) {
+        if (!targetPlaybook.getParent().equals(projectDir)) {
             bridgePlaybookSubdirectory(projectDir, targetPlaybook.getParent(), runContext);
         }
     }
@@ -1096,7 +1096,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
                     Files.writeString(inventoryDir.resolve("hosts"), rInvFile.trim() + "\n", StandardCharsets.UTF_8);
                     return;
                 }
-                throw new IllegalArgumentException("Inventory file not found: " + rInvFile);
+                throw new IllegalArgumentException("Inventory file %s was not found in the working or project directory. Upload it or fix the path.".formatted(rInvFile));
             }
             return;
         }
@@ -1324,7 +1324,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
             return Files.newInputStream(localPath);
         }
 
-        // 3. Check in runner/project directory
+        // 2. Check in runner/project directory
         var projectPath = resolveWithin(workingDir.resolve("runner/project"), fileRef);
         if (projectPath != null && Files.isRegularFile(projectPath)) {
             return Files.newInputStream(projectPath);
@@ -1332,7 +1332,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
 
         var suppressedExceptions = new ArrayList<Throwable>();
 
-        // 4. Check namespace shorthand (e.g. "company.network/extra.json")
+        // 3. Check namespace shorthand (e.g. "company.network/extra.json")
         if (fileRef.contains("/")) {
             var firstSlash = fileRef.indexOf('/');
             var namespace = fileRef.substring(0, firstSlash);
@@ -1354,7 +1354,7 @@ public class AnsibleRunner extends AbstractExecScript implements RunnableTask<An
             }
         }
 
-        // 5. Check current namespace shorthand (e.g. "extra.json")
+        // 4. Check current namespace shorthand (e.g. "extra.json")
         var normalizedCurrent = Path.of(fileRef).normalize();
         if (normalizedCurrent.startsWith("..") || fileRef.contains("..")) {
             throw new IllegalArgumentException("Path traversal blocked in namespace path: '" + fileRef + "' escapes the namespace root.");

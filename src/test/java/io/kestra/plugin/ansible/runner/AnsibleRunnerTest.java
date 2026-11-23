@@ -696,6 +696,29 @@ class AnsibleRunnerTest {
     }
 
     @Test
+    void testInventoryFileResolvedFromProjectSource() throws Exception {
+        var ctx = newRunContext();
+        var workingDir = ctx.workingDir().path();
+        Files.createDirectories(workingDir.resolve("customer_project"));
+        Files.writeString(workingDir.resolve("customer_project/site.yml"), "- hosts: all\n  tasks: []\n");
+        Files.writeString(workingDir.resolve("customer_project/inventory.ini"), "[local]\nlocalhost ansible_connection=local\n");
+
+        var task = AnsibleRunner.builder()
+            .taskRunner(MockAnsibleTaskRunner.builder().build())
+            .project(
+                Project.builder()
+                    .source(Property.ofValue("customer_project"))
+                    .playbook(Property.ofValue("site.yml"))
+                    .build()
+            )
+            .inventory(Inventory.builder().file(Property.ofValue("inventory.ini")).build())
+            .build();
+
+        assertNotNull(task.run(ctx));
+        assertThat(Files.readString(workingDir.resolve("runner/inventory/hosts")), is("[local]\nlocalhost ansible_connection=local\n"));
+    }
+
+    @Test
     void testCustomFoldersMissingPlaybookPathThrows() throws Exception {
         var ctx = newRunContext();
         var workingDir = ctx.workingDir().path();
@@ -1005,9 +1028,7 @@ class AnsibleRunnerTest {
                 var projectDir = runnerDir.resolve("project");
                 for (var entry : projectFileEdits.entrySet()) {
                     var target = projectDir.resolve(entry.getKey());
-                    if (target.getParent() != null) {
-                        Files.createDirectories(target.getParent());
-                    }
+                    Files.createDirectories(target.getParent());
                     Files.deleteIfExists(target);
                     Files.writeString(target, entry.getValue(), StandardCharsets.UTF_8);
                 }
