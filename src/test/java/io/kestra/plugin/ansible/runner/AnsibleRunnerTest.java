@@ -624,9 +624,6 @@ class AnsibleRunnerTest {
         Files.createDirectories(workingDir.resolve("custom_playbooks"));
         Files.createDirectories(workingDir.resolve("vars1"));
         Files.createDirectories(workingDir.resolve("vars2"));
-        Files.createDirectories(workingDir.resolve("roles/webserver/tasks"));
-        Files.createDirectories(workingDir.resolve("custom_roles/db_role/tasks"));
-        Files.createDirectories(workingDir.resolve("custom_playbooks/custom_roles/app_role/tasks"));
         Files.writeString(workingDir.resolve("custom_playbooks/site.yml"), """
             - hosts: localhost
               gather_facts: false
@@ -641,9 +638,6 @@ class AnsibleRunnerTest {
         Files.writeString(workingDir.resolve("vars1/app.yml"), "app_name: payment-service\n");
         Files.writeString(workingDir.resolve("vars1/db.yml"), "db_port: 5432\n");
         Files.writeString(workingDir.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
-        Files.writeString(workingDir.resolve("roles/webserver/tasks/main.yml"), "- ansible.builtin.debug:\n    msg: role\n");
-        Files.writeString(workingDir.resolve("custom_roles/db_role/tasks/main.yml"), "- ansible.builtin.debug:\n    msg: db_role\n");
-        Files.writeString(workingDir.resolve("custom_playbooks/custom_roles/app_role/tasks/main.yml"), "- ansible.builtin.debug:\n    msg: app_role\n");
 
         var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
@@ -662,17 +656,11 @@ class AnsibleRunnerTest {
         assertTrue(Files.exists(projectDir.resolve("vars1/app.yml")));
         assertTrue(Files.exists(projectDir.resolve("vars1/db.yml")));
         assertTrue(Files.exists(projectDir.resolve("vars2/region.yml")));
-        assertTrue(Files.exists(projectDir.resolve("roles/webserver/tasks/main.yml")));
-        assertTrue(Files.exists(projectDir.resolve("roles/db_role/tasks/main.yml")));
         assertTrue(Files.exists(projectDir.resolve("custom_playbooks/vars1/app.yml")));
         assertTrue(Files.exists(projectDir.resolve("custom_playbooks/vars1/db.yml")));
         assertTrue(Files.exists(projectDir.resolve("custom_playbooks/vars2/region.yml")));
-        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/roles/webserver/tasks/main.yml")));
-        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/roles/db_role/tasks/main.yml")));
-        assertTrue(Files.exists(projectDir.resolve("custom_playbooks/roles/app_role/tasks/main.yml")));
         assertFalse(Files.exists(workingDir.resolve("custom_playbooks/vars1")));
         assertFalse(Files.exists(workingDir.resolve("custom_playbooks/vars2")));
-        assertFalse(Files.exists(workingDir.resolve("custom_playbooks/roles")));
     }
 
     @Test
@@ -682,14 +670,10 @@ class AnsibleRunnerTest {
         Files.createDirectories(workingDir.resolve("custom_playbooks"));
         Files.createDirectories(workingDir.resolve("vars1"));
         Files.createDirectories(workingDir.resolve("vars2"));
-        Files.createDirectories(workingDir.resolve("custom_roles/db_role/tasks"));
-        Files.createDirectories(workingDir.resolve("custom_playbooks/custom_roles/app_role/tasks"));
         Files.writeString(workingDir.resolve("custom_playbooks/site.yml"), "- hosts: localhost\n  tasks: []\n");
         Files.writeString(workingDir.resolve("vars1/app.yml"), "app_name: payment-service\n");
         Files.writeString(workingDir.resolve("vars1/db.yml"), "db_port: 5432\n");
         Files.writeString(workingDir.resolve("vars2/region.yml"), "cloud_region: us-east-1\n");
-        Files.writeString(workingDir.resolve("custom_roles/db_role/tasks/main.yml"), "- ansible.builtin.debug:\n    msg: db_role\n");
-        Files.writeString(workingDir.resolve("custom_playbooks/custom_roles/app_role/tasks/main.yml"), "- ansible.builtin.debug:\n    msg: app_role\n");
 
         var task = AnsibleRunner.builder()
             .taskRunner(MockAnsibleTaskRunner.builder().build())
@@ -709,8 +693,6 @@ class AnsibleRunnerTest {
         assertTrue(Files.exists(projectDir.resolve("vars1/app.yml")));
         assertTrue(Files.exists(projectDir.resolve("vars1/db.yml")));
         assertTrue(Files.exists(projectDir.resolve("vars2/region.yml")));
-        assertTrue(Files.exists(projectDir.resolve("roles/db_role/tasks/main.yml")));
-        assertTrue(Files.exists(projectDir.resolve("roles/app_role/tasks/main.yml")));
     }
 
     @Test
