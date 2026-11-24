@@ -1409,7 +1409,7 @@ public class AnsibleCLI extends AbstractExecScript implements RunnableTask<Ansib
         URI pluginUri = runContext.storage().putFile(bundledResource(PLUGINS_KESTRA_LOGGER_PY), PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
 
-        URI nullPluginUri = runContext.storage().putFile(bundledResource(PLUGINS_NULL_PY), PLUGINS_NULL_PY);
+        var nullPluginUri = runContext.storage().putFile(bundledResource(PLUGINS_NULL_PY), PLUGINS_NULL_PY);
         map.put(PLUGINS_NULL_PY, nullPluginUri.toString());
 
         // Add the kestra module so playbooks can declare explicit outputs
@@ -1639,7 +1639,7 @@ public class AnsibleCLI extends AbstractExecScript implements RunnableTask<Ansib
                     "Ansible outputs file '{}' was not found after running an ansible-playbook command; its "
                         + "outputs/playbooks will be empty. This is expected if the playbook crashed before "
                         + "completing, or if a custom `ansibleConfig` does not enable the bundled callback "
-                        + "(it needs both `callback_plugins`, `callbacks_enabled = kestra_logger`, `stdout_callback = null`, and `library = ./library`).",
+                        + "(it needs both `callback_plugins`/`callbacks_enabled = kestra_logger` and `library = ./library`).",
                     outputsFile
                 );
             }

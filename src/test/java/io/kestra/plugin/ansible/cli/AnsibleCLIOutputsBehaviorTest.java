@@ -17,6 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.event.Level;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTaskException;
 import io.kestra.core.runners.DynamicTaskRunLog;
 import io.kestra.core.runners.RunContext;
@@ -56,7 +57,29 @@ class AnsibleCLIOutputsBehaviorTest {
         return AnsibleCLI.builder()
             .id(IdUtils.create())
             .type(AnsibleCLI.class.getName())
+            .commands(Property.ofValue(List.of("ansible-playbook --version")))
             .build();
+    }
+
+    // Regression test for issue #133: the bundled null callback must be staged
+    // and selected by the generated Ansible configuration.
+    @Test
+    void finalInputFiles_includesNullCallbackAndConfig(@TempDir Path tempDir) throws Exception {
+        var task = newTask();
+        var runContext = TestsUtils.mockRunContext(runContextFactory, task, Map.of());
+
+        var inputFiles = task.finalInputFiles(runContext, tempDir);
+
+        assertThat(inputFiles, hasKey("callback_plugins/null.py"));
+        assertThat(inputFiles, hasKey("ansible.cfg"));
+
+        var configUri = URI.create(inputFiles.get("ansible.cfg"));
+        String config;
+        try (var inputStream = runContext.storage().getFile(configUri)) {
+            config = new String(inputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+
+        assertThat(config, containsString("stdout_callback   = null"));
     }
 
     private static AnsibleCLI.AnsibleOutput.HostResult host(String host, String status, Map<String, Object> result) {
