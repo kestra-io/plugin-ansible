@@ -3,6 +3,7 @@ package io.kestra.plugin.ansible.cli;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -61,8 +62,6 @@ class AnsibleCLIOutputsBehaviorTest {
             .build();
     }
 
-    // Regression test for issue #133: the bundled null callback must be staged
-    // and selected by the generated Ansible configuration.
     @Test
     void finalInputFiles_includesNullCallbackAndConfig(@TempDir Path tempDir) throws Exception {
         var task = newTask();
@@ -76,7 +75,7 @@ class AnsibleCLIOutputsBehaviorTest {
         var configUri = URI.create(inputFiles.get("ansible.cfg"));
         String config;
         try (var inputStream = runContext.storage().getFile(configUri)) {
-            config = new String(inputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            config = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
         }
 
         assertThat(config, containsString("stdout_callback   = null"));
