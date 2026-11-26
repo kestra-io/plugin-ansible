@@ -1,7 +1,7 @@
 from ansible.plugins.callback import CallbackBase
 
 DOCUMENTATION = '''
-name: null
+name: 'null'
 type: stdout
 short_description: Suppress all stdout output
 description: Does not display any output on stdout.
