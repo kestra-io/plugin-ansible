@@ -260,7 +260,7 @@ import lombok.experimental.SuperBuilder;
                 """
         ),
         @Example(
-            title = "Supply a custom `ansible.cfg` while keeping the Kestra integration working. When you provide your own `ansibleConfig`, the generated one is skipped entirely, so you must keep the `callback_plugins`/`callbacks_enabled` lines for output capture and the `library = ./library` line for the bundled `kestra` module to resolve; add your own settings below them.",
+            title = "Supply a custom `ansible.cfg` while keeping the Kestra integration working. When you provide your own `ansibleConfig`, the generated one is skipped entirely, so you must keep the `callback_plugins`/`callbacks_enabled` lines for output capture, `stdout_callback = null` for safe stdout suppression, and the `library = ./library` line for the bundled `kestra` module to resolve; add your own settings below them.",
             full = true,
             code = """
                 id: ansible_custom_config
@@ -275,7 +275,7 @@ import lombok.experimental.SuperBuilder;
                       log_path          = {{ workingDir }}/log
                       callback_plugins  = ./callback_plugins
                       callbacks_enabled = kestra_logger
-                      stdout_callback   = ansible.builtin.null
+                      stdout_callback   = null
                       result_format     = json
                       pretty_results    = true
                       library           = ./library
@@ -342,6 +342,7 @@ public class AnsibleCLI extends AbstractExecScript implements RunnableTask<Ansib
     private static final String DEFAULT_IMAGE = "cytopia/ansible:latest-tools";
     public static final String ANSIBLE_CFG = "ansible.cfg";
     public static final String PLUGINS_KESTRA_LOGGER_PY = "callback_plugins/kestra_logger.py";
+    public static final String PLUGINS_NULL_PY = "callback_plugins/null.py";
     public static final String LIBRARY_KESTRA_PY = "library/kestra.py";
     public static final String OUTPUTS_MODE_ENV = "KESTRA_OUTPUTS_MODE";
     public static final String OUTPUTS_FILE_ENV = "KESTRA_OUTPUTS_FILE";
@@ -526,7 +527,7 @@ public class AnsibleCLI extends AbstractExecScript implements RunnableTask<Ansib
         log_path          = {{ workingDir }}/log
         callback_plugins  = ./callback_plugins
         callbacks_enabled = kestra_logger
-        stdout_callback   = ansible.builtin.null
+        stdout_callback   = null
         result_format     = json
         pretty_results    = true
         library           = ./library
@@ -538,7 +539,7 @@ public class AnsibleCLI extends AbstractExecScript implements RunnableTask<Ansib
             ALL (default) captures every per-host result of every playbook task in `playbooks`; where the full result is kept is controlled by `resultsStorage`.
             EXPLICIT captures only values declared in the playbook via the bundled `kestra` module, redacting per-host payloads to `{"changed": <bool>}` (plus `msg` on failure) while keeping task names, timings, and statuses.
             In both modes `vars.outputs` is the map of values declared through the `kestra` module, empty when the playbook declares none.
-            A custom `ansibleConfig` must keep `library = ./library` for the bundled module to resolve. In EXPLICIT mode it must also keep `stdout_callback = ansible.builtin.null`: another stdout callback renders per-host payloads itself (a failed host, or any host with `-v`), which the redaction cannot reach. In ALL mode the setting makes no difference to what is logged, since per-host results are logged from the captured outputs anyway.
+            A custom `ansibleConfig` must keep `library = ./library` for the bundled module to resolve. In EXPLICIT mode it must also keep `stdout_callback = null`: another stdout callback renders per-host payloads itself (a failed host, or any host with `-v`), which the redaction cannot reach. In ALL mode the setting makes no difference to what is logged, since per-host results are logged from the captured outputs anyway.
             """
     )
     @Builder.Default
@@ -1407,6 +1408,9 @@ public class AnsibleCLI extends AbstractExecScript implements RunnableTask<Ansib
         // Add python plugin
         URI pluginUri = runContext.storage().putFile(bundledResource(PLUGINS_KESTRA_LOGGER_PY), PLUGINS_KESTRA_LOGGER_PY);
         map.put(PLUGINS_KESTRA_LOGGER_PY, pluginUri.toString());
+
+        var nullPluginUri = runContext.storage().putFile(bundledResource(PLUGINS_NULL_PY), PLUGINS_NULL_PY);
+        map.put(PLUGINS_NULL_PY, nullPluginUri.toString());
 
         // Add the kestra module so playbooks can declare explicit outputs
         URI moduleUri = runContext.storage().putFile(bundledResource(LIBRARY_KESTRA_PY), LIBRARY_KESTRA_PY);
